@@ -1,1 +1,8 @@
-{}
+{
+  "enabled": {
+    "description": "是否启用插件功能",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后插件所有功能将不可用"
+  }
+}
