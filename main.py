@@ -23,7 +23,251 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
 from urllib.parse import urlencode
 
 
-# ==================== 数据模型定义 ====================
+# ==================== 记忆管理类（完全修复版） ====================
+class MemoryManager:
+    """持久化记忆管理器 - 基于配置文件存储"""
+    
+    def __init__(self, config: AstrBotConfig, context: Context = None):
+        self.config = config
+        self.context = context
+        self._lock = asyncio.Lock()
+        
+        # 确保 memories 键存在
+        if "memories" not in self.config:
+            self.config["memories"] = []
+    
+    def _get_timestamp(self) -> str:
+        """获取当前时间戳"""
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    def _save_config(self):
+        """
+        保存配置到文件 - 兼容不同AstrBot版本
+        注意：AstrBotConfig继承自dict，没有set方法，要用[]赋值
+        """
+        try:
+            # 方法1: 直接调用 config.save()（如果存在）
+            if hasattr(self.config, 'save') and callable(getattr(self.config, 'save')):
+                save_method = getattr(self.config, 'save')
+                if save_method is not None:
+                    save_method()
+                    return True
+        except Exception as e:
+            logger.debug(f"[MemoryManager] 方法1保存失败: {e}")
+        
+        try:
+            # 方法2: 通过 context 保存（v4+版本）
+            if self.context and hasattr(self.context, '_config'):
+                cfg = self.context._config
+                if hasattr(cfg, 'save') and callable(getattr(cfg, 'save')):
+                    getattr(cfg, 'save')()
+                    return True
+        except Exception as e:
+            logger.debug(f"[MemoryManager] 方法2保存失败: {e}")
+        
+        try:
+            # 方法3: 如果是文件配置，直接写入（备用方案）
+            config_path = None
+            if hasattr(self.config, 'config_path'):
+                config_path = self.config.config_path
+            elif hasattr(self.config, 'path'):
+                config_path = self.config.path
+            
+            if config_path and os.path.exists(os.path.dirname(config_path)):
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(dict(self.config), f, ensure_ascii=False, indent=2)
+                return True
+        except Exception as e:
+            logger.debug(f"[MemoryManager] 方法3保存失败: {e}")
+        
+        logger.warning("[MemoryManager] 配置已更新但可能需重启后生效（无法自动保存到文件）")
+        return False
+    
+    async def add_memory(self, user_id: str, content: str, tags: list = None, importance: int = 5) -> str:
+        """
+        添加新记忆
+        Args:
+            user_id: 用户QQ号
+            content: 记忆内容
+            tags: 标签列表
+            importance: 重要程度 1-10
+        Returns:
+            memory_id: 记忆唯一ID
+        """
+        async with self._lock:
+            try:
+                # 使用 dict.get() 获取现有记忆列表
+                memories = self.config.get("memories", [])
+                if not isinstance(memories, list):
+                    memories = []
+                
+                memory_id = str(uuid.uuid4())[:8]
+                new_memory = {
+                    "id": memory_id,
+                    "user_id": str(user_id),
+                    "content": content,
+                    "tags": tags or [],
+                    "importance": max(1, min(10, importance)),  # 限制1-10
+                    "created_at": self._get_timestamp(),
+                    "updated_at": self._get_timestamp()
+                }
+                
+                memories.append(new_memory)
+                
+                # 关键修复：使用 dict 的 [] 赋值，而不是 set()
+                self.config["memories"] = memories
+                
+                # 尝试保存配置
+                saved = self._save_config()
+                if not saved:
+                    logger.warning("[MemoryManager] 记忆已添加到内存，但文件保存失败，重启后可能丢失")
+                
+                logger.info(f"[MemoryManager] 添加记忆成功: {memory_id} 用户: {user_id}")
+                return memory_id
+                
+            except Exception as e:
+                logger.error(f"[MemoryManager] 添加记忆失败: {e}")
+                raise
+    
+    async def update_memory(self, memory_id: str, content: str = None, tags: list = None, importance: int = None) -> bool:
+        """
+        更新现有记忆
+        Args:
+            memory_id: 记忆ID
+            content: 新内容（可选）
+            tags: 新标签（可选）
+            importance: 新重要度（可选）
+        Returns:
+            bool: 是否成功
+        """
+        async with self._lock:
+            try:
+                memories = self.config.get("memories", [])
+                if not isinstance(memories, list):
+                    return False
+                
+                for memory in memories:
+                    if memory.get("id") == memory_id:
+                        if content is not None:
+                            memory["content"] = content
+                        if tags is not None:
+                            memory["tags"] = tags
+                        if importance is not None:
+                            memory["importance"] = max(1, min(10, importance))
+                        memory["updated_at"] = self._get_timestamp()
+                        
+                        # 关键修复：使用 [] 赋值
+                        self.config["memories"] = memories
+                        self._save_config()
+                        logger.info(f"[MemoryManager] 更新记忆成功: {memory_id}")
+                        return True
+                
+                return False
+                
+            except Exception as e:
+                logger.error(f"[MemoryManager] 更新记忆失败: {e}")
+                return False
+    
+    async def delete_memory(self, memory_id: str) -> bool:
+        """
+        删除记忆
+        Args:
+            memory_id: 记忆ID
+        Returns:
+            bool: 是否成功
+        """
+        async with self._lock:
+            try:
+                memories = self.config.get("memories", [])
+                if not isinstance(memories, list):
+                    return False
+                
+                original_len = len(memories)
+                memories = [m for m in memories if m.get("id") != memory_id]
+                
+                if len(memories) < original_len:
+                    # 关键修复：使用 [] 赋值
+                    self.config["memories"] = memories
+                    self._save_config()
+                    logger.info(f"[MemoryManager] 删除记忆成功: {memory_id}")
+                    return True
+                
+                return False
+                
+            except Exception as e:
+                logger.error(f"[MemoryManager] 删除记忆失败: {e}")
+                return False
+    
+    async def get_memories(self, user_id: str = None, keyword: str = None, 
+                          limit: int = 10, sort_by: str = "updated_at") -> List[dict]:
+        """
+        查询记忆
+        Args:
+            user_id: 筛选特定用户（可选）
+            keyword: 关键词搜索（可选，支持模糊匹配content和tags）
+            limit: 返回数量限制
+            sort_by: 排序字段（created_at/updated_at/importance）
+        Returns:
+            List[dict]: 记忆列表
+        """
+        try:
+            memories = self.config.get("memories", [])
+            if not isinstance(memories, list):
+                return []
+            
+            # 筛选用户
+            if user_id:
+                memories = [m for m in memories if m.get("user_id") == str(user_id)]
+            
+            # 关键词搜索
+            if keyword:
+                keyword_lower = keyword.lower()
+                filtered = []
+                for m in memories:
+                    content_match = keyword_lower in m.get("content", "").lower()
+                    tags_match = any(keyword_lower in tag.lower() for tag in m.get("tags", []))
+                    if content_match or tags_match:
+                        filtered.append(m)
+                memories = filtered
+            
+            # 排序
+            reverse = True if sort_by in ["updated_at", "created_at", "importance"] else False
+            if sort_by == "importance":
+                memories.sort(key=lambda x: x.get("importance", 0), reverse=reverse)
+            elif sort_by in ["updated_at", "created_at"]:
+                memories.sort(key=lambda x: x.get(sort_by, ""), reverse=reverse)
+            
+            return memories[:limit]
+            
+        except Exception as e:
+            logger.error(f"[MemoryManager] 查询记忆失败: {e}")
+            return []
+    
+    async def get_memory_by_id(self, memory_id: str) -> Optional[dict]:
+        """通过ID获取单条记忆"""
+        memories = await self.get_memories(limit=10000)  # 获取所有
+        for m in memories:
+            if m.get("id") == memory_id:
+                return m
+        return None
+    
+    async def get_latest_memories_for_inject(self, user_id: str, count: int = 5) -> List[dict]:
+        """
+        获取用于提示词注入的最新记忆
+        Args:
+            user_id: 用户ID
+            count: 数量
+        Returns:
+            List[dict]: 最新的N条记忆
+        """
+        return await self.get_memories(
+            user_id=user_id, 
+            limit=count, 
+            sort_by="updated_at"
+        )
+
+
+# ==================== 数据模型定义（原有代码保留） ====================
 @dataclass
 class ScheduledCommandModel:
     """定时指令数据模型"""
@@ -38,7 +282,7 @@ class ScheduledCommandModel:
 
 
 class DatabaseManager:
-    """数据库管理器"""
+    """数据库管理器（原有代码保留）"""
     
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
@@ -94,7 +338,6 @@ class DatabaseManager:
                     "session_info": session_info
                 }
                 
-                # 更新或添加
                 for i, cmd in enumerate(commands):
                     if isinstance(cmd, dict) and cmd.get('id') == task_id:
                         commands[i] = record
@@ -161,7 +404,7 @@ class DatabaseManager:
 
 
 class QzoneSession:
-    """QQ空间会话管理"""
+    """QQ空间会话管理（原有代码保留）"""
     
     def __init__(self):
         self.uin: str = ""
@@ -218,7 +461,7 @@ class QzoneSession:
 
 
 class QzoneAPI:
-    """QQ空间API封装"""
+    """QQ空间API封装（原有代码保留）"""
     
     def __init__(self, session: QzoneSession):
         self.session = session
@@ -537,6 +780,10 @@ class Main(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self.config = config or {}
+        self.context = context
+        
+        # 初始化记忆管理器 - 传入context以帮助保存配置
+        self.memory_manager = MemoryManager(self.config, context)
         
         try:
             self.data_dir = StarTools.get_data_dir("astrbot_plugin_qzone_tools")
@@ -567,7 +814,7 @@ class Main(Star):
         self.command_executor = ScheduledCommandExecutor(self)
         asyncio.create_task(self.command_executor.start_periodic_check())
         asyncio.create_task(self._delayed_restore())
-        logger.info(f"[QzoneTools] 插件已加载")
+        logger.info(f"[QzoneTools] 插件已加载，包含持久化记忆功能")
     
     async def _delayed_restore(self):
         await asyncio.sleep(10)
@@ -702,7 +949,219 @@ class Main(Star):
                 continue
         return None
 
-    @filter.llm_tool(name="search_contacts")
+    # ==================== 持久化记忆LLM工具 ====================
+    
+    @filter.llm_tool(name="add_memory")
+    async def add_memory(self, event: AstrMessageEvent, content: str, tags: str = "", importance: int = 5) -> str:
+        '''
+        添加重要记忆到存储中。当用户提到重要信息（如喜好、计划、重要日期、个人情况等）时，使用此工具保存。
+        
+        Args:
+            content (string): 记忆内容，简洁明了地描述事实
+            tags (string): 标签，用逗号分隔，如"喜好,计划,工作"，方便后续分类检索
+            importance (int): 重要程度1-10，默认为5。关键信息用8-10，一般信息用3-5，琐碎信息用1-2
+        '''
+        try:
+            user_id = event.get_sender_id()
+            tags_list = [t.strip() for t in tags.split(",")] if tags else []
+            
+            memory_id = await self.memory_manager.add_memory(
+                user_id=user_id,
+                content=content,
+                tags=tags_list,
+                importance=importance
+            )
+            
+            return f"✅ 记忆已保存\nID: {memory_id}\n内容: {content[:50]}{'...' if len(content) > 50 else ''}"
+            
+        except Exception as e:
+            logger.error(f"[MemoryTool] 添加记忆失败: {e}")
+            return f"❌ 保存失败: {str(e)}"
+
+    @filter.llm_tool(name="search_memories")
+    async def search_memories(self, event: AstrMessageEvent, keyword: str = "", user_specific: bool = True, limit: int = 10) -> str:
+        '''
+        搜索记忆。支持关键词搜索，可选是否限定当前用户。
+        
+        Args:
+            keyword (string): 搜索关键词，如"生日"、"喜好"、"计划"等，空字符串则返回最新记忆
+            user_specific (bool): 是否仅搜索当前用户的记忆，默认为是。设为false可搜索所有用户记忆（需管理员权限上下文）
+            limit (int): 返回数量，默认10条，最大20条
+        '''
+        try:
+            user_id = event.get_sender_id() if user_specific else None
+            limit = min(limit, 20)  # 限制最大20条
+            
+            memories = await self.memory_manager.get_memories(
+                user_id=user_id,
+                keyword=keyword if keyword else None,
+                limit=limit,
+                sort_by="updated_at"
+            )
+            
+            if not memories:
+                return "📭 未找到相关记忆"
+            
+            lines = [f"📚 找到 {len(memories)} 条记忆："]
+            for i, mem in enumerate(memories, 1):
+                tags_str = f"[{', '.join(mem.get('tags', []))}]" if mem.get('tags') else ""
+                importance = mem.get('importance', 5)
+                date = mem.get('updated_at', '未知时间')[:10]  # 只显示日期部分
+                content = mem.get('content', '')
+                # 截断过长内容
+                display_content = content[:40] + "..." if len(content) > 40 else content
+                lines.append(f"{i}. [{mem.get('id')}] {display_content} (重要度:{importance}) {tags_str} - {date}")
+            
+            return "\n".join(lines)
+            
+        except Exception as e:
+            logger.error(f"[MemoryTool] 搜索记忆失败: {e}")
+            return f"❌ 搜索失败: {str(e)}"
+
+    @filter.llm_tool(name="update_memory")
+    async def update_memory(self, event: AstrMessageEvent, memory_id: str, content: str = None, tags: str = None, importance: int = None) -> str:
+        '''
+        更新已有记忆的内容、标签或重要度。需要提供记忆ID（可从search_memories获取）。
+        
+        Args:
+            memory_id (string): 记忆ID（8位字符串）
+            content (string): 新内容（可选，不提供则不修改）
+            tags (string): 新标签，逗号分隔（可选，不提供则不修改，提供空字符串则清空标签）
+            importance (int): 新重要度1-10（可选，不提供则不修改）
+        '''
+        try:
+            # 先检查记忆是否存在
+            existing = await self.memory_manager.get_memory_by_id(memory_id)
+            if not existing:
+                return f"❌ 未找到记忆ID: {memory_id}"
+            
+            # 处理标签
+            tags_list = None
+            if tags is not None:
+                tags_list = [t.strip() for t in tags.split(",")] if tags else []
+            
+            success = await self.memory_manager.update_memory(
+                memory_id=memory_id,
+                content=content,
+                tags=tags_list,
+                importance=importance
+            )
+            
+            if success:
+                return f"✅ 记忆已更新\nID: {memory_id}\n原内容: {existing.get('content', '')[:30]}..."
+            else:
+                return f"❌ 更新失败"
+                
+        except Exception as e:
+            logger.error(f"[MemoryTool] 更新记忆失败: {e}")
+            return f"❌ 更新失败: {str(e)}"
+
+    @filter.llm_tool(name="delete_memory")
+    async def delete_memory(self, event: AstrMessageEvent, memory_id: str) -> str:
+        '''
+        删除指定记忆。谨慎使用，删除后无法恢复。
+        
+        Args:
+            memory_id (string): 要删除的记忆ID
+        '''
+        try:
+            # 先获取记忆信息用于确认
+            existing = await self.memory_manager.get_memory_by_id(memory_id)
+            if not existing:
+                return f"❌ 未找到记忆ID: {memory_id}"
+            
+            content_preview = existing.get('content', '')[:30] + "..."
+            success = await self.memory_manager.delete_memory(memory_id)
+            
+            if success:
+                return f"🗑️ 记忆已删除\nID: {memory_id}\n内容: {content_preview}"
+            else:
+                return f"❌ 删除失败"
+                
+        except Exception as e:
+            logger.error(f"[MemoryTool] 删除记忆失败: {e}")
+            return f"❌ 删除失败: {str(e)}"
+
+    @filter.llm_tool(name="get_memory_detail")
+    async def get_memory_detail(self, event: AstrMessageEvent, memory_id: str) -> str:
+        '''
+        获取单条记忆的完整详情。
+        
+        Args:
+            memory_id (string): 记忆ID
+        '''
+        try:
+            memory = await self.memory_manager.get_memory_by_id(memory_id)
+            if not memory:
+                return f"❌ 未找到记忆ID: {memory_id}"
+            
+            lines = [
+                f"📋 记忆详情",
+                f"ID: {memory.get('id')}",
+                f"用户: {memory.get('user_id')}",
+                f"内容: {memory.get('content')}",
+                f"标签: {', '.join(memory.get('tags', [])) if memory.get('tags') else '无'}",
+                f"重要度: {memory.get('importance', 5)}/10",
+                f"创建时间: {memory.get('created_at')}",
+                f"更新时间: {memory.get('updated_at')}"
+            ]
+            return "\n".join(lines)
+            
+        except Exception as e:
+            logger.error(f"[MemoryTool] 获取详情失败: {e}")
+            return f"❌ 获取详情失败: {str(e)}"
+
+    # ==================== 提示词注入 ====================
+    
+    @filter.on_llm_request()
+    async def on_llm_request(self, event: AstrMessageEvent, request: Any, *args, **kwargs) -> None:
+        '''
+        在LLM请求前注入当前QQ状态信息和用户记忆。
+        '''
+        try:
+            # 注入QQ状态（原有功能）
+            status_desc = self.status_manager.get_current_status_desc()
+            inject_parts = [f"[系统状态] {status_desc}"]
+            
+            # 注入用户记忆（新功能）
+            if self.config.get("enabled", True) and event.get_platform_name() in ["aiocqhttp", "qq"]:
+                # 检查是否启用了记忆注入
+                if self.config.get("memory_inject_enabled", True):
+                    user_id = event.get_sender_id()
+                    max_memories = self.config.get("max_inject_memories", 5)
+                    
+                    # 获取该用户最新的N条记忆
+                    memories = await self.memory_manager.get_latest_memories_for_inject(
+                        user_id=user_id, 
+                        count=max_memories
+                    )
+                    
+                    if memories:
+                        memory_lines = [f"[用户历史记忆] 该用户({user_id})的重要信息："]
+                        for i, mem in enumerate(memories, 1):
+                            tags = f"[{', '.join(mem.get('tags', []))}]" if mem.get('tags') else ""
+                            content = mem.get('content', '')
+                            # 清理内容中的换行，避免破坏prompt结构
+                            content_clean = content.replace('\n', ' ').replace('\r', '')
+                            memory_lines.append(f"{i}. {content_clean} {tags}")
+                        
+                        memory_text = "\n".join(memory_lines)
+                        inject_parts.append(memory_text)
+                        logger.info(f"[MemoryInject] 为用户 {user_id} 注入 {len(memories)} 条记忆")
+            
+            # 组装注入文本
+            if inject_parts:
+                inject_text = "\n".join(inject_parts)
+                if hasattr(request, 'system_prompt') and request.system_prompt:
+                    request.system_prompt += f"\n{inject_text}\n"
+                elif hasattr(request, 'system_prompt'):
+                    request.system_prompt = inject_text + "\n"
+                    
+        except Exception as e:
+            logger.error(f"[MemoryInject] 注入记忆失败: {e}")
+
+    # ==================== 原有其他方法保持不变 ====================
+    
     async def search_contacts(self, event: AstrMessageEvent, keyword: str, search_type: str = "all") -> str:
         '''
         搜索联系人（好友或群聊），支持通过昵称或QQ号/群号模糊匹配。
@@ -1000,7 +1459,6 @@ class Main(Star):
             )
             
             if success:
-                # 如果执行时间在未来，立即调度
                 if parsed_time > datetime.now():
                     await self.command_executor.schedule_command(task_id, parsed_time, command_type, params_dict, session_info)
                 
@@ -1071,21 +1529,17 @@ class Main(Star):
         使用方法：引用要撤回的消息，然后调用此工具。
         '''
         try:
-            # 检查是否为群聊
             if event.is_private_chat():
                 return "❌ 此功能仅支持群聊中使用"
             
-            # 获取消息链
             chain = event.get_messages()
             if not chain or len(chain) == 0:
                 return "❌ 请引用要撤回的消息"
             
-            # 检查第一条消息是否为引用
             first_seg = chain[0]
             if not isinstance(first_seg, Reply):
                 return "❌ 请引用要撤回的消息（不支持关键词搜索撤回）"
             
-            # 获取引用的消息ID
             msg_id = str(first_seg.id)
             if not msg_id or not msg_id.isdigit():
                 return "❌ 引用的消息ID无效"
@@ -1098,7 +1552,6 @@ class Main(Star):
             
             logger.info(f"[QzoneTools] 尝试撤回引用消息: ID={msg_id_int}, 群={group_id}")
             
-            # 执行撤回（群聊需要group_id参数）
             try:
                 result = await event.bot.delete_msg(message_id=msg_id_int, group_id=int(group_id))
                 logger.info(f"[QzoneTools] 撤回成功: {result}")
@@ -1107,7 +1560,6 @@ class Main(Star):
                 error_msg = str(e)
                 logger.error(f"[QzoneTools] 撤回失败: {error_msg}")
                 
-                # 如果带group_id失败，尝试不带（某些napcat版本）
                 if "decode failed" in error_msg or "GROUP_ID_INVALID" in error_msg:
                     try:
                         result = await event.bot.delete_msg(message_id=msg_id_int)
@@ -1115,7 +1567,6 @@ class Main(Star):
                     except Exception as e2:
                         pass
                 
-                # 错误分类处理
                 if "decode failed" in error_msg:
                     return (f"❌ 撤回失败：消息ID解析失败\n"
                            f"• 可能原因：\n"
@@ -1134,15 +1585,3 @@ class Main(Star):
         except Exception as e:
             logger.error(f"[QzoneTools] 撤回异常: {e}")
             return f"❌ 系统错误：{str(e)}"
-
-    @filter.on_llm_request()
-    async def on_llm_request(self, event: AstrMessageEvent, request: Any, *args, **kwargs) -> None:
-        '''
-        在LLM请求前注入当前QQ状态信息。
-        '''
-        try:
-            status_desc = self.status_manager.get_current_status_desc()
-            if hasattr(request, 'system_prompt') and request.system_prompt:
-                request.system_prompt += f"\n[系统状态] {status_desc}\n"
-        except Exception as e:
-            logger.error(f"[QzoneTools] 注入状态失败: {e}")
