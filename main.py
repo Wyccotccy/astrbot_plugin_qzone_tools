@@ -1136,7 +1136,7 @@ class Main(Star):
             return f"❌ 系统错误：{str(e)}"
 
     @filter.on_llm_request()
-    async def on_llm_request(self, event: AstrMessageEvent, request: Any) -> None:
+    async def on_llm_request(self, event: AstrMessageEvent, request: Any, *args, **kwargs) -> None:
         '''
         在LLM请求前注入当前QQ状态信息。
         '''
