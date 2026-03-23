@@ -4,5 +4,65 @@
     "type": "bool",
     "default": true,
     "hint": "关闭后插件所有功能将不可用"
+  },
+  "memories": {
+    "description": "持久化记忆存储列表（用户可通过WebUI查看和编辑）",
+    "type": "list",
+    "default": [],
+    "items": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "记忆ID",
+          "type": "string",
+          "default": ""
+        },
+        "user_id": {
+          "description": "用户QQ号",
+          "type": "string",
+          "default": ""
+        },
+        "content": {
+          "description": "记忆内容",
+          "type": "string",
+          "default": ""
+        },
+        "tags": {
+          "description": "标签列表",
+          "type": "list",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "importance": {
+          "description": "重要程度1-10",
+          "type": "int",
+          "default": 5
+        },
+        "created_at": {
+          "description": "创建时间",
+          "type": "string",
+          "default": ""
+        },
+        "updated_at": {
+          "description": "更新时间",
+          "type": "string",
+          "default": ""
+        }
+      }
+    }
+  },
+  "max_inject_memories": {
+    "description": "聊天时自动注入上下文的最大记忆数量",
+    "type": "int",
+    "default": 5,
+    "hint": "建议3-5条，过多会占用LLM上下文长度"
+  },
+  "memory_inject_enabled": {
+    "description": "是否启用记忆自动注入",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，每次对话会自动注入该用户最新的记忆到系统提示词"
   }
 }
