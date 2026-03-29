@@ -228,6 +228,10 @@ git clone https://github.com/Wyccotccy/astrbot_plugin_qzone_tools.git
 
 ## 更新日志
 
+### 小幅度微调：
+- **新增**了所有功能的管理员指令操作，不再仅仅支持LLM自主操作了
+- **新增**了QQ邮箱发送功能，需要再配置文件修改配置
+
 ### v1.1.0 (当前版本)
 - ✨ **新增**：QQ状态管理功能（支持在线/Q我吧/离开/忙碌/隐身/听歌中/睡觉中/学习中）
 - ✨ **新增**：定时指令功能（create_scheduled_command），支持发空间、改状态、发消息、LLM提醒
