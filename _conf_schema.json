@@ -12,44 +12,13 @@
     "items": {
       "type": "object",
       "properties": {
-        "id": {
-          "description": "记忆ID",
-          "type": "string",
-          "default": ""
-        },
-        "user_id": {
-          "description": "用户QQ号",
-          "type": "string",
-          "default": ""
-        },
-        "content": {
-          "description": "记忆内容",
-          "type": "string",
-          "default": ""
-        },
-        "tags": {
-          "description": "标签列表",
-          "type": "list",
-          "items": {
-            "type": "string"
-          },
-          "default": []
-        },
-        "importance": {
-          "description": "重要程度1-10",
-          "type": "int",
-          "default": 5
-        },
-        "created_at": {
-          "description": "创建时间",
-          "type": "string",
-          "default": ""
-        },
-        "updated_at": {
-          "description": "更新时间",
-          "type": "string",
-          "default": ""
-        }
+        "id": { "type": "string", "default": "" },
+        "user_id": { "type": "string", "default": "" },
+        "content": { "type": "string", "default": "" },
+        "tags": { "type": "list", "items": { "type": "string" }, "default": [] },
+        "importance": { "type": "int", "default": 5 },
+        "created_at": { "type": "string", "default": "" },
+        "updated_at": { "type": "string", "default": "" }
       }
     }
   },
@@ -64,5 +33,28 @@
     "type": "bool",
     "default": true,
     "hint": "开启后，每次对话会自动注入该用户最新的记忆到系统提示词"
+  },
+  "email_sender": {
+    "description": "发件人QQ邮箱地址",
+    "type": "string",
+    "default": "",
+    "hint": "例如：123456789@qq.com"
+  },
+  "email_authorization_code": {
+    "description": "QQ邮箱授权码（不是登录密码）",
+    "type": "string",
+    "default": "",
+    "hint": "请在QQ邮箱设置-账户中获取16位授权码",
+    "obvious_hint": true
+  },
+  "email_smtp_server": {
+    "description": "SMTP服务器（一般无需修改）",
+    "type": "string",
+    "default": "smtp.qq.com"
+  },
+  "email_smtp_port": {
+    "description": "SMTP端口（SSL）",
+    "type": "int",
+    "default": 465
   }
 }
