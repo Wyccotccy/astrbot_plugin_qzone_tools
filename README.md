@@ -249,9 +249,16 @@ LLM：调用 send_email(recipient="admin@example.com", subject="HTML邮件", bod
 - GitHub：https://github.com/Wyccotccy/astrbot_plugin_qzone_tools
 - 问题反馈：请提交 GitHub Issue
 
+## 温馨提示：
+***更多更新内容，请前往更新日志查看，我他妈懒得写README了哈哈哈***
+
 ## 更新日志
 
-### v1.3.0 （当前版本）
+### v1.4.0  (当前版本)
+- ✨ 新增了超级多群管功能
+- ㊙️ 修复已知问题
+
+### v1.3.0 
 - ✨ 新增：支持了群成员关系获取/注入功能
 - 🤫 修复了已知问题
 
