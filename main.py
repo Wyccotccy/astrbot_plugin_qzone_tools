@@ -25,53 +25,52 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 
 
-# ==================== 记忆管理类 ====================
+# ==================== 独立文件存储的记忆管理类 ====================
 class MemoryManager:
-    def __init__(self, config: AstrBotConfig, context: Context = None):
-        self.config = config
-        self.context = context
+    def __init__(self, data_dir: str, max_memories_per_user: int = 100):
+        self.data_dir = data_dir
+        self.max_memories_per_user = max_memories_per_user
         self._lock = asyncio.Lock()
-        if "memories" not in self.config:
-            self.config["memories"] = []
+        self._file_path = os.path.join(data_dir, "memories.json")
+        self._ensure_file()
+
+    def _ensure_file(self):
+        os.makedirs(self.data_dir, exist_ok=True)
+        if not os.path.exists(self._file_path):
+            self._save_data({"memories": []})
+
+    def _load_data(self) -> dict:
+        try:
+            with open(self._file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {"memories": []}
+
+    def _save_data(self, data: dict):
+        with open(self._file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
     def _get_timestamp(self) -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    def _save_config(self):
-        try:
-            if hasattr(self.config, 'save') and callable(getattr(self.config, 'save')):
-                getattr(self.config, 'save')()
-                return True
-        except Exception as e:
-            logger.debug(f"[MemoryManager] 方法1保存失败: {e}")
-        try:
-            if self.context and hasattr(self.context, '_config'):
-                cfg = self.context._config
-                if hasattr(cfg, 'save') and callable(getattr(cfg, 'save')):
-                    getattr(cfg, 'save')()
-                    return True
-        except Exception as e:
-            logger.debug(f"[MemoryManager] 方法2保存失败: {e}")
-        try:
-            config_path = None
-            if hasattr(self.config, 'config_path'):
-                config_path = self.config.config_path
-            elif hasattr(self.config, 'path'):
-                config_path = self.config.path
-            if config_path and os.path.exists(os.path.dirname(config_path)):
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    json.dump(dict(self.config), f, ensure_ascii=False, indent=2)
-                return True
-        except Exception as e:
-            logger.debug(f"[MemoryManager] 方法3保存失败: {e}")
-        logger.warning("[MemoryManager] 配置已更新但可能需重启后生效")
-        return False
+    async def _cleanup_if_needed(self, user_id: str):
+        """如果用户记忆数量超过上限，删除最旧的记忆（按 updated_at）"""
+        if self.max_memories_per_user <= 0:
+            return
+        data = self._load_data()
+        memories = data.get("memories", [])
+        user_memories = [m for m in memories if m.get("user_id") == str(user_id)]
+        if len(user_memories) > self.max_memories_per_user:
+            user_memories.sort(key=lambda x: x.get("updated_at", ""))
+            to_delete_ids = [m["id"] for m in user_memories[:len(user_memories) - self.max_memories_per_user]]
+            memories = [m for m in memories if m.get("id") not in to_delete_ids]
+            self._save_data({"memories": memories})
+            logger.info(f"[MemoryManager] 已清理用户 {user_id} 的 {len(to_delete_ids)} 条旧记忆")
 
     async def add_memory(self, user_id: str, content: str, tags: list = None, importance: int = 5) -> str:
         async with self._lock:
-            memories = self.config.get("memories", [])
-            if not isinstance(memories, list):
-                memories = []
+            data = self._load_data()
+            memories = data.get("memories", [])
             memory_id = str(uuid.uuid4())[:8]
             new_memory = {
                 "id": memory_id,
@@ -83,14 +82,15 @@ class MemoryManager:
                 "updated_at": self._get_timestamp()
             }
             memories.append(new_memory)
-            self.config["memories"] = memories
-            self._save_config()
+            self._save_data({"memories": memories})
+            await self._cleanup_if_needed(user_id)
             logger.info(f"[MemoryManager] 添加记忆成功: {memory_id} 用户: {user_id}")
             return memory_id
 
     async def update_memory(self, memory_id: str, content: str = None, tags: list = None, importance: int = None) -> bool:
         async with self._lock:
-            memories = self.config.get("memories", [])
+            data = self._load_data()
+            memories = data.get("memories", [])
             for memory in memories:
                 if memory.get("id") == memory_id:
                     if content is not None:
@@ -100,27 +100,25 @@ class MemoryManager:
                     if importance is not None:
                         memory["importance"] = max(1, min(10, importance))
                     memory["updated_at"] = self._get_timestamp()
-                    self.config["memories"] = memories
-                    self._save_config()
+                    self._save_data({"memories": memories})
                     return True
             return False
 
     async def delete_memory(self, memory_id: str) -> bool:
         async with self._lock:
-            memories = self.config.get("memories", [])
+            data = self._load_data()
+            memories = data.get("memories", [])
             original_len = len(memories)
             memories = [m for m in memories if m.get("id") != memory_id]
             if len(memories) < original_len:
-                self.config["memories"] = memories
-                self._save_config()
+                self._save_data({"memories": memories})
                 return True
             return False
 
     async def get_memories(self, user_id: str = None, keyword: str = None,
                           limit: int = 10, sort_by: str = "updated_at") -> List[dict]:
-        memories = self.config.get("memories", [])
-        if not isinstance(memories, list):
-            return []
+        data = self._load_data()
+        memories = data.get("memories", [])
         if user_id:
             memories = [m for m in memories if m.get("user_id") == str(user_id)]
         if keyword:
@@ -150,7 +148,7 @@ class MemoryManager:
         return await self.get_memories(limit=10000)
 
 
-# ==================== 数据库管理 ====================
+# ==================== 数据库管理（定时任务） ====================
 class DatabaseManager:
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
@@ -273,6 +271,15 @@ class QzoneSession:
         self.client = None
         self.initialized = False
 
+    def _cookie_to_dict(self, cookie_str: str) -> dict:
+        cookie_dict = {}
+        for item in cookie_str.split(';'):
+            item = item.strip()
+            if '=' in item:
+                key, value = item.split('=', 1)
+                cookie_dict[key] = value
+        return cookie_dict
+
     def _calc_gtk(self, skey: str) -> str:
         hash_val = 5381
         for char in skey:
@@ -297,9 +304,8 @@ class QzoneSession:
                     return False
             if not self.cookie:
                 return False
-            p_skey_match = re.search(r'p_skey=([^;]+)', self.cookie)
-            skey_match = re.search(r'skey=([^;]+)', self.cookie)
-            key = p_skey_match.group(1) if p_skey_match else (skey_match.group(1) if skey_match else "")
+            cookie_dict = self._cookie_to_dict(self.cookie)
+            key = cookie_dict.get('p_skey') or cookie_dict.get('skey')
             if not key:
                 return False
             self.gtk = self._calc_gtk(key)
@@ -525,6 +531,7 @@ class ScheduledCommandExecutor:
         self.db_manager = plugin.db_manager
         self.running_tasks: Dict[str, asyncio.Task] = {}
         self._stop_check = False
+        self._lock = asyncio.Lock()
 
     async def start_periodic_check(self):
         self._stop_check = False
@@ -540,14 +547,7 @@ class ScheduledCommandExecutor:
         self._stop_check = True
 
     async def schedule_command(self, task_id: str, execute_time: datetime, command_type: str, params: dict, session_info: dict = None):
-        now = datetime.now()
-        delay_seconds = (execute_time - now).total_seconds()
-        if delay_seconds > 0:
-            async def delayed_execution():
-                await asyncio.sleep(delay_seconds)
-                await self._execute_command(task_id, command_type, params, session_info)
-            task = asyncio.create_task(delayed_execution())
-            self.running_tasks[task_id] = task
+        pass  # 统一由周期扫描执行
 
     def cancel_task(self, task_id: str):
         if task_id in self.running_tasks:
@@ -560,16 +560,20 @@ class ScheduledCommandExecutor:
         pending = await self.db_manager.get_pending_commands()
         now = datetime.now()
         for cmd in pending:
+            task_id = cmd.get('id')
+            if task_id in self.running_tasks:
+                continue
             try:
                 execute_time_str = cmd.get('execute_time', '')
                 if not execute_time_str:
                     continue
                 execute_time = datetime.fromisoformat(execute_time_str)
                 if (now - execute_time).total_seconds() >= 0:
+                    await self.db_manager.mark_command_executed(task_id, 2)
                     task = asyncio.create_task(
                         self._execute_command(cmd['id'], cmd['command_type'], json.loads(cmd['params']), cmd.get('session_info'))
                     )
-                    self.running_tasks[cmd['id']] = task
+                    self.running_tasks[task_id] = task
             except Exception as e:
                 logger.error(f"[ScheduledCommandExecutor] 处理指令失败: {e}")
 
@@ -662,14 +666,15 @@ class Main(Star):
         self.config = config or {}
         self.context = context
 
-        self.memory_manager = MemoryManager(self.config, context)
-        self.email_sender = EmailSender(self.config)
-
         try:
             self.data_dir = StarTools.get_data_dir("astrbot_plugin_qzone_tools")
         except RuntimeError:
             self.data_dir = os.path.join(get_astrbot_data_path(), "plugin_data", "astrbot_plugin_qzone_tools")
         os.makedirs(self.data_dir, exist_ok=True)
+
+        max_memories_per_user = self.config.get("max_memories_per_user", 100)
+        self.memory_manager = MemoryManager(self.data_dir, max_memories_per_user)
+        self.email_sender = EmailSender(self.config)
 
         self.db_manager = DatabaseManager(self.data_dir)
         self.session = QzoneSession()
@@ -681,6 +686,7 @@ class Main(Star):
         self._friends_cache: List[dict] = []
         self._cache_time = 0
         self._cache_expire = 300
+        self._cache_lock = asyncio.Lock()
         self.status_manager = QQStatusManager()
         self.command_executor: Optional[ScheduledCommandExecutor] = None
         self._restored = False
@@ -809,23 +815,24 @@ class Main(Star):
         return await self.session.initialize(client)
 
     async def _update_contacts_cache(self, client):
-        now = time.time()
-        if now - self._cache_time < self._cache_expire and (self._groups_cache or self._friends_cache):
-            return
-        try:
+        async with self._cache_lock:
+            now = time.time()
+            if now - self._cache_time < self._cache_expire and (self._groups_cache or self._friends_cache):
+                return
             try:
-                groups_result = await client.call_action('get_group_list')
-                self._groups_cache = groups_result if isinstance(groups_result, list) else groups_result.get('data', [])
-            except:
-                self._groups_cache = []
-            try:
-                friends_result = await client.call_action('get_friend_list')
-                self._friends_cache = friends_result if isinstance(friends_result, list) else friends_result.get('data', [])
-            except:
-                self._friends_cache = []
-            self._cache_time = now
-        except Exception as e:
-            logger.error(f"[Main] 更新缓存失败: {e}")
+                try:
+                    groups_result = await client.call_action('get_group_list')
+                    self._groups_cache = groups_result if isinstance(groups_result, list) else groups_result.get('data', [])
+                except:
+                    self._groups_cache = []
+                try:
+                    friends_result = await client.call_action('get_friend_list')
+                    self._friends_cache = friends_result if isinstance(friends_result, list) else friends_result.get('data', [])
+                except:
+                    self._friends_cache = []
+                self._cache_time = now
+            except Exception as e:
+                logger.error(f"[Main] 更新缓存失败: {e}")
 
     def _validate_target_id(self, target_id: str) -> Tuple[bool, str]:
         target_id = str(target_id).strip()
@@ -883,6 +890,25 @@ class Main(Star):
                 del self.scheduled_tasks[task_id]
             if task_id in self.running_tasks:
                 del self.running_tasks[task_id]
+
+    # ==================== 辅助函数：获取群成员角色 ====================
+    async def _get_group_member_role(self, group_id: str, user_id: str) -> str:
+        """返回：owner, admin, member 或 unknown"""
+        client = await self._get_client()
+        if not client:
+            return "unknown"
+        try:
+            info = await client.call_action('get_group_member_info', group_id=int(group_id), user_id=int(user_id), no_cache=False)
+            role = info.get('role', 'member')
+            if role == 'owner':
+                return '群主'
+            elif role == 'admin':
+                return '管理员'
+            else:
+                return '成员'
+        except Exception as e:
+            logger.debug(f"[Main] 获取群成员角色失败: {e}")
+            return "unknown"
 
     # ==================== LLM 工具函数 ====================
 
@@ -1128,10 +1154,9 @@ class Main(Star):
                 await client.call_action('friend_poke', user_id=int(target_qq))
             else:
                 group_id = event.get_group_id()
-                if group_id:
-                    await client.call_action('group_poke', group_id=int(group_id), user_id=int(target_qq))
-                else:
+                if not group_id:
                     return "错误：无法获取群号"
+                await client.call_action('group_poke', group_id=int(group_id), user_id=int(target_qq))
             return f"✅ 已戳一戳 {target_qq}"
         except Exception as e:
             return f"发送失败: {str(e)}"
@@ -1186,6 +1211,8 @@ class Main(Star):
         parsed_time = self._parse_time(execute_time)
         if not parsed_time:
             return "错误：无法理解时间格式"
+        if parsed_time <= datetime.now():
+            return "❌ 执行时间不能早于当前时间"
         try:
             params_dict = json.loads(params)
         except json.JSONDecodeError:
@@ -1203,8 +1230,7 @@ class Main(Star):
             }
         task_id = str(uuid.uuid4())[:8]
         success = await self.db_manager.save_scheduled_command(task_id, command_type, params_dict, parsed_time, recurrence, session_info)
-        if success and parsed_time > datetime.now():
-            await self.command_executor.schedule_command(task_id, parsed_time, command_type, params_dict, session_info)
+        # 不再单独创建延迟任务，由周期扫描统一处理
         return f"✅ 定时指令已创建\n任务ID: {task_id}\n此指令持久化存储，重启后仍会执行。" if success else "❌ 保存失败"
 
     @filter.llm_tool(name="list_scheduled_commands")
@@ -1290,18 +1316,38 @@ class Main(Star):
         result = await self.email_sender.send_email(to, subject, content, nickname)
         return result["msg"]
 
-    # ==================== 联系人搜索与列表工具 ====================
+    # ==================== 新增：查询群成员身份工具 ====================
+    @filter.llm_tool(name="get_user_group_role")
+    async def get_user_group_role(self, event: AstrMessageEvent, group_id: str, user_id: str) -> str:
+        """查询指定用户在指定QQ群中的身份（群主/管理员/成员）。
+        
+        Args:
+            group_id(string): 群号（必填）
+            user_id(string): 用户QQ号（必填）
+        """
+        if not group_id or not group_id.strip():
+            return "❌ 参数缺失：请提供群号。\n用法示例：查询群成员身份 123456 789012"
+        if not user_id or not user_id.strip():
+            return "❌ 参数缺失：请提供用户QQ号。\n用法示例：查询群成员身份 123456 789012"
+        if not group_id.isdigit() or not user_id.isdigit():
+            return "❌ 群号和用户QQ号必须为纯数字"
+        role = await self._get_group_member_role(group_id, user_id)
+        if role == "unknown":
+            return f"无法查询用户 {user_id} 在群 {group_id} 的身份，请确认机器人是否在群内且有权限。"
+        return f"用户 {user_id} 在群 {group_id} 中的身份是：{role}"
+
+    # ==================== 联系人搜索与列表工具（增强版） ====================
 
     @filter.llm_tool(name="search_contacts")
     async def search_contacts(self, event: AstrMessageEvent, keyword: str = "", search_type: str = "all") -> str:
-        """搜索QQ好友或群聊，支持按QQ号、昵称、群名模糊匹配。
+        """搜索QQ好友或群聊，支持按QQ号、昵称、群名模糊匹配。search_type可选：all(全部)/friend(好友)/group(群聊)
         
         Args:
             keyword(string): 搜索关键词（必填）
-            search_type(string): 搜索范围，可选值：all(全部)/friend(好友)/group(群聊)
+            search_type(string): 搜索范围，可选值：all/friend/group
         """
         if not keyword or keyword.strip() == "":
-            return "❌ 参数缺失：请提供搜索关键词（可以是QQ号、昵称或群名的一部分）。\n用法示例：搜索联系人 张三"
+            return "❌ 参数缺失：请提供搜索关键词（可以是QQ号、昵称或群名的一部分）。\n用法示例：搜索联系人 张三 all"
         if not self.config.get("search_enabled", True):
             return "联系人搜索功能已禁用"
         client = await self._get_client(event)
@@ -1346,7 +1392,7 @@ class Main(Star):
 
     @filter.llm_tool(name="list_contacts")
     async def list_contacts(self, event: AstrMessageEvent, contact_type: str = "all", limit: int = 20) -> str:
-        """获取好友或群聊列表（不进行模糊搜索，直接列出）。
+        """获取好友或群聊列表（不进行模糊搜索，直接列出）。contact_type可选：all/friend/group
         
         Args:
             contact_type(string): 类型，可选值：all/friend/group
@@ -1385,6 +1431,60 @@ class Main(Star):
         return output
 
     # ==================== 管理员指令 ====================
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("tool_all_help")
+    async def admin_all_help(self, event: AstrMessageEvent):
+        """总帮助入口，展示所有管理员命令及用法"""
+        help_text = """【AstrBot 插件管理命令总览】
+
+/tool_memory - 记忆管理
+  子命令: list [user_id], add <内容> [标签] [重要度], delete <ID>, update <ID> [新内容] [新标签] [重要度], get <ID>
+
+/tool_send_message <目标ID> <消息内容> [chat_type]
+  立即发送消息（chat_type: group/private/auto）
+
+/tool_schedule <目标ID> <消息内容> <时间> [chat_type]
+  简单定时消息（重启后丢失）
+
+/tool_publish_qzone <说说内容>
+  发布QQ空间说说
+
+/tool_status <状态> <持续分钟> [延迟分钟]
+  设置QQ在线状态（状态: online/qme/away/busy/dnd/invisible/listening/sleeping/studying）
+
+/tool_status_get
+  获取当前QQ在线状态
+
+/tool_poke <目标QQ> [chat_type]
+  发送戳一戳
+
+/tool_recall
+  引用消息撤回（仅QQ群聊）
+
+/tool_email <收件人> <主题> <内容> [昵称]
+  发送QQ邮箱邮件
+
+/tool_scheduled_list [include_executed]
+  列出定时指令（持久化）
+
+/tool_scheduled_cancel <任务ID>
+  取消定时指令
+
+/tool_scheduled_delete <任务ID>
+  彻底删除定时指令
+
+/tool_search <关键词> [类型]  类型: all/friend/group
+  搜索联系人
+
+/tool_list [类型] [limit]  类型: all/friend/group
+  列出联系人
+
+/tool_all_help
+  显示本帮助
+"""
+        await event.send(MessageChain().message(help_text))
+
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_memory")
     async def admin_memory(self, event: AstrMessageEvent):
@@ -1609,16 +1709,16 @@ class Main(Star):
         result = await self.list_contacts(event, contact_type, limit)
         await event.send(MessageChain().message(result))
 
-    # ==================== 提示词注入（仅状态和记忆） ====================
+    # ==================== 提示词注入（状态 + 记忆 + 群角色） ====================
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, request: Any, *args, **kwargs) -> None:
         try:
             inject_parts = []
-            # 状态注入
+            # 1. 状态注入
             status_desc = self.status_manager.get_current_status_desc()
             inject_parts.append(f"[系统状态] {status_desc}")
-            
-            # 记忆注入
+
+            # 2. 记忆注入
             if self.config.get("enabled", True) and event.get_platform_name() in ["aiocqhttp", "qq"] and self.config.get("memory_inject_enabled", True):
                 user_id = event.get_sender_id()
                 max_memories = self.config.get("max_inject_memories", 5)
@@ -1630,7 +1730,17 @@ class Main(Star):
                         content = m.get('content', '').replace('\n', ' ').replace('\r', '')
                         memory_lines.append(f"{i}. {content} {tags}")
                     inject_parts.append("\n".join(memory_lines))
-            
+
+            # 3. 群角色注入（仅在群聊且开关开启时）
+            if self.config.get("enabled", True) and event.get_platform_name() in ["aiocqhttp", "qq"] and self.config.get("inject_group_role_enabled", True):
+                if not event.is_private_chat():
+                    group_id = event.get_group_id()
+                    if group_id:
+                        user_id = event.get_sender_id()
+                        role = await self._get_group_member_role(group_id, user_id)
+                        if role != "unknown":
+                            inject_parts.append(f"[当前群身份] 用户 {user_id} 在本群({group_id})的身份是：{role}")
+
             if inject_parts:
                 inject_text = "\n".join(inject_parts)
                 if hasattr(request, 'system_prompt') and request.system_prompt:
