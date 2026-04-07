@@ -22,6 +22,12 @@
       }
     }
   },
+  "max_memories_per_user": {
+    "description": "每个用户最大记忆数量（超出自动删除最旧的）",
+    "type": "int",
+    "default": 100,
+    "hint": "建议50-200，设为0表示不限制"
+  },
   "max_inject_memories": {
     "description": "聊天时自动注入上下文的最大记忆数量",
     "type": "int",
@@ -33,6 +39,12 @@
     "type": "bool",
     "default": true,
     "hint": "开启后，每次对话会自动注入该用户最新的记忆到系统提示词"
+  },
+  "inject_group_role_enabled": {
+    "description": "是否在群聊中自动注入用户身份（成员/管理员/群主）到系统提示词",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，LLM可以知道当前用户在群内的身份"
   },
   "email_sender": {
     "description": "发件人QQ邮箱地址",
