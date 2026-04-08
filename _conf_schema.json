@@ -99,7 +99,7 @@
     "default": true
   },
   "ai_voice_default_character": {
-    "description": "AI语音默认角色ID（例如 luoli、yujie）。留空则每次需手动指定或自动选择第一个可用角色",
+    "description": "AI语音默认角色ID。留空则每次需手动指定或自动选择第一个可用角色。不知道ID的自己用ai_characters指令查询",
     "type": "string",
     "default": "",
     "hint": "可通过指令 /ai_characters 查看可用角色ID"
