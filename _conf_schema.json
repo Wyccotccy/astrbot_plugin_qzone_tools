@@ -97,5 +97,17 @@
     "description": "是否启用联系人搜索功能",
     "type": "bool",
     "default": true
+  },
+  "ai_voice_default_character": {
+    "description": "AI语音默认角色ID（例如 luoli、yujie）。留空则每次需手动指定或自动选择第一个可用角色",
+    "type": "string",
+    "default": "",
+    "hint": "可通过指令 /ai_characters 查看可用角色ID"
+  },
+  "ai_voice_max_text_length": {
+    "description": "AI语音文本最大长度（腾讯限制约500字符，超出将自动截断）",
+    "type": "int",
+    "default": 500,
+    "hint": "建议不超过500"
   }
 }
