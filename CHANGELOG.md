@@ -1,4 +1,37 @@
-## [2.0.0] - 2026-04-09 （当前版本）
+## [v2.1.0] - 2026-04-10  （当前版本）
+
+*** 本次更新包含了一个我自己认为非常好的功能，不过默认是关闭的，需要自己去配置文件打开，打开之后在私聊中发送消息就能看到“对方正在输入中…”的提示啦！***
+
+### ✨ 新增功能
+
+#### 个人资料与互动
+- **设置QQ头像**：新增 `set_qq_avatar` 工具及 `/set_qq_avatar` 指令，支持通过引用图片消息、本地路径或URL设置机器人头像
+- **用户点赞**：新增 `send_like` 工具及 `/send_like` 指令，可给指定QQ用户发送名片赞
+- **获取自定义表情**：新增 `fetch_custom_face` 工具及 `/fetch_custom_face` 指令，获取机器人账号下的自定义表情列表
+
+#### 群文件管理增强
+- **移动群文件**：新增 `move_group_file` 工具及 `/move_group_file` 指令，支持将群文件移动到指定目录
+- **重命名群文件**：新增 `rename_group_file` 工具及 `/rename_group_file` 指令，支持修改群文件名称
+- **传输群文件**：新增 `trans_group_file` 工具及 `/trans_group_file` 指令，用于获取群文件的传输链接
+
+#### 历史消息获取
+- **获取群历史消息**：新增 `get_group_msg_history` 工具及 `/get_group_msg_history` 指令，可按序号和数量拉取群聊历史记录
+- **获取好友历史消息**：新增 `get_friend_msg_history` 工具及 `/get_friend_msg_history` 指令，可按序号和数量拉取私聊历史记录
+
+#### 群资料设置
+- **设置群头像**：新增 `set_group_portrait` 工具及 `/set_group_portrait` 指令，支持通过引用图片或本地路径修改群头像
+
+#### 用户体验优化
+- **自动输入状态**：新增配置项 `auto_input_status_enabled` 和 `auto_input_status_timeout`，开启后机器人在私聊中自动显示"正在输入"状态，回复完成后自动取消
+- **手动设置输入状态**：新增 `set_input_status` 工具及 `/set_input_status` 指令，可手动控制输入状态的显示与取消
+
+#### 配置项新增
+- `auto_input_status_enabled`：是否启用自动输入状态（默认关闭）
+- `auto_input_status_timeout`：自动输入状态超时时间（默认10秒）
+
+
+
+## [2.0.0] - 2026-04-09 
 
 ### ✨ 新增
 
