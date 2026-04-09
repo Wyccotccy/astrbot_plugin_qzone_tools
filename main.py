@@ -17,7 +17,7 @@ import aiohttp
 from astrbot.api import logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
-from astrbot.api.message_components import Plain, Reply, File
+from astrbot.api.message_components import Plain, Reply, File, Image
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.star_tools import StarTools
@@ -693,7 +693,11 @@ class Main(Star):
         # AI 声聊配置
         self.ai_default_character = self.config.get("ai_voice_default_character", "")
         self.ai_voice_max_length = self.config.get("ai_voice_max_text_length", 500)
-        self._ai_characters_cache: Dict[str, Tuple[float, list]] = {}  # group_id -> (timestamp, data)
+        self._ai_characters_cache: Dict[str, Tuple[float, list]] = {}
+
+        # 自动输入状态配置
+        self.auto_input_status_enabled = self.config.get("auto_input_status_enabled", False)
+        self.auto_input_status_timeout = self.config.get("auto_input_status_timeout", 10)
 
     async def initialize(self):
         self.status_manager.set_db_manager(self.db_manager)
@@ -780,18 +784,15 @@ class Main(Star):
             )
         logger.info("[Main] 插件已卸载")
 
-    # ==================== 核心：客户端获取方法 ====================
+    # ==================== 核心辅助方法 ====================
     async def _get_client(self, event: AstrMessageEvent = None):
-        """获取 QQ 协议端客户端实例。优先从事件中获取 bot。"""
         if event:
             client = getattr(event, 'bot', None)
             if client and hasattr(client, 'call_action'):
                 self._client = client
                 return client
-
         if self._client and hasattr(self._client, 'call_action'):
             return self._client
-
         try:
             pm = self.context.platform_manager
             if hasattr(pm, 'get_insts'):
@@ -810,14 +811,6 @@ class Main(Star):
         except Exception as e:
             logger.debug(f"[Main] 从 platform_manager 获取 client 失败: {e}")
         return None
-
-    async def _ensure_initialized(self, event: AstrMessageEvent) -> bool:
-        if self.session.initialized:
-            return True
-        client = await self._get_client(event)
-        if not client:
-            return False
-        return await self.session.initialize(client)
 
     async def _update_contacts_cache(self, client):
         async with self._cache_lock:
@@ -896,16 +889,6 @@ class Main(Star):
             if task_id in self.running_tasks:
                 del self.running_tasks[task_id]
 
-    # ==================== 辅助函数：限制输出长度 ====================
-    def _truncate_message(self, text: str, max_chars: int = None) -> str:
-        """限制文本长度，避免超出模型上下文限制"""
-        if max_chars is None:
-            max_chars = self.config.get("max_output_chars", 2000)
-        if len(text) <= max_chars:
-            return text
-        return text[:max_chars - 100] + f"\n\n... (内容过长，已截断，共 {len(text)} 字符，仅显示前 {max_chars - 100} 字符)"
-
-    # ==================== 辅助函数：获取群成员角色 ====================
     async def _get_group_member_role(self, group_id: str, user_id: str) -> str:
         client = await self._get_client()
         if not client:
@@ -923,7 +906,58 @@ class Main(Star):
             logger.debug(f"[Main] 获取群成员角色失败: {e}")
             return "unknown"
 
-    # ==================== LLM 工具函数（记忆相关） ====================
+    async def _get_ai_characters_raw(self, event: AstrMessageEvent, group_id: str) -> list:
+        cache_key = f"ai_characters_{group_id}"
+        if cache_key in self._ai_characters_cache:
+            cached_time, cached_data = self._ai_characters_cache[cache_key]
+            if time.time() - cached_time < 600:
+                return cached_data
+        client = await self._get_client(event)
+        if not client:
+            return []
+        try:
+            response = await client.call_action('get_ai_characters', group_id=group_id, chat_type=1, timeout=8)
+            if isinstance(response, dict) and response.get("status") == "ok":
+                data = response.get("data", [])
+            elif isinstance(response, list):
+                data = response
+            else:
+                data = []
+            self._ai_characters_cache[cache_key] = (time.time(), data)
+            return data
+        except Exception as e:
+            logger.error(f"[AI声聊] 获取角色列表失败: {e}")
+            return []
+
+    async def _get_character_id_by_name_or_id(self, event: AstrMessageEvent, group_id: str, identifier: str) -> Optional[str]:
+        if not identifier:
+            return None
+        data = await self._get_ai_characters_raw(event, group_id)
+        for cat in data:
+            if not isinstance(cat, dict):
+                continue
+            for char in cat.get("characters", []):
+                if str(char.get("character_id")) == identifier or char.get("character_name") == identifier:
+                    return str(char.get("character_id"))
+        return None
+
+    async def _get_image_file_from_event(self, event: AiocqhttpMessageEvent) -> Optional[str]:
+        """从事件中提取图片文件路径或URL，优先使用引用消息中的图片，其次使用消息中的第一张图片"""
+        chain = event.get_messages()
+        # 检查是否有引用消息
+        if chain and isinstance(chain[0], Reply):
+            reply_chain = chain[0].chain
+            if reply_chain:
+                for seg in reply_chain:
+                    if isinstance(seg, Image):
+                        return seg.file or seg.url or seg.path
+        # 检查当前消息中的图片
+        for seg in chain:
+            if isinstance(seg, Image):
+                return seg.file or seg.url or seg.path
+        return None
+
+    # ==================== LLM 工具：记忆管理 ====================
     @filter.llm_tool(name="add_memory")
     async def add_memory(self, event: AstrMessageEvent, content: str, tags: str = "", importance: int = 5) -> dict:
         """添加重要记忆到存储中。AI 可以根据对话内容自动提取关键信息并保存，以便后续对话中回忆。
@@ -937,13 +971,13 @@ class Main(Star):
             dict: 操作结果，包含 status 和 message
         """
         if not content or content.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供记忆内容。\n用法示例：添加记忆 今天天气很好，标签 日常，重要度 8"}
+            return {"status": "error", "message": "❌ 参数缺失：请提供记忆内容。"}
         user_id = event.get_sender_id()
         tags_list = [t.strip() for t in tags.split(",")] if tags else []
         importance = max(1, min(10, importance))
         memory_id = await self.memory_manager.add_memory(user_id, content, tags_list, importance)
         msg = f"✅ 记忆已保存\nID: {memory_id}\n内容: {content[:50]}{'...' if len(content)>50 else ''}"
-        return {"status": "success", "message": self._truncate_message(msg)}
+        return {"status": "success", "message": msg}
 
     @filter.llm_tool(name="search_memories")
     async def search_memories(self, event: AstrMessageEvent, keyword: str = "", user_specific: bool = True, limit: int = 10) -> dict:
@@ -970,7 +1004,7 @@ class Main(Star):
             content = m.get('content', '')[:40] + ('...' if len(m.get('content',''))>40 else '')
             lines.append(f"{i}. [{m['id']}] {content} (重要度:{m.get('importance',5)}) {tags_str} - {m.get('updated_at','')[:10]}")
         msg = "\n".join(lines)
-        return {"status": "success", "message": self._truncate_message(msg)}
+        return {"status": "success", "message": msg}
 
     @filter.llm_tool(name="update_memory")
     async def update_memory(self, event: AstrMessageEvent, memory_id: str, content: str = None, tags: str = None, importance: int = None) -> dict:
@@ -986,7 +1020,7 @@ class Main(Star):
             dict: 更新结果
         """
         if not memory_id or memory_id.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供要更新的记忆ID。\n用法示例：更新记忆 abc123 内容 新内容 标签 重要 重要度 9"}
+            return {"status": "error", "message": "❌ 参数缺失：请提供要更新的记忆ID。"}
         existing = await self.memory_manager.get_memory_by_id(memory_id)
         if not existing:
             return {"status": "error", "message": f"❌ 未找到记忆ID: {memory_id}"}
@@ -1008,7 +1042,7 @@ class Main(Star):
             dict: 删除结果
         """
         if not memory_id or memory_id.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供要删除的记忆ID。\n用法示例：删除记忆 abc123"}
+            return {"status": "error", "message": "❌ 参数缺失：请提供要删除的记忆ID。"}
         existing = await self.memory_manager.get_memory_by_id(memory_id)
         if not existing:
             return {"status": "error", "message": f"❌ 未找到记忆ID: {memory_id}"}
@@ -1029,7 +1063,7 @@ class Main(Star):
             dict: 记忆的详细信息
         """
         if not memory_id or memory_id.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供记忆ID。\n用法示例：查看记忆 abc123"}
+            return {"status": "error", "message": "❌ 参数缺失：请提供记忆ID。"}
         m = await self.memory_manager.get_memory_by_id(memory_id)
         if not m:
             return {"status": "error", "message": f"❌ 未找到记忆ID: {memory_id}"}
@@ -1044,9 +1078,9 @@ class Main(Star):
             f"更新: {m.get('updated_at')}"
         ]
         msg = "\n".join(lines)
-        return {"status": "success", "message": self._truncate_message(msg)}
+        return {"status": "success", "message": msg}
 
-    # ==================== LLM 工具函数（消息发送等） ====================
+    # ==================== LLM 工具：消息与定时 ====================
     @filter.llm_tool(name="send_message")
     async def send_message_tool(self, event: AstrMessageEvent, target_id: str, message: str, chat_type: str = "auto") -> dict:
         """立即向指定的QQ好友或群聊发送文本消息。
@@ -1059,10 +1093,8 @@ class Main(Star):
         Returns:
             dict: 发送结果
         """
-        if not target_id or target_id.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供目标QQ号或群号。\n用法示例：发送消息 123456 你好"}
-        if not message or message.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供要发送的消息内容。\n用法示例：发送消息 123456 你好"}
+        if not target_id or target_id.strip() == "" or not message or message.strip() == "":
+            return {"status": "error", "message": "❌ 参数缺失：请提供目标ID和消息内容。"}
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "错误：无法获取客户端"}
@@ -1095,12 +1127,8 @@ class Main(Star):
         Returns:
             dict: 任务创建结果
         """
-        if not target_id or target_id.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供目标QQ号或群号。\n用法示例：定时消息 123456 明天见 明天08:00"}
-        if not message or message.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供要发送的消息内容。\n用法示例：定时消息 123456 明天见 明天08:00"}
-        if not send_time or send_time.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供发送时间。\n支持格式：YYYY-MM-DD HH:MM、HH:MM、每天的HH:MM"}
+        if not target_id or target_id.strip() == "" or not message or message.strip() == "" or not send_time or send_time.strip() == "":
+            return {"status": "error", "message": "❌ 参数缺失：请提供目标ID、消息内容和发送时间。"}
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "错误：无法获取客户端"}
@@ -1119,7 +1147,7 @@ class Main(Star):
         asyncio_task = asyncio.create_task(self._execute_scheduled_task(task_id, delay_seconds))
         self.running_tasks[task_id] = asyncio_task
         msg = f"✅ 定时任务已创建\n任务ID: {task_id}\n时间: {parsed_time.strftime('%Y-%m-%d %H:%M:%S')}\n⚠️ 注意：此任务重启后丢失，如需持久化请使用 create_scheduled_command"
-        return {"status": "success", "message": self._truncate_message(msg)}
+        return {"status": "success", "message": msg}
 
     @filter.llm_tool(name="cancel_scheduled_message")
     async def cancel_scheduled_message(self, event: AstrMessageEvent, task_id: str) -> dict:
@@ -1132,7 +1160,7 @@ class Main(Star):
             dict: 取消结果
         """
         if not task_id or task_id.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供任务ID。\n用法示例：取消定时任务 abc123"}
+            return {"status": "error", "message": "❌ 参数缺失：请提供任务ID。"}
         if task_id not in self.scheduled_tasks:
             return {"status": "error", "message": f"错误：未找到任务 {task_id}"}
         task = self.scheduled_tasks[task_id]
@@ -1162,7 +1190,7 @@ class Main(Star):
             status = "✅" if t.completed else "❌" if t.cancelled else "⏳"
             lines.append(f"{status} [{t.task_id}] {t.send_time.strftime('%m-%d %H:%M')} -> {t.target_id}")
         msg = "\n".join(lines)
-        return {"status": "success", "message": self._truncate_message(msg)}
+        return {"status": "success", "message": msg}
 
     @filter.llm_tool(name="publish_qzone")
     async def publish_qzone(self, event: AstrMessageEvent, content: str) -> dict:
@@ -1175,7 +1203,7 @@ class Main(Star):
             dict: 发布结果
         """
         if not content or content.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供说说内容。\n用法示例：发表空间说说 今天天气真好"}
+            return {"status": "error", "message": "❌ 参数缺失：请提供说说内容。"}
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "错误：无法获取客户端"}
@@ -1200,7 +1228,7 @@ class Main(Star):
             dict: 发送结果
         """
         if not target_qq or target_qq.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供目标QQ号。\n用法示例：戳一戳 123456"}
+            return {"status": "error", "message": "❌ 参数缺失：请提供目标QQ号。"}
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "错误：无法获取客户端"}
@@ -1234,9 +1262,9 @@ class Main(Star):
             dict: 设置结果
         """
         if not status or status.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供状态码。\n可用状态：online, qme, away, busy, dnd, invisible, listening, sleeping, studying"}
+            return {"status": "error", "message": "❌ 参数缺失：请提供状态码。"}
         if duration_minutes is None:
-            return {"status": "error", "message": "❌ 参数缺失：请提供持续时间（分钟）。\n用法示例：设置QQ状态 listening 30"}
+            return {"status": "error", "message": "❌ 参数缺失：请提供持续时间（分钟）。"}
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "错误：无法获取客户端"}
@@ -1271,12 +1299,8 @@ class Main(Star):
         Returns:
             dict: 创建结果
         """
-        if not command_type or command_type.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供指令类型。\n可选：qzone_post, status_change, llm_remind"}
-        if not execute_time or execute_time.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供执行时间。\n支持格式：YYYY-MM-DD HH:MM、HH:MM、每天的HH:MM"}
-        if not params or params.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供指令参数（JSON格式）。\n例如：{\"content\": \"晚安\"}"}
+        if not command_type or command_type.strip() == "" or not execute_time or execute_time.strip() == "" or not params or params.strip() == "":
+            return {"status": "error", "message": "❌ 参数缺失：请提供指令类型、执行时间和参数。"}
         parsed_time = self._parse_time(execute_time)
         if not parsed_time:
             return {"status": "error", "message": "错误：无法理解时间格式"}
@@ -1324,7 +1348,7 @@ class Main(Star):
             time_str = datetime.fromisoformat(cmd['execute_time']).strftime("%m-%d %H:%M")
             lines.append(f"{status} [{cmd['id']}] {cmd['command_type']} {time_str}")
         msg = "\n".join(lines)
-        return {"status": "success", "message": self._truncate_message(msg)}
+        return {"status": "success", "message": msg}
 
     @filter.llm_tool(name="cancel_scheduled_command")
     async def cancel_scheduled_command(self, event: AstrMessageEvent, task_id: str) -> dict:
@@ -1337,7 +1361,7 @@ class Main(Star):
             dict: 取消结果
         """
         if not task_id or task_id.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供要取消的任务ID。\n用法示例：取消指令 abc123"}
+            return {"status": "error", "message": "❌ 参数缺失：请提供要取消的任务ID。"}
         await self.db_manager.cancel_command(task_id)
         self.command_executor.cancel_task(task_id)
         return {"status": "success", "message": f"✅ 已取消指令 {task_id}"}
@@ -1353,7 +1377,7 @@ class Main(Star):
             dict: 删除结果
         """
         if not task_id or task_id.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供要删除的任务ID。\n用法示例：删除指令 abc123"}
+            return {"status": "error", "message": "❌ 参数缺失：请提供要删除的任务ID。"}
         await self.db_manager.delete_command(task_id)
         self.command_executor.cancel_task(task_id)
         return {"status": "success", "message": f"✅ 已删除指令 {task_id}"}
@@ -1395,19 +1419,15 @@ class Main(Star):
         Returns:
             dict: 发送结果
         """
-        if not to or to.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供收件人邮箱地址。\n用法示例：发送邮件 friend@qq.com 测试 你好"}
-        if not subject or subject.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供邮件主题。\n用法示例：发送邮件 friend@qq.com 测试 你好"}
-        if not content or content.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供邮件正文内容。\n用法示例：发送邮件 friend@qq.com 测试 你好"}
+        if not to or to.strip() == "" or not subject or subject.strip() == "" or not content or content.strip() == "":
+            return {"status": "error", "message": "❌ 参数缺失：请提供收件人、主题和内容。"}
         result = await self.email_sender.send_email(to, subject, content, nickname)
         if result.get('success'):
             return {"status": "success", "message": result['msg']}
         else:
             return {"status": "error", "message": result['msg']}
 
-    # ==================== LLM 工具函数：查询群成员身份 ====================
+    # ==================== LLM 工具：群成员身份 ====================
     @filter.llm_tool(name="get_user_group_role")
     async def get_user_group_role(self, event: AiocqhttpMessageEvent, group_id: str, user_id: str) -> dict:
         """查询指定用户在指定QQ群中的身份（群主/管理员/成员）。
@@ -1419,10 +1439,8 @@ class Main(Star):
         Returns:
             dict: 身份信息
         """
-        if not group_id or not group_id.strip():
-            return {"status": "error", "message": "❌ 参数缺失：请提供群号。\n用法示例：查询群成员身份 123456 789012"}
-        if not user_id or not user_id.strip():
-            return {"status": "error", "message": "❌ 参数缺失：请提供用户QQ号。\n用法示例：查询群成员身份 123456 789012"}
+        if not group_id or not group_id.strip() or not user_id or not user_id.strip():
+            return {"status": "error", "message": "❌ 参数缺失：请提供群号和用户QQ号。"}
         if not group_id.isdigit() or not user_id.isdigit():
             return {"status": "error", "message": "❌ 群号和用户QQ号必须为纯数字"}
         role = await self._get_group_member_role(group_id, user_id)
@@ -1430,7 +1448,7 @@ class Main(Star):
             return {"status": "error", "message": f"无法查询用户 {user_id} 在群 {group_id} 的身份，请确认机器人是否在群内且有权限。"}
         return {"status": "success", "message": f"用户 {user_id} 在群 {group_id} 中的身份是：{role}"}
 
-    # ==================== LLM 工具函数：群管理（基础功能） ====================
+    # ==================== LLM 工具：群管理基础 ====================
     @filter.llm_tool(name="set_essence_msg")
     async def set_essence_msg(self, event: AiocqhttpMessageEvent) -> dict:
         """将引用消息添加到群精华。使用时需要引用要设置精华的消息。"""
@@ -1583,7 +1601,7 @@ class Main(Star):
 
     @filter.llm_tool(name="list_group_files")
     async def list_group_files(self, event: AiocqhttpMessageEvent) -> dict:
-        """查询群文件列表（根目录）。返回文件名和大小，受 max_output_chars 限制。"""
+        """查询群文件列表（根目录）。返回文件名和大小。"""
         if not self.config.get("group_manage_enabled", True):
             return {"status": "error", "message": "❌ 群管理功能已禁用"}
         try:
@@ -1603,16 +1621,16 @@ class Main(Star):
             if len(files) > 20:
                 lines.append(f"  ... 共 {len(files)} 个文件，仅显示前20个")
             msg = "\n".join(lines)
-            return {"status": "success", "message": self._truncate_message(msg)}
+            return {"status": "success", "message": msg}
         except Exception as e:
             return {"status": "error", "message": f"查询文件失败: {str(e)}"}
 
     @filter.llm_tool(name="delete_group_file")
     async def delete_group_file(self, event: AiocqhttpMessageEvent, file_id: str = None) -> dict:
-        """删除群文件。可通过 file_id 指定要删除的文件，或通过引用文件消息自动获取 file_id。
+        """删除群文件。可通过 file_id 指定要删除的文件。
         
         Args:
-            file_id(string): 文件ID，可选。如果不提供，则尝试从引用的消息中提取文件ID。
+            file_id(string): 文件ID，必填（可通过 list_group_files 获取）
         """
         if not self.config.get("group_manage_enabled", True):
             return {"status": "error", "message": "❌ 群管理功能已禁用"}
@@ -1620,14 +1638,8 @@ class Main(Star):
             group_id = event.get_group_id()
             if not group_id:
                 return {"status": "error", "message": "无法获取群号"}
-            # 如果没有提供 file_id，尝试从引用消息中获取
             if not file_id:
-                chain = event.get_messages()
-                if chain and isinstance(chain[0], Reply):
-                    # 引用消息，需要从原始消息中提取文件ID，这比较复杂，暂时要求用户提供 file_id
-                    return {"status": "error", "message": "请提供要删除的 file_id（可通过 list_group_files 获取），当前不支持自动从引用中提取文件ID。"}
-                else:
-                    return {"status": "error", "message": "❌ 参数缺失：请提供 file_id，例如 /delete_group_file <file_id>"}
+                return {"status": "error", "message": "❌ 参数缺失：请提供 file_id"}
             await event.bot.delete_group_file(group_id=int(group_id), file_id=file_id)
             return {"status": "success", "message": f"✅ 已删除群文件 {file_id}"}
         except Exception as e:
@@ -1635,7 +1647,7 @@ class Main(Star):
 
     @filter.llm_tool(name="get_group_members_info")
     async def get_group_members_info(self, event: AiocqhttpMessageEvent) -> dict:
-        """获取当前群聊的成员信息列表（包含user_id、display_name、username、role）。需要在禁言、踢人前调用以获取目标用户的ID。结果受 max_output_chars 限制。"""
+        """获取当前群聊的成员信息列表（包含user_id、display_name、username、role）。"""
         try:
             group_id = event.get_group_id()
             if not group_id:
@@ -1656,12 +1668,11 @@ class Main(Star):
                 "member_count": len(processed),
                 "members": processed
             }, ensure_ascii=False, indent=2)
-            truncated = self._truncate_message(result_json)
-            return {"status": "success", "message": truncated}
+            return {"status": "success", "message": result_json}
         except Exception as e:
             return {"status": "error", "message": f"获取成员信息失败: {str(e)}"}
 
-    # ==================== 新增 LLM 工具：增强群管理功能（基于 NapCat API） ====================
+    # ==================== LLM 工具：群管理增强 ====================
     @filter.llm_tool(name="set_group_admin")
     async def set_group_admin(self, event: AiocqhttpMessageEvent, user_id: str, enable: bool) -> dict:
         """设置或取消群管理员。需要机器人是群主。
@@ -1740,7 +1751,7 @@ class Main(Star):
                 publish_time = n.get('publish_time', 0)
                 time_str = datetime.fromtimestamp(publish_time).strftime('%Y-%m-%d %H:%M:%S') if publish_time else '未知'
                 lines.append(f"• [{notice_id}] {content}... (发布者:{sender_id}, 时间:{time_str})")
-            return {"status": "success", "message": self._truncate_message("\n".join(lines))}
+            return {"status": "success", "message": "\n".join(lines)}
         except Exception as e:
             return {"status": "error", "message": f"获取公告失败: {str(e)}"}
 
@@ -1840,12 +1851,10 @@ class Main(Star):
             return {"status": "error", "message": "无法获取客户端"}
         try:
             result = await client.call_action('get_group_honor_info', group_id=int(group_id), type=honor_type)
-            # 简单格式化返回
             if honor_type == "talkative" or honor_type == "all":
                 current = result.get('current_talkative', {})
                 if current:
                     return {"status": "success", "message": f"当前龙王: {current.get('nickname', '')}({current.get('user_id', '')})"}
-            # 详细格式化（简化处理）
             lines = ["🏆 群荣誉信息"]
             for key, name in [('talkative_list', '历史龙王'), ('performer_list', '群聊之火'), ('legend_list', '传说'), ('strong_newbie_list', '新人王'), ('emotion_list', '快乐源泉')]:
                 items = result.get(key, [])
@@ -1856,7 +1865,7 @@ class Main(Star):
                         user_id = i.get('user_id', '')
                         item_strs.append(f"{nickname}({user_id})")
                     lines.append(f"{name}: {', '.join(item_strs)}")
-            return {"status": "success", "message": self._truncate_message("\n".join(lines))}
+            return {"status": "success", "message": "\n".join(lines)}
         except Exception as e:
             return {"status": "error", "message": f"获取失败: {str(e)}"}
 
@@ -1940,7 +1949,7 @@ class Main(Star):
                 else:
                     remain_str = "未知"
                 lines.append(f"• {user_id} (剩余: {remain_str})")
-            return {"status": "success", "message": self._truncate_message("\n".join(lines))}
+            return {"status": "success", "message": "\n".join(lines)}
         except Exception as e:
             return {"status": "error", "message": f"获取失败: {str(e)}"}
 
@@ -1970,7 +1979,7 @@ class Main(Star):
                 nickname = r.get('nickname', '')
                 comment = r.get('comment', '')
                 lines.append(f"• {user_id}({nickname}): {comment[:30]}")
-            return {"status": "success", "message": self._truncate_message("\n".join(lines))}
+            return {"status": "success", "message": "\n".join(lines)}
         except Exception as e:
             return {"status": "error", "message": f"获取失败: {str(e)}"}
 
@@ -1992,15 +2001,12 @@ class Main(Star):
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
-        option_map = {
-            "allow": 1,
-            "need_verify": 2,
-            "not_allow": 3
-        }
-        if option not in option_map:
+        option_map = {"allow": 1, "need_verify": 2, "not_allow": 3}
+        add_type = option_map.get(option)
+        if add_type is None:
             return {"status": "error", "message": "无效选项，请使用 allow/need_verify/not_allow"}
         try:
-            await client.call_action('set_group_add_option', group_id=int(group_id), option=option_map[option])
+            await client.call_action('set_group_add_option', group_id=group_id, add_type=add_type)
             return {"status": "success", "message": f"✅ 加群方式已设置为: {option}"}
         except Exception as e:
             return {"status": "error", "message": f"设置失败: {str(e)}"}
@@ -2026,53 +2032,294 @@ class Main(Star):
         except Exception as e:
             return {"status": "error", "message": f"打卡失败: {str(e)}"}
 
-    # ==================== 新增 LLM 工具：AI 声聊（优化描述及注入默认值） ====================
-    async def _get_ai_characters_raw(self, event: AstrMessageEvent, group_id: str) -> list:
-        """获取原始角色列表数据（带缓存，有效期10分钟）"""
-        cache_key = f"ai_characters_{group_id}"
-        if hasattr(self, '_ai_characters_cache') and cache_key in self._ai_characters_cache:
-            cached_time, cached_data = self._ai_characters_cache[cache_key]
-            if time.time() - cached_time < 600:
-                return cached_data
-
+    # ==================== 新增 LLM 工具：设置QQ头像 ====================
+    @filter.llm_tool(name="set_qq_avatar")
+    async def set_qq_avatar(self, event: AiocqhttpMessageEvent, file: str = "") -> dict:
+        """设置机器人的QQ头像。可通过引用图片消息或提供图片路径/URL。
+        
+        Args:
+            file(string): 图片路径、URL或Base64，可选。若不提供则从引用的图片消息中获取。
+        
+        Returns:
+            dict: 操作结果
+        """
         client = await self._get_client(event)
         if not client:
-            return []
-
+            return {"status": "error", "message": "无法获取客户端"}
+        if not file:
+            file = await self._get_image_file_from_event(event)
+            if not file:
+                return {"status": "error", "message": "❌ 请引用一张图片或提供图片路径/URL"}
         try:
-            # 参照正常工作插件的参数格式：group_id 和 chat_type=1
-            response = await client.call_action('get_ai_characters', group_id=group_id, chat_type=1, timeout=8)
-            if isinstance(response, dict) and response.get("status") == "ok":
-                data = response.get("data", [])
-            elif isinstance(response, list):
-                data = response
-            else:
-                data = []
-
-            if not hasattr(self, '_ai_characters_cache'):
-                self._ai_characters_cache = {}
-            self._ai_characters_cache[cache_key] = (time.time(), data)
-            return data
+            await client.call_action('set_qq_avatar', file=file)
+            return {"status": "success", "message": "✅ QQ头像设置成功"}
         except Exception as e:
-            logger.error(f"[AI声聊] 获取角色列表失败: {e}")
-            return []
+            return {"status": "error", "message": f"设置失败: {str(e)}"}
 
-    async def _get_character_id_by_name_or_id(self, event: AstrMessageEvent, group_id: str, identifier: str) -> Optional[str]:
-        """通过角色ID或名称查找角色ID"""
-        if not identifier:
-            return None
-        data = await self._get_ai_characters_raw(event, group_id)
-        for cat in data:
-            if not isinstance(cat, dict):
-                continue
-            for char in cat.get("characters", []):
-                if str(char.get("character_id")) == identifier or char.get("character_name") == identifier:
-                    return str(char.get("character_id"))
-        return None
+    # ==================== 新增 LLM 工具：群文件移动/重命名/传输 ====================
+    @filter.llm_tool(name="move_group_file")
+    async def move_group_file(self, event: AiocqhttpMessageEvent, file_id: str, current_parent_directory: str, target_parent_directory: str) -> dict:
+        """移动群文件到指定目录。
+        
+        Args:
+            file_id(string): 文件ID，必填
+            current_parent_directory(string): 当前父目录ID，根目录为"/"
+            target_parent_directory(string): 目标父目录ID，根目录为"/"
+        
+        Returns:
+            dict: 操作结果
+        """
+        if not self.config.get("group_manage_enabled", True):
+            return {"status": "error", "message": "❌ 群管理功能已禁用"}
+        group_id = event.get_group_id()
+        if not group_id:
+            return {"status": "error", "message": "无法获取群号"}
+        client = await self._get_client(event)
+        if not client:
+            return {"status": "error", "message": "无法获取客户端"}
+        try:
+            result = await client.call_action('move_group_file', group_id=group_id, file_id=file_id,
+                                             current_parent_directory=current_parent_directory,
+                                             target_parent_directory=target_parent_directory)
+            if result.get('data', {}).get('ok'):
+                return {"status": "success", "message": "✅ 文件移动成功"}
+            return {"status": "error", "message": "移动失败"}
+        except Exception as e:
+            return {"status": "error", "message": f"移动失败: {str(e)}"}
 
+    @filter.llm_tool(name="rename_group_file")
+    async def rename_group_file(self, event: AiocqhttpMessageEvent, file_id: str, current_parent_directory: str, new_name: str) -> dict:
+        """重命名群文件。
+        
+        Args:
+            file_id(string): 文件ID，必填
+            current_parent_directory(string): 当前父目录ID，根目录为"/"
+            new_name(string): 新文件名，必填
+        
+        Returns:
+            dict: 操作结果
+        """
+        if not self.config.get("group_manage_enabled", True):
+            return {"status": "error", "message": "❌ 群管理功能已禁用"}
+        group_id = event.get_group_id()
+        if not group_id:
+            return {"status": "error", "message": "无法获取群号"}
+        client = await self._get_client(event)
+        if not client:
+            return {"status": "error", "message": "无法获取客户端"}
+        try:
+            result = await client.call_action('rename_group_file', group_id=group_id, file_id=file_id,
+                                             current_parent_directory=current_parent_directory, new_name=new_name)
+            if result.get('data', {}).get('ok'):
+                return {"status": "success", "message": f"✅ 文件已重命名为：{new_name}"}
+            return {"status": "error", "message": "重命名失败"}
+        except Exception as e:
+            return {"status": "error", "message": f"重命名失败: {str(e)}"}
+
+    @filter.llm_tool(name="trans_group_file")
+    async def trans_group_file(self, event: AiocqhttpMessageEvent, file_id: str) -> dict:
+        """传输群文件（获取下载链接等）。
+        
+        Args:
+            file_id(string): 文件ID，必填
+        
+        Returns:
+            dict: 操作结果
+        """
+        if not self.config.get("group_manage_enabled", True):
+            return {"status": "error", "message": "❌ 群管理功能已禁用"}
+        group_id = event.get_group_id()
+        if not group_id:
+            return {"status": "error", "message": "无法获取群号"}
+        client = await self._get_client(event)
+        if not client:
+            return {"status": "error", "message": "无法获取客户端"}
+        try:
+            result = await client.call_action('trans_group_file', group_id=group_id, file_id=file_id)
+            if result.get('data', {}).get('ok'):
+                return {"status": "success", "message": "✅ 文件传输请求成功"}
+            return {"status": "error", "message": "传输失败"}
+        except Exception as e:
+            return {"status": "error", "message": f"传输失败: {str(e)}"}
+
+    # ==================== 新增 LLM 工具：点赞 ====================
+    @filter.llm_tool(name="send_like")
+    async def send_like_tool(self, event: AstrMessageEvent, user_id: str, times: int = 1) -> dict:
+        """给指定用户点赞（名片赞）。
+        
+        Args:
+            user_id(string): 对方QQ号，必填
+            times(number): 点赞次数，默认1，建议不超过10
+        
+        Returns:
+            dict: 操作结果
+        """
+        if not user_id or not user_id.strip():
+            return {"status": "error", "message": "❌ 参数缺失：请提供对方QQ号"}
+        client = await self._get_client(event)
+        if not client:
+            return {"status": "error", "message": "无法获取客户端"}
+        try:
+            await client.call_action('send_like', user_id=user_id, times=min(times, 20))
+            return {"status": "success", "message": f"✅ 已给 {user_id} 点赞 {times} 次"}
+        except Exception as e:
+            return {"status": "error", "message": f"点赞失败: {str(e)}"}
+
+    # ==================== 新增 LLM 工具：获取历史消息 ====================
+    @filter.llm_tool(name="get_group_msg_history")
+    async def get_group_msg_history(self, event: AstrMessageEvent, group_id: str = "", message_seq: int = 0, count: int = 20) -> dict:
+        """获取群历史消息。
+        
+        Args:
+            group_id(string): 群号，可选，默认为当前群聊
+            message_seq(number): 起始消息序号，0表示最新
+            count(number): 获取数量，默认20，最大100
+        
+        Returns:
+            dict: 消息列表
+        """
+        if not group_id:
+            group_id = event.get_group_id()
+            if not group_id:
+                return {"status": "error", "message": "请提供群号或在群聊中使用"}
+        client = await self._get_client(event)
+        if not client:
+            return {"status": "error", "message": "无法获取客户端"}
+        try:
+            result = await client.call_action('get_group_msg_history', group_id=group_id, message_seq=message_seq, count=min(count, 100))
+            messages = result.get('data', {}).get('messages', [])
+            if not messages:
+                return {"status": "success", "message": "暂无历史消息"}
+            lines = [f"📜 群 {group_id} 历史消息（共{len(messages)}条）："]
+            for msg in messages[:20]:
+                sender = msg.get('sender', {}).get('nickname', msg.get('sender', {}).get('user_id', '未知'))
+                content = msg.get('message', '')[:100]
+                lines.append(f"• {sender}: {content}")
+            return {"status": "success", "message": "\n".join(lines)}
+        except Exception as e:
+            return {"status": "error", "message": f"获取失败: {str(e)}"}
+
+    @filter.llm_tool(name="get_friend_msg_history")
+    async def get_friend_msg_history(self, event: AstrMessageEvent, user_id: str, message_seq: int = 0, count: int = 20) -> dict:
+        """获取好友历史消息。
+        
+        Args:
+            user_id(string): 好友QQ号，必填
+            message_seq(number): 起始消息序号，0表示最新
+            count(number): 获取数量，默认20，最大100
+        
+        Returns:
+            dict: 消息列表
+        """
+        if not user_id:
+            return {"status": "error", "message": "请提供好友QQ号"}
+        client = await self._get_client(event)
+        if not client:
+            return {"status": "error", "message": "无法获取客户端"}
+        try:
+            result = await client.call_action('get_friend_msg_history', user_id=user_id, message_seq=message_seq, count=min(count, 100))
+            messages = result.get('data', {}).get('messages', [])
+            if not messages:
+                return {"status": "success", "message": "暂无历史消息"}
+            lines = [f"📜 好友 {user_id} 历史消息（共{len(messages)}条）："]
+            for msg in messages[:20]:
+                sender = msg.get('sender', {}).get('nickname', msg.get('sender', {}).get('user_id', '未知'))
+                content = msg.get('message', '')[:100]
+                lines.append(f"• {sender}: {content}")
+            return {"status": "success", "message": "\n".join(lines)}
+        except Exception as e:
+            return {"status": "error", "message": f"获取失败: {str(e)}"}
+
+    # ==================== 新增 LLM 工具：设置群头像 ====================
+    @filter.llm_tool(name="set_group_portrait")
+    async def set_group_portrait(self, event: AiocqhttpMessageEvent, group_id: str = "", file: str = "") -> dict:
+        """设置群头像。
+        
+        Args:
+            group_id(string): 群号，可选，默认为当前群聊
+            file(string): 图片路径、URL或Base64，可选。若不提供则从引用的图片消息中获取
+        
+        Returns:
+            dict: 操作结果
+        """
+        if not self.config.get("group_manage_enabled", True):
+            return {"status": "error", "message": "❌ 群管理功能已禁用"}
+        if not group_id:
+            group_id = event.get_group_id()
+            if not group_id:
+                return {"status": "error", "message": "无法获取群号"}
+        client = await self._get_client(event)
+        if not client:
+            return {"status": "error", "message": "无法获取客户端"}
+        if not file:
+            file = await self._get_image_file_from_event(event)
+            if not file:
+                return {"status": "error", "message": "❌ 请引用一张图片或提供图片路径/URL"}
+        try:
+            await client.call_action('set_group_portrait', group_id=group_id, file=file)
+            return {"status": "success", "message": "✅ 群头像设置成功"}
+        except Exception as e:
+            return {"status": "error", "message": f"设置失败: {str(e)}"}
+
+    # ==================== 新增 LLM 工具：获取自定义表情 ====================
+    @filter.llm_tool(name="fetch_custom_face")
+    async def fetch_custom_face(self, event: AstrMessageEvent, count: int = 48) -> dict:
+        """获取机器人的自定义表情列表。
+        
+        Args:
+            count(number): 获取数量，默认48
+        
+        Returns:
+            dict: 表情URL列表
+        """
+        client = await self._get_client(event)
+        if not client:
+            return {"status": "error", "message": "无法获取客户端"}
+        try:
+            result = await client.call_action('fetch_custom_face', count=count)
+            faces = result.get('data', [])
+            if not faces:
+                return {"status": "success", "message": "暂无自定义表情"}
+            lines = [f"🎭 自定义表情列表（共{len(faces)}个）："]
+            for i, url in enumerate(faces[:10], 1):
+                lines.append(f"{i}. {url}")
+            return {"status": "success", "message": "\n".join(lines)}
+        except Exception as e:
+            return {"status": "error", "message": f"获取失败: {str(e)}"}
+
+    # ==================== 新增 LLM 工具：设置输入状态 ====================
+    @filter.llm_tool(name="set_input_status")
+    async def set_input_status_tool(self, event: AstrMessageEvent, user_id: str = "", event_type: int = 1) -> dict:
+        """设置输入状态（显示"正在输入..."）。
+        
+        Args:
+            user_id(string): 目标用户QQ号，私聊时必填，群聊时可省略
+            event_type(number): 事件类型，1表示正在输入，2表示取消，默认1
+        
+        Returns:
+            dict: 操作结果
+        """
+        if not user_id:
+            if event.is_private_chat():
+                user_id = event.get_sender_id()
+            else:
+                # 群聊不需要user_id？NapCat文档中set_input_status需要user_id，但群聊可能不需要，这里按文档传
+                # 如果群聊，可能需要传0或空，但我们按用户提供的文档来
+                user_id = event.get_sender_id()  # 尝试用发送者
+        client = await self._get_client(event)
+        if not client:
+            return {"status": "error", "message": "无法获取客户端"}
+        try:
+            await client.call_action('set_input_status', user_id=user_id, event_type=event_type)
+            status = "输入中" if event_type == 1 else "取消输入"
+            return {"status": "success", "message": f"✅ 已设置状态：{status}"}
+        except Exception as e:
+            return {"status": "error", "message": f"设置失败: {str(e)}"}
+
+    # ==================== LLM 工具：AI 声聊 ====================
     @filter.llm_tool(name="get_ai_characters")
     async def get_ai_characters_tool(self, event: AstrMessageEvent) -> dict:
-        """获取当前可用的 AI 语音角色列表。仅在需要了解可选角色时调用，通常发送语音时无需调用此工具。
+        """获取当前可用的 AI 语音角色列表。在发送 AI 语音前可调用此工具了解可选角色。
         
         Returns:
             dict: 角色列表，包含角色ID和名称
@@ -2095,37 +2342,32 @@ class Main(Star):
 
     @filter.llm_tool(name="send_ai_voice")
     async def send_ai_voice_tool(self, event: AiocqhttpMessageEvent, text: str, character: str = "") -> dict:
-        """在群聊中发送 AI 语音消息。如果不指定角色，插件会自动使用配置中预设的默认音色，或自动选择第一个可用角色。因此绝大多数情况下你可以省略 character 参数直接调用本工具，无需先调用 get_ai_characters。
+        """在群聊中发送 AI 语音消息（使用指定角色的音色朗读文本）。
         
         Args:
             text(string): 要转换为语音的文本内容，必填
-            character(string): AI 角色ID或名称，强烈建议留空以使用默认配置。仅在需要临时切换音色时才需填写。
+            character(string): AI 角色ID或名称，可选。若不填则使用配置文件中的默认角色或自动选择第一个可用角色
         
         Returns:
-            dict: 发送结果
+            dict: 发送结果，成功时会包含实际发送的文本内容。
         """
         if not text or text.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供要朗读的文本内容。\n用法示例：发送 AI 语音 你好呀"}
+            return {"status": "error", "message": "❌ 参数缺失：请提供要朗读的文本内容。"}
         group_id = event.get_group_id()
         if not group_id:
             return {"status": "error", "message": "❌ 此功能仅支持群聊中使用"}
-
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
-
-        # 确定要使用的角色ID
         character_id = None
         if character:
             character_id = await self._get_character_id_by_name_or_id(event, group_id, character)
             if not character_id:
                 return {"status": "error", "message": f"未找到角色: {character}"}
         else:
-            # 使用配置文件默认角色
             if self.ai_default_character:
                 character_id = await self._get_character_id_by_name_or_id(event, group_id, self.ai_default_character)
             if not character_id:
-                # 自动选择第一个可用角色
                 data = await self._get_ai_characters_raw(event, group_id)
                 for cat in data:
                     if isinstance(cat, dict) and cat.get("characters"):
@@ -2134,27 +2376,21 @@ class Main(Star):
                         break
                 if not character_id:
                     return {"status": "error", "message": "没有可用的语音角色"}
-
-        # 限制文本长度
         max_len = self.ai_voice_max_length
-        if len(text) > max_len:
-            text = text[:max_len]
-
+        actual_text = text
+        if len(actual_text) > max_len:
+            actual_text = actual_text[:max_len]
         try:
-            await client.call_action('send_group_ai_record',
-                                     group_id=group_id,
-                                     character=character_id,
-                                     text=text,
-                                     timeout=10)
-            return {"status": "success", "message": f"✅ AI 语音已发送（角色ID: {character_id}）"}
+            await client.call_action('send_group_ai_record', group_id=group_id, character=character_id, text=actual_text, timeout=10)
+            return {"status": "success", "message": f"✅ AI 语音已发送（角色ID: {character_id}），内容：{actual_text}"}
         except Exception as e:
             logger.error(f"[AI声聊] 发送失败: {e}")
             return {"status": "error", "message": f"发送 AI 语音失败: {str(e)}"}
 
-    # ==================== 联系人搜索与列表工具 ====================
+    # ==================== LLM 工具：联系人 ====================
     @filter.llm_tool(name="search_contacts")
     async def search_contacts(self, event: AstrMessageEvent, keyword: str = "", search_type: str = "all") -> dict:
-        """搜索QQ好友或群聊，支持按QQ号、昵称、群名模糊匹配。search_type可选：all(全部)/friend(好友)/group(群聊)
+        """搜索QQ好友或群聊，支持按QQ号、昵称、群名模糊匹配。
         
         Args:
             keyword(string): 搜索关键词，必填（可以是QQ号、昵称或群名的一部分）
@@ -2164,14 +2400,13 @@ class Main(Star):
             dict: 搜索结果列表
         """
         if not keyword or keyword.strip() == "":
-            return {"status": "error", "message": "❌ 参数缺失：请提供搜索关键词（可以是QQ号、昵称或群名的一部分）。\n用法示例：搜索联系人 张三 all"}
+            return {"status": "error", "message": "❌ 参数缺失：请提供搜索关键词。"}
         if not self.config.get("search_enabled", True):
             return {"status": "error", "message": "联系人搜索功能已禁用"}
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "错误：无法获取客户端"}
         await self._update_contacts_cache(client)
-        max_chars = self.config.get("search_max_chars", 800)
         results = []
         keyword_lower = keyword.lower().strip()
         if search_type in ("all", "friend"):
@@ -2203,13 +2438,11 @@ class Main(Star):
         if not results:
             return {"status": "success", "message": f"未找到与「{keyword}」相关的联系人"}
         output = f"📇 搜索结果（共{len(results)}项）：\n" + "\n".join(results)
-        if len(output) > max_chars:
-            output = output[:max_chars] + f"\n... (仅显示部分，共{len(results)}项，建议使用更精确的关键词)"
-        return {"status": "success", "message": self._truncate_message(output)}
+        return {"status": "success", "message": output}
 
     @filter.llm_tool(name="list_contacts")
     async def list_contacts(self, event: AstrMessageEvent, contact_type: str = "all", limit: int = 20) -> dict:
-        """获取好友或群聊列表（不进行模糊搜索，直接列出）。contact_type可选：all/friend/group
+        """获取好友或群聊列表（不进行模糊搜索，直接列出）。
         
         Args:
             contact_type(string): 类型，可选值：all/friend/group，默认all
@@ -2224,7 +2457,6 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "错误：无法获取客户端"}
         await self._update_contacts_cache(client)
-        max_chars = self.config.get("search_max_chars", 800)
         limit = min(limit, 100)
         lines = []
         if contact_type in ("all", "friend"):
@@ -2246,11 +2478,9 @@ class Main(Star):
         if not lines:
             return {"status": "success", "message": "暂无联系人数据"}
         output = "\n".join(lines)
-        if len(output) > max_chars:
-            output = output[:max_chars] + "\n... (内容过长已截断)"
-        return {"status": "success", "message": self._truncate_message(output)}
+        return {"status": "success", "message": output}
 
-    # ==================== 管理员指令（全部恢复） ====================
+    # ==================== 管理员指令 ====================
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_all_help")
     async def admin_all_help(self, event: AstrMessageEvent):
@@ -2304,31 +2534,43 @@ class Main(Star):
 /ai_voice <角色ID/名称> <文本>  发送 AI 语音消息（仅群聊，角色可选）
 
 --- 群管理命令（需 group_manage_enabled=true） ---
-/ban_user <QQ号> <禁言分钟>   (群号自动获取)
+/ban_user <QQ号> <禁言分钟>
 /unban_user <QQ号>
 /kick <QQ号>   (需 kick_enabled=true)
 /whole_ban <on/off>
-/set_card <QQ号> <新群昵称>   (空字符串取消)
+/set_card <QQ号> <新群昵称>
 /send_notice <公告内容>
 /del_notice <公告ID>
 /list_files
-/group_members   (获取群成员列表)
-/delete_group_file <file_id>   (删除群文件)
+/group_members
+/delete_group_file <file_id>
 
 --- 新增群管理指令 ---
-/set_admin <QQ号> <on/off>  设置/取消管理员
-/set_group_name <新群名>  修改群名
-/list_notices  查看群公告列表
-/upload_file <文件路径> [文件名]  上传群文件
-/create_folder <文件夹名>  创建群文件夹
-/del_folder <文件夹ID>  删除群文件夹
-/group_honor [类型]  查看群荣誉(龙王等)
-/at_all_remain  查询@全体成员剩余次数
-/set_title <QQ号> <头衔>  设置专属头衔
-/shut_list  查看被禁言成员
-/ignore_requests  查看被忽略的加群请求
-/set_add_option <allow/need_verify/not_allow>  设置加群方式
-/group_sign  群打卡
+/set_admin <QQ号> <on/off>
+/set_group_name <新群名>
+/list_notices
+/upload_file <文件路径> [文件名]
+/create_folder <文件夹名>
+/del_folder <文件夹ID>
+/group_honor [类型]
+/at_all_remain
+/set_title <QQ号> <头衔>
+/shut_list
+/ignore_requests
+/set_add_option <allow/need_verify/not_allow>
+/group_sign
+
+--- 本次新增功能指令 ---
+/set_qq_avatar [图片]  设置QQ头像（引用图片）
+/move_group_file <file_id> <当前目录> <目标目录>  移动群文件
+/rename_group_file <file_id> <当前目录> <新名称>  重命名群文件
+/trans_group_file <file_id>  传输群文件（获取链接）
+/send_like <QQ号> [次数]  给用户点赞
+/get_group_msg_history [群号] [起始序号] [数量]  获取群历史消息
+/get_friend_msg_history <QQ号> [起始序号] [数量]  获取好友历史消息
+/set_group_portrait [群号] [图片]  设置群头像（引用图片）
+/fetch_custom_face [数量]  获取自定义表情列表
+/set_input_status <QQ号> <类型>  设置输入状态（1=正在输入，2=取消）
 
 /tool_all_help
   显示本帮助
@@ -2341,9 +2583,7 @@ class Main(Star):
         """管理员记忆管理命令：/tool_memory list/add/delete/update/get"""
         args = event.message_str.strip().split()
         if len(args) < 2:
-            await event.send(MessageChain().message(
-                "用法：\n/tool_memory list [user_id] - 列出所有记忆\n/tool_memory add <内容> [标签用逗号分隔] [重要度1-10] - 添加记忆\n/tool_memory delete <记忆ID> - 删除记忆\n/tool_memory update <记忆ID> [内容] [标签] [重要度] - 更新记忆\n/tool_memory get <记忆ID> - 查看详情"
-            ))
+            await event.send(MessageChain().message("用法：/tool_memory list/add/delete/update/get [参数]"))
             return
         sub = args[1].lower()
         if sub == "list":
@@ -2372,7 +2612,7 @@ class Main(Star):
                 return
             memory_id = args[2]
             success = await self.memory_manager.delete_memory(memory_id)
-            await event.send(MessageChain().message(f"✅ 记忆已删除" if success else "❌ 删除失败"))
+            await event.send(MessageChain().message("✅ 记忆已删除" if success else "❌ 删除失败"))
         elif sub == "update":
             if len(args) < 3:
                 await event.send(MessageChain().message("用法：/tool_memory update <记忆ID> [新内容] [新标签] [新重要度]"))
@@ -2383,7 +2623,7 @@ class Main(Star):
             importance = int(args[5]) if len(args) > 5 and args[5].isdigit() else None
             tags_list = [t.strip() for t in tags.split(",")] if tags is not None else None
             success = await self.memory_manager.update_memory(memory_id, content, tags_list, importance)
-            await event.send(MessageChain().message(f"✅ 记忆已更新" if success else "❌ 更新失败"))
+            await event.send(MessageChain().message("✅ 记忆已更新" if success else "❌ 更新失败"))
         elif sub == "get":
             if len(args) < 3:
                 await event.send(MessageChain().message("用法：/tool_memory get <记忆ID>"))
@@ -2392,7 +2632,9 @@ class Main(Star):
             if not m:
                 await event.send(MessageChain().message("未找到记忆"))
                 return
-            lines = [f"ID: {m['id']}", f"用户: {m['user_id']}", f"内容: {m['content']}", f"标签: {', '.join(m.get('tags',[]))}", f"重要度: {m.get('importance',5)}", f"创建: {m.get('created_at')}", f"更新: {m.get('updated_at')}"]
+            lines = [f"ID: {m['id']}", f"用户: {m['user_id']}", f"内容: {m['content']}",
+                     f"标签: {', '.join(m.get('tags',[]))}", f"重要度: {m.get('importance',5)}",
+                     f"创建: {m.get('created_at')}", f"更新: {m.get('updated_at')}"]
             await event.send(MessageChain().message("\n".join(lines)))
         else:
             await event.send(MessageChain().message("未知子命令，可用: list, add, delete, update, get"))
@@ -2405,10 +2647,8 @@ class Main(Star):
         if len(args) < 3:
             await event.send(MessageChain().message("用法：/tool_send_message <目标ID> <消息内容> [chat_type]"))
             return
-        target_id = args[1]
-        message = args[2]
-        chat_type = "auto"
-        result = await self.send_message_tool(event, target_id, message, chat_type)
+        target_id, message = args[1], args[2]
+        result = await self.send_message_tool(event, target_id, message)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -2417,13 +2657,10 @@ class Main(Star):
         """管理员指令：创建简单定时消息（重启后丢失）"""
         args = event.message_str.strip().split(maxsplit=3)
         if len(args) < 4:
-            await event.send(MessageChain().message("用法：/tool_schedule <目标ID> <消息内容> <时间> [chat_type] 时间格式: YYYY-MM-DD HH:MM 或 HH:MM 或 每天的HH:MM"))
+            await event.send(MessageChain().message("用法：/tool_schedule <目标ID> <消息内容> <时间> [chat_type]"))
             return
-        target_id = args[1]
-        message = args[2]
-        time_str = args[3]
-        chat_type = "group"
-        result = await self.schedule_message(event, target_id, message, time_str, chat_type)
+        target_id, message, time_str = args[1], args[2], args[3]
+        result = await self.schedule_message(event, target_id, message, time_str)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -2434,8 +2671,7 @@ class Main(Star):
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/tool_publish_qzone <说说内容>"))
             return
-        content = args[1]
-        result = await self.publish_qzone(event, content)
+        result = await self.publish_qzone(event, args[1])
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -2486,35 +2722,20 @@ class Main(Star):
         text = event.message_str.strip()
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            sender = self.config.get("email_sender", "")
-            auth_code = self.config.get("email_authorization_code", "")
-            status = f"当前配置：发件人={sender if sender else '未设置'}，授权码={'已设置' if auth_code else '未设置'}"
-            await event.send(MessageChain().message(
-                f"用法：/tool_email <收件人> <主题> <内容> [昵称]\n注意：主题和内容中不要包含未转义的特殊字符\n{status}"
-            ))
+            await event.send(MessageChain().message("用法：/tool_email <收件人> <主题> <内容> [昵称]"))
             return
-        rest = parts[1]
         import shlex
         try:
-            argv = shlex.split(rest)
+            argv = shlex.split(parts[1])
         except:
-            argv = rest.split()
+            argv = parts[1].split()
         if len(argv) < 3:
             await event.send(MessageChain().message("用法：/tool_email <收件人> <主题> <内容> [昵称]"))
             return
-        to = argv[0]
-        subject = argv[1]
-        content = argv[2]
+        to, subject, content = argv[0], argv[1], argv[2]
         nickname = argv[3] if len(argv) > 3 else ""
-
-        sender_cfg = self.config.get("email_sender", "")
-        auth_cfg = self.config.get("email_authorization_code", "")
-        if not sender_cfg or not auth_cfg:
-            await event.send(MessageChain().message("❌ 发件人邮箱或授权码未配置，请在插件配置中填写后重载插件"))
-            return
-
-        result = await self.email_sender.send_email(to, subject, content, nickname)
-        await event.send(MessageChain().message(result.get("msg", "操作失败")))
+        result = await self.send_qq_email_tool(event, to, subject, content, nickname)
+        await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_scheduled_list")
@@ -2533,8 +2754,7 @@ class Main(Star):
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/tool_scheduled_cancel <任务ID>"))
             return
-        task_id = args[1]
-        result = await self.cancel_scheduled_command(event, task_id)
+        result = await self.cancel_scheduled_command(event, args[1])
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -2545,8 +2765,7 @@ class Main(Star):
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/tool_scheduled_delete <任务ID>"))
             return
-        task_id = args[1]
-        result = await self.delete_scheduled_command(event, task_id)
+        result = await self.delete_scheduled_command(event, args[1])
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -2555,7 +2774,7 @@ class Main(Star):
         """管理员指令：搜索联系人（好友/群聊）"""
         args = event.message_str.strip().split(maxsplit=2)
         if len(args) < 2:
-            await event.send(MessageChain().message("用法：/tool_search <关键词> [类型]  类型可选：all/friend/group"))
+            await event.send(MessageChain().message("用法：/tool_search <关键词> [类型]"))
             return
         keyword = args[1]
         search_type = args[2] if len(args) > 2 else "all"
@@ -2572,7 +2791,7 @@ class Main(Star):
         result = await self.list_contacts(event, contact_type, limit)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
-    # ==================== 新增 AI 声聊管理员指令 ====================
+    # ==================== AI 声聊指令 ====================
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ai_characters")
     async def cmd_ai_characters(self, event: AstrMessageEvent):
@@ -2586,70 +2805,65 @@ class Main(Star):
         """管理员指令：发送 AI 语音消息。用法：/ai_voice [角色ID/名称] <文本>"""
         args = event.message_str.strip().split(maxsplit=2)
         if len(args) < 2:
-            await event.send(MessageChain().message("用法：/ai_voice [角色ID/名称] <文本>\n例如：/ai_voice 你好呀（使用默认角色）\n/ai_voice luoli 你好呀"))
+            await event.send(MessageChain().message("用法：/ai_voice [角色ID/名称] <文本>"))
             return
-        # 判断第一个参数是否是角色ID
         text = args[1]
         character = ""
         if len(args) == 3:
-            character = args[1]
-            text = args[2]
+            character, text = args[1], args[2]
         else:
-            # 尝试解析第一个词是否为角色
             parts = args[1].split(maxsplit=1)
             if len(parts) == 2:
-                potential_char = parts[0]
-                # 简单判断是否像角色ID（可调用缓存检查，此处简化）
-                character = potential_char
-                text = parts[1]
+                character, text = parts[0], parts[1]
         result = await self.send_ai_voice_tool(event, text, character)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
-    # ==================== 新增群管理管理员指令（使用群管理工具） ====================
+    # ==================== 群管指令 ====================
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ban_user")
     async def cmd_ban_user(self, event: AiocqhttpMessageEvent):
+        """禁言用户 /ban_user <QQ号> <禁言分钟>"""
         args = event.message_str.strip().split()
         if len(args) < 3:
             await event.send(MessageChain().message("用法：/ban_user <QQ号> <禁言分钟>"))
             return
-        user_id = args[1]
         try:
             minutes = int(args[2])
         except:
             await event.send(MessageChain().message("禁言时长必须是数字（分钟）"))
             return
-        result = await self.set_group_ban(event, user_id, minutes * 60)
+        result = await self.set_group_ban(event, args[1], minutes * 60)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("unban_user")
     async def cmd_unban_user(self, event: AiocqhttpMessageEvent):
+        """解禁用户 /unban_user <QQ号>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/unban_user <QQ号>"))
             return
-        user_id = args[1]
-        result = await self.set_group_ban(event, user_id, 0)
+        result = await self.set_group_ban(event, args[1], 0)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("kick")
     async def cmd_kick(self, event: AiocqhttpMessageEvent):
+        """踢出用户 /kick <QQ号>"""
         if not self.config.get("kick_enabled", True):
-            await event.send(MessageChain().message("❌ 踢人功能已被禁用（kick_enabled=false）"))
+            await event.send(MessageChain().message("❌ 踢人功能已被禁用"))
             return
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/kick <QQ号>"))
             return
-        user_id = args[1]
-        result = await self.set_group_kick(event, user_id)
+        result = await self.set_group_kick(event, args[1])
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("whole_ban")
     async def cmd_whole_ban(self, event: AiocqhttpMessageEvent):
+        """全体禁言 /whole_ban <on/off>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/whole_ban <on/off>"))
@@ -2661,93 +2875,95 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_card")
     async def cmd_set_card(self, event: AiocqhttpMessageEvent):
+        """修改群名片 /set_card <QQ号> <新群昵称>"""
         args = event.message_str.strip().split(maxsplit=2)
         if len(args) < 3:
-            await event.send(MessageChain().message("用法：/set_card <QQ号> <新群昵称>（空字符串取消）"))
+            await event.send(MessageChain().message("用法：/set_card <QQ号> <新群昵称>"))
             return
-        user_id = args[1]
-        card = args[2]
-        result = await self.set_group_card(event, user_id, card)
+        result = await self.set_group_card(event, args[1], args[2])
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("send_notice")
     async def cmd_send_notice(self, event: AiocqhttpMessageEvent):
+        """发布群公告 /send_notice <公告内容>"""
         args = event.message_str.strip().split(maxsplit=1)
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/send_notice <公告内容>"))
             return
-        content = args[1]
-        result = await self.send_group_notice(event, content)
+        result = await self.send_group_notice(event, args[1])
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("del_notice")
     async def cmd_del_notice(self, event: AiocqhttpMessageEvent):
+        """撤回群公告 /del_notice <公告ID>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/del_notice <公告ID>"))
             return
-        notice_id = args[1]
-        result = await self.delete_group_notice(event, notice_id)
+        result = await self.delete_group_notice(event, args[1])
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("list_files")
     async def cmd_list_files(self, event: AiocqhttpMessageEvent):
+        """查看群文件列表"""
         result = await self.list_group_files(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("delete_group_file")
     async def cmd_delete_group_file(self, event: AiocqhttpMessageEvent):
+        """删除群文件 /delete_group_file <file_id>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/delete_group_file <file_id>"))
             return
-        file_id = args[1]
-        result = await self.delete_group_file(event, file_id)
+        result = await self.delete_group_file(event, args[1])
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("group_members")
     async def cmd_group_members(self, event: AiocqhttpMessageEvent):
+        """获取群成员列表"""
         result = await self.get_group_members_info(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
-    # --- 新增指令实现 ---
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_admin")
     async def cmd_set_admin(self, event: AiocqhttpMessageEvent):
+        """设置/取消管理员 /set_admin <QQ号> <on/off>"""
         args = event.message_str.strip().split()
         if len(args) < 3:
             await event.send(MessageChain().message("用法：/set_admin <QQ号> <on/off>"))
             return
-        user_id = args[1]
         enable = args[2].lower() == "on"
-        result = await self.set_group_admin(event, user_id, enable)
+        result = await self.set_group_admin(event, args[1], enable)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_group_name")
     async def cmd_set_group_name(self, event: AiocqhttpMessageEvent):
+        """修改群名称 /set_group_name <新群名>"""
         args = event.message_str.strip().split(maxsplit=1)
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/set_group_name <新群名>"))
             return
-        name = args[1]
-        result = await self.set_group_name(event, name)
+        result = await self.set_group_name(event, args[1])
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("list_notices")
     async def cmd_list_notices(self, event: AiocqhttpMessageEvent):
+        """查看群公告列表"""
         result = await self.get_group_notice_list(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("upload_file")
     async def cmd_upload_file(self, event: AiocqhttpMessageEvent):
+        """上传群文件 /upload_file <文件路径> [文件名]"""
         args = event.message_str.strip().split(maxsplit=2)
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/upload_file <文件路径> [文件名]"))
@@ -2760,28 +2976,29 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("create_folder")
     async def cmd_create_folder(self, event: AiocqhttpMessageEvent):
+        """创建群文件夹 /create_folder <文件夹名>"""
         args = event.message_str.strip().split(maxsplit=1)
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/create_folder <文件夹名>"))
             return
-        folder_name = args[1]
-        result = await self.create_group_file_folder(event, folder_name)
+        result = await self.create_group_file_folder(event, args[1])
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("del_folder")
     async def cmd_del_folder(self, event: AiocqhttpMessageEvent):
+        """删除群文件夹 /del_folder <文件夹ID>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/del_folder <文件夹ID>"))
             return
-        folder_id = args[1]
-        result = await self.delete_group_folder(event, folder_id)
+        result = await self.delete_group_folder(event, args[1])
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("group_honor")
     async def cmd_group_honor(self, event: AiocqhttpMessageEvent):
+        """查看群荣誉 /group_honor [类型]"""
         args = event.message_str.strip().split()
         honor_type = args[1] if len(args) > 1 else "all"
         result = await self.get_group_honor_info(event, honor_type)
@@ -2790,60 +3007,183 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("at_all_remain")
     async def cmd_at_all_remain(self, event: AiocqhttpMessageEvent):
+        """查询@全体成员剩余次数"""
         result = await self.get_group_at_all_remain(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_title")
     async def cmd_set_title(self, event: AiocqhttpMessageEvent):
+        """设置专属头衔 /set_title <QQ号> <头衔>"""
         args = event.message_str.strip().split(maxsplit=2)
         if len(args) < 3:
-            await event.send(MessageChain().message("用法：/set_title <QQ号> <头衔>（空字符串取消）"))
+            await event.send(MessageChain().message("用法：/set_title <QQ号> <头衔>"))
             return
-        user_id = args[1]
-        title = args[2]
-        result = await self.set_group_special_title(event, user_id, title)
+        result = await self.set_group_special_title(event, args[1], args[2])
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("shut_list")
     async def cmd_shut_list(self, event: AiocqhttpMessageEvent):
+        """查看被禁言成员列表"""
         result = await self.get_group_shut_list(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ignore_requests")
     async def cmd_ignore_requests(self, event: AiocqhttpMessageEvent):
+        """查看被忽略的加群请求"""
         result = await self.get_group_ignore_add_request(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_add_option")
     async def cmd_set_add_option(self, event: AiocqhttpMessageEvent):
+        """设置加群方式 /set_add_option <allow/need_verify/not_allow>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/set_add_option <allow/need_verify/not_allow>"))
             return
-        option = args[1]
-        result = await self.set_group_add_option(event, option)
+        result = await self.set_group_add_option(event, args[1])
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("group_sign")
     async def cmd_group_sign(self, event: AiocqhttpMessageEvent):
+        """群打卡"""
         result = await self.send_group_sign(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
-    # ==================== 提示词注入（状态 + 记忆 + 群角色 + AI默认音色） ====================
+    # ==================== 新增指令：QQ头像 ====================
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("set_qq_avatar")
+    async def cmd_set_qq_avatar(self, event: AiocqhttpMessageEvent):
+        """设置QQ头像 /set_qq_avatar [图片路径/URL]（可引用图片）"""
+        args = event.message_str.strip().split(maxsplit=1)
+        file = args[1] if len(args) > 1 else ""
+        result = await self.set_qq_avatar(event, file)
+        await event.send(MessageChain().message(result.get("message", "操作失败")))
+
+    # ==================== 新增指令：群文件移动/重命名/传输 ====================
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("move_group_file")
+    async def cmd_move_group_file(self, event: AiocqhttpMessageEvent):
+        """移动群文件 /move_group_file <file_id> <当前目录> <目标目录>"""
+        args = event.message_str.strip().split()
+        if len(args) < 4:
+            await event.send(MessageChain().message("用法：/move_group_file <file_id> <当前目录> <目标目录>"))
+            return
+        file_id, current_dir, target_dir = args[1], args[2], args[3]
+        result = await self.move_group_file(event, file_id, current_dir, target_dir)
+        await event.send(MessageChain().message(result.get("message", "操作失败")))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("rename_group_file")
+    async def cmd_rename_group_file(self, event: AiocqhttpMessageEvent):
+        """重命名群文件 /rename_group_file <file_id> <当前目录> <新名称>"""
+        args = event.message_str.strip().split(maxsplit=3)
+        if len(args) < 4:
+            await event.send(MessageChain().message("用法：/rename_group_file <file_id> <当前目录> <新名称>"))
+            return
+        file_id, current_dir, new_name = args[1], args[2], args[3]
+        result = await self.rename_group_file(event, file_id, current_dir, new_name)
+        await event.send(MessageChain().message(result.get("message", "操作失败")))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("trans_group_file")
+    async def cmd_trans_group_file(self, event: AiocqhttpMessageEvent):
+        """传输群文件 /trans_group_file <file_id>"""
+        args = event.message_str.strip().split()
+        if len(args) < 2:
+            await event.send(MessageChain().message("用法：/trans_group_file <file_id>"))
+            return
+        result = await self.trans_group_file(event, args[1])
+        await event.send(MessageChain().message(result.get("message", "操作失败")))
+
+    # ==================== 新增指令：点赞 ====================
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("send_like")
+    async def cmd_send_like(self, event: AstrMessageEvent):
+        """点赞 /send_like <QQ号> [次数]"""
+        args = event.message_str.strip().split()
+        if len(args) < 2:
+            await event.send(MessageChain().message("用法：/send_like <QQ号> [次数]"))
+            return
+        user_id = args[1]
+        times = int(args[2]) if len(args) > 2 and args[2].isdigit() else 1
+        result = await self.send_like_tool(event, user_id, times)
+        await event.send(MessageChain().message(result.get("message", "操作失败")))
+
+    # ==================== 新增指令：获取历史消息 ====================
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("get_group_msg_history")
+    async def cmd_get_group_msg_history(self, event: AstrMessageEvent):
+        """获取群历史消息 /get_group_msg_history [群号] [起始序号] [数量]"""
+        args = event.message_str.strip().split()
+        group_id = args[1] if len(args) > 1 else ""
+        message_seq = int(args[2]) if len(args) > 2 and args[2].isdigit() else 0
+        count = int(args[3]) if len(args) > 3 and args[3].isdigit() else 20
+        result = await self.get_group_msg_history(event, group_id, message_seq, count)
+        await event.send(MessageChain().message(result.get("message", "操作失败")))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("get_friend_msg_history")
+    async def cmd_get_friend_msg_history(self, event: AstrMessageEvent):
+        """获取好友历史消息 /get_friend_msg_history <QQ号> [起始序号] [数量]"""
+        args = event.message_str.strip().split()
+        if len(args) < 2:
+            await event.send(MessageChain().message("用法：/get_friend_msg_history <QQ号> [起始序号] [数量]"))
+            return
+        user_id = args[1]
+        message_seq = int(args[2]) if len(args) > 2 and args[2].isdigit() else 0
+        count = int(args[3]) if len(args) > 3 and args[3].isdigit() else 20
+        result = await self.get_friend_msg_history(event, user_id, message_seq, count)
+        await event.send(MessageChain().message(result.get("message", "操作失败")))
+
+    # ==================== 新增指令：设置群头像 ====================
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("set_group_portrait")
+    async def cmd_set_group_portrait(self, event: AiocqhttpMessageEvent):
+        """设置群头像 /set_group_portrait [群号]（可引用图片）"""
+        args = event.message_str.strip().split(maxsplit=1)
+        group_id = args[1] if len(args) > 1 else ""
+        file = ""
+        # 如果参数中包含图片URL，可自行解析，这里简化为从引用获取
+        result = await self.set_group_portrait(event, group_id, file)
+        await event.send(MessageChain().message(result.get("message", "操作失败")))
+
+    # ==================== 新增指令：获取自定义表情 ====================
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("fetch_custom_face")
+    async def cmd_fetch_custom_face(self, event: AstrMessageEvent):
+        """获取自定义表情列表 /fetch_custom_face [数量]"""
+        args = event.message_str.strip().split()
+        count = int(args[1]) if len(args) > 1 and args[1].isdigit() else 48
+        result = await self.fetch_custom_face(event, count)
+        await event.send(MessageChain().message(result.get("message", "操作失败")))
+
+    # ==================== 新增指令：设置输入状态 ====================
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("set_input_status")
+    async def cmd_set_input_status(self, event: AstrMessageEvent):
+        """设置输入状态 /set_input_status <QQ号> <类型>（1=正在输入，2=取消）"""
+        args = event.message_str.strip().split()
+        if len(args) < 3:
+            await event.send(MessageChain().message("用法：/set_input_status <QQ号> <类型>"))
+            return
+        user_id = args[1]
+        event_type = int(args[2]) if args[2].isdigit() else 1
+        result = await self.set_input_status_tool(event, user_id, event_type)
+        await event.send(MessageChain().message(result.get("message", "操作失败")))
+
+    # ==================== 提示词注入 ====================
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, request: Any, *args, **kwargs) -> None:
         try:
             inject_parts = []
-            # 状态注入
             status_desc = self.status_manager.get_current_status_desc()
             inject_parts.append(f"[系统状态] {status_desc}")
 
-            # 记忆注入
             if self.config.get("enabled", True) and event.get_platform_name() in ["aiocqhttp", "qq"] and self.config.get("memory_inject_enabled", True):
                 user_id = event.get_sender_id()
                 max_memories = self.config.get("max_inject_memories", 5)
@@ -2856,7 +3196,6 @@ class Main(Star):
                         memory_lines.append(f"{i}. {content} {tags}")
                     inject_parts.append("\n".join(memory_lines))
 
-            # 群角色注入
             if self.config.get("enabled", True) and event.get_platform_name() in ["aiocqhttp", "qq"] and self.config.get("inject_group_role_enabled", True):
                 if not event.is_private_chat():
                     group_id = event.get_group_id()
@@ -2866,11 +3205,23 @@ class Main(Star):
                         if role != "unknown":
                             inject_parts.append(f"[当前群身份] 用户 {user_id} 在本群({group_id})的身份是：{role}")
 
-            # AI声聊默认配置注入（帮助LLM直接使用默认音色）
             if self.ai_default_character:
-                inject_parts.append(f"[AI语音配置] 默认角色ID为 '{self.ai_default_character}'。调用 send_ai_voice 时若未指定角色，将自动使用此默认值，无需先调用 get_ai_characters。")
+                inject_parts.append(f"[AI语音配置] 默认角色ID为 '{self.ai_default_character}'。调用 send_ai_voice 时若未指定角色，将自动使用此默认值。")
             else:
                 inject_parts.append("[AI语音配置] 未设置默认角色。调用 send_ai_voice 时若未指定角色，将自动选择第一个可用角色。")
+
+            # 自动输入状态
+            if self.auto_input_status_enabled and hasattr(event, 'get_session_id'):
+                try:
+                    client = await self._get_client(event)
+                    if client:
+                        session_id = event.get_session_id()
+                        if event.is_private_chat():
+                            user_id = event.get_sender_id()
+                            await client.call_action('set_input_status', user_id=user_id, event_type=1)
+                        # 群聊暂不自动设置，因为可能需要指定user_id
+                except Exception as e:
+                    logger.debug(f"自动设置输入状态失败: {e}")
 
             if inject_parts:
                 inject_text = "\n".join(inject_parts)
@@ -2880,3 +3231,15 @@ class Main(Star):
                     request.system_prompt = inject_text + "\n"
         except Exception as e:
             logger.error(f"[注入] 失败: {e}")
+
+    @filter.on_llm_response()
+    async def on_llm_response(self, event: AstrMessageEvent, resp: Any) -> None:
+        """LLM响应后取消输入状态"""
+        if self.auto_input_status_enabled:
+            try:
+                client = await self._get_client(event)
+                if client and event.is_private_chat():
+                    user_id = event.get_sender_id()
+                    await client.call_action('set_input_status', user_id=user_id, event_type=2)
+            except Exception as e:
+                logger.debug(f"取消输入状态失败: {e}")
