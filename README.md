@@ -258,6 +258,9 @@ LLM：调用 send_email(recipient="admin@example.com", subject="HTML邮件", bod
 ## 更新日志
  ## ***详细更新日志请查看CHANGELOG.md***
 
+### v3.0.0
+-重点优化了LLM工具调用逻辑，避免一次性注入过多工具造成token浪费
+
 ### v2.1.0
 - Ok啊，也是每天更新一次
 - 加了一堆工具，群管工具也加了不少，群文件也加了不少
