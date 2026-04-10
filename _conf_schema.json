@@ -121,5 +121,306 @@
     "type": "int",
     "default": 10,
     "hint": "若未收到回复，多久后自动取消输入状态"
+  },
+
+  "enable_add_memory": {
+    "description": "启用工具: add_memory (添加记忆)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_search_memories": {
+    "description": "启用工具: search_memories (搜索记忆)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_update_memory": {
+    "description": "启用工具: update_memory (更新记忆)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_delete_memory": {
+    "description": "启用工具: delete_memory (删除记忆)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_get_memory_detail": {
+    "description": "启用工具: get_memory_detail (获取记忆详情)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_send_message": {
+    "description": "启用工具: send_message (发送消息)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_schedule_message": {
+    "description": "启用工具: schedule_message (定时消息)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_cancel_scheduled_message": {
+    "description": "启用工具: cancel_scheduled_message (取消定时消息)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_list_scheduled_messages": {
+    "description": "启用工具: list_scheduled_messages (列出定时消息)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_publish_qzone": {
+    "description": "启用工具: publish_qzone (发QQ空间说说)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_send_poke": {
+    "description": "启用工具: send_poke (戳一戳)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_update_qq_status": {
+    "description": "启用工具: update_qq_status (设置QQ状态)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_get_qq_status": {
+    "description": "启用工具: get_qq_status (获取QQ状态)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_get_fun_status_list": {
+    "description": "启用工具: get_fun_status_list (获取娱乐状态列表)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_create_scheduled_command": {
+    "description": "启用工具: create_scheduled_command (创建高级定时指令)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_list_scheduled_commands": {
+    "description": "启用工具: list_scheduled_commands (列出高级定时指令)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_cancel_scheduled_command": {
+    "description": "启用工具: cancel_scheduled_command (取消高级定时指令)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_delete_scheduled_command": {
+    "description": "启用工具: delete_scheduled_command (删除高级定时指令)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_recall_by_reply": {
+    "description": "启用工具: recall_by_reply (撤回消息)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_send_qq_email": {
+    "description": "启用工具: send_qq_email (发送QQ邮件)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_get_user_group_role": {
+    "description": "启用工具: get_user_group_role (查询群成员身份)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_set_essence_msg": {
+    "description": "启用工具: set_essence_msg (设置精华消息)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_delete_essence_msg": {
+    "description": "启用工具: delete_essence_msg (取消精华消息)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_set_group_ban": {
+    "description": "启用工具: set_group_ban (禁言/解禁)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_set_group_kick": {
+    "description": "启用工具: set_group_kick (踢人)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_set_group_whole_ban": {
+    "description": "启用工具: set_group_whole_ban (全体禁言)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_set_group_card": {
+    "description": "启用工具: set_group_card (修改群名片)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_send_group_notice": {
+    "description": "启用工具: send_group_notice (发布群公告)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_delete_group_notice": {
+    "description": "启用工具: delete_group_notice (删除群公告)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_list_group_files": {
+    "description": "启用工具: list_group_files (查看群文件)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_delete_group_file": {
+    "description": "启用工具: delete_group_file (删除群文件)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_get_group_members_info": {
+    "description": "启用工具: get_group_members_info (获取群成员列表)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_set_group_admin": {
+    "description": "启用工具: set_group_admin (设置/取消管理员)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_set_group_name": {
+    "description": "启用工具: set_group_name (修改群名称)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_get_group_notice_list": {
+    "description": "启用工具: get_group_notice_list (查看群公告列表)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_upload_group_file": {
+    "description": "启用工具: upload_group_file (上传群文件)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_create_group_file_folder": {
+    "description": "启用工具: create_group_file_folder (创建群文件夹)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_delete_group_folder": {
+    "description": "启用工具: delete_group_folder (删除群文件夹)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_get_group_honor_info": {
+    "description": "启用工具: get_group_honor_info (获取群荣誉)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_get_group_at_all_remain": {
+    "description": "启用工具: get_group_at_all_remain (查询@全体剩余次数)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_set_group_special_title": {
+    "description": "启用工具: set_group_special_title (设置专属头衔)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_get_group_shut_list": {
+    "description": "启用工具: get_group_shut_list (获取禁言列表)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_get_group_ignore_add_request": {
+    "description": "启用工具: get_group_ignore_add_request (获取忽略加群请求)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_set_group_add_option": {
+    "description": "启用工具: set_group_add_option (设置加群方式)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_send_group_sign": {
+    "description": "启用工具: send_group_sign (群打卡)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_set_qq_avatar": {
+    "description": "启用工具: set_qq_avatar (设置QQ头像)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_move_group_file": {
+    "description": "启用工具: move_group_file (移动群文件)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_rename_group_file": {
+    "description": "启用工具: rename_group_file (重命名群文件)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_trans_group_file": {
+    "description": "启用工具: trans_group_file (传输群文件)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_send_like": {
+    "description": "启用工具: send_like (点赞)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_get_group_msg_history": {
+    "description": "启用工具: get_group_msg_history (获取群历史消息)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_get_friend_msg_history": {
+    "description": "启用工具: get_friend_msg_history (获取好友历史消息)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_set_group_portrait": {
+    "description": "启用工具: set_group_portrait (设置群头像)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_fetch_custom_face": {
+    "description": "启用工具: fetch_custom_face (获取自定义表情)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_set_input_status": {
+    "description": "启用工具: set_input_status (设置输入状态)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_get_ai_characters": {
+    "description": "启用工具: get_ai_characters (获取AI语音角色)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_send_ai_voice": {
+    "description": "启用工具: send_ai_voice (发送AI语音)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_search_contacts": {
+    "description": "启用工具: search_contacts (搜索联系人)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_list_contacts": {
+    "description": "启用工具: list_contacts (列出联系人)",
+    "type": "bool",
+    "default": true
+  },
+  "enable_set_qq_profile": {
+    "description": "启用工具: set_qq_profile (修改个人资料)",
+    "type": "bool",
+    "default": true
   }
 }
