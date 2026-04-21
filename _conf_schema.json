@@ -122,7 +122,30 @@
     "default": 10,
     "hint": "若未收到回复，多久后自动取消输入状态"
   },
-
+  "enable_human_typing": {
+    "description": "是否启用拟人化输入延迟与闪烁（仅私聊生效）",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，机器人会在长时间未对话时随机延迟回复，并模拟真人打字停顿"
+  },
+  "typing_idle_threshold": {
+    "description": "拟人化空闲阈值（秒），距离上次对话超过此时间将触发延迟",
+    "type": "int",
+    "default": 900,
+    "hint": "默认900秒即15分钟"
+  },
+  "typing_initial_delay_min": {
+    "description": "拟人化初始延迟最小值（秒）",
+    "type": "int",
+    "default": 5,
+    "hint": "随机延迟的下限"
+  },
+  "typing_initial_delay_max": {
+    "description": "拟人化初始延迟最大值（秒）",
+    "type": "int",
+    "default": 15,
+    "hint": "随机延迟的上限"
+  },
   "enable_add_memory": {
     "description": "启用工具: add_memory (添加记忆)",
     "type": "bool",
