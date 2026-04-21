@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import asyncio
 import json
 import os
@@ -5,6 +6,7 @@ import re
 import time
 import uuid
 import smtplib
+import random
 from email.mime.text import MIMEText
 from email.header import Header
 from email.utils import formataddr
@@ -25,7 +27,6 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 
 
-# ==================== 独立文件存储的记忆管理类 ====================
 class MemoryManager:
     def __init__(self, data_dir: str, max_memories_per_user: int = 100):
         self.data_dir = data_dir
@@ -144,7 +145,6 @@ class MemoryManager:
         return await self.get_memories(user_id=user_id, limit=count, sort_by="updated_at")
 
 
-# ==================== 数据库管理（定时任务） ====================
 class DatabaseManager:
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
@@ -258,7 +258,6 @@ class DatabaseManager:
         await self.save_status("online", "在线", None)
 
 
-# ==================== QQ空间相关 ====================
 class QzoneSession:
     def __init__(self):
         self.uin: str = ""
@@ -542,9 +541,6 @@ class ScheduledCommandExecutor:
     def stop_periodic_check(self):
         self._stop_check = True
 
-    async def schedule_command(self, task_id: str, execute_time: datetime, command_type: str, params: dict, session_info: dict = None):
-        pass
-
     def cancel_task(self, task_id: str):
         if task_id in self.running_tasks:
             task = self.running_tasks[task_id]
@@ -656,7 +652,6 @@ class EmailSender:
             return {"success": False, "msg": f"发送失败: {str(e)}"}
 
 
-# ==================== 主插件类 ====================
 class Main(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -691,82 +686,44 @@ class Main(Star):
         self._refresh_task: Optional[asyncio.Task] = None
         self._refresh_lock = asyncio.Lock()
 
-        # AI 声聊配置
         self.ai_default_character = self.config.get("ai_voice_default_character", "")
         self.ai_voice_max_length = self.config.get("ai_voice_max_text_length", 500)
         self._ai_characters_cache: Dict[str, Tuple[float, list]] = {}
 
-        # 自动输入状态配置
         self.auto_input_status_enabled = self.config.get("auto_input_status_enabled", False)
         self.auto_input_status_timeout = self.config.get("auto_input_status_timeout", 10)
 
-        # 加载工具启用状态
         self.tool_enabled = self._load_tool_enabled_flags()
-        # 构建工具注册表
         self._tool_registry = self._build_tool_registry()
 
+        # 拟人化输入状态配置
+        self.enable_human_typing = self.config.get("enable_human_typing", False)
+        self.typing_idle_threshold = self.config.get("typing_idle_threshold", 900)  # 默认15分钟
+        self.typing_initial_delay_min = self.config.get("typing_initial_delay_min", 5)
+        self.typing_initial_delay_max = self.config.get("typing_initial_delay_max", 15)
+        self._user_last_active: Dict[str, float] = {}
+        self._typing_lock = asyncio.Lock()
+
     def _load_tool_enabled_flags(self) -> Dict[str, bool]:
-        """从配置中读取每个工具的启用状态，默认全部启用"""
         default_enabled = {
-            "add_memory": True,
-            "search_memories": True,
-            "update_memory": True,
-            "delete_memory": True,
-            "get_memory_detail": True,
-            "send_message": True,
-            "schedule_message": True,
-            "cancel_scheduled_message": True,
-            "list_scheduled_messages": True,
-            "publish_qzone": True,
-            "send_poke": True,
-            "update_qq_status": True,
-            "get_qq_status": True,
-            "get_fun_status_list": True,
-            "create_scheduled_command": True,
-            "list_scheduled_commands": True,
-            "cancel_scheduled_command": True,
-            "delete_scheduled_command": True,
-            "recall_by_reply": True,
-            "send_qq_email": True,
-            "get_user_group_role": True,
-            "set_essence_msg": True,
-            "delete_essence_msg": True,
-            "set_group_ban": True,
-            "set_group_kick": True,
-            "set_group_whole_ban": True,
-            "set_group_card": True,
-            "send_group_notice": True,
-            "delete_group_notice": True,
-            "list_group_files": True,
-            "delete_group_file": True,
-            "get_group_members_info": True,
-            "set_group_admin": True,
-            "set_group_name": True,
-            "get_group_notice_list": True,
-            "upload_group_file": True,
-            "create_group_file_folder": True,
-            "delete_group_folder": True,
-            "get_group_honor_info": True,
-            "get_group_at_all_remain": True,
-            "set_group_special_title": True,
-            "get_group_shut_list": True,
-            "get_group_ignore_add_request": True,
-            "set_group_add_option": True,
-            "send_group_sign": True,
-            "set_qq_avatar": True,
-            "move_group_file": True,
-            "rename_group_file": True,
-            "trans_group_file": True,
-            "send_like": True,
-            "get_group_msg_history": True,
-            "get_friend_msg_history": True,
-            "set_group_portrait": True,
-            "fetch_custom_face": True,
-            "set_input_status": True,
-            "get_ai_characters": True,
-            "send_ai_voice": True,
-            "search_contacts": True,
-            "list_contacts": True,
+            "add_memory": True, "search_memories": True, "update_memory": True, "delete_memory": True,
+            "get_memory_detail": True, "send_message": True, "schedule_message": True,
+            "cancel_scheduled_message": True, "list_scheduled_messages": True, "publish_qzone": True,
+            "send_poke": True, "update_qq_status": True, "get_qq_status": True, "get_fun_status_list": True,
+            "create_scheduled_command": True, "list_scheduled_commands": True, "cancel_scheduled_command": True,
+            "delete_scheduled_command": True, "recall_by_reply": True, "send_qq_email": True,
+            "get_user_group_role": True, "set_essence_msg": True, "delete_essence_msg": True,
+            "set_group_ban": True, "set_group_kick": True, "set_group_whole_ban": True, "set_group_card": True,
+            "send_group_notice": True, "delete_group_notice": True, "list_group_files": True,
+            "delete_group_file": True, "get_group_members_info": True, "set_group_admin": True,
+            "set_group_name": True, "get_group_notice_list": True, "upload_group_file": True,
+            "create_group_file_folder": True, "delete_group_folder": True, "get_group_honor_info": True,
+            "get_group_at_all_remain": True, "set_group_special_title": True, "get_group_shut_list": True,
+            "get_group_ignore_add_request": True, "set_group_add_option": True, "send_group_sign": True,
+            "set_qq_avatar": True, "move_group_file": True, "rename_group_file": True, "trans_group_file": True,
+            "send_like": True, "get_group_msg_history": True, "get_friend_msg_history": True,
+            "set_group_portrait": True, "fetch_custom_face": True, "set_input_status": True,
+            "get_ai_characters": True, "send_ai_voice": True, "search_contacts": True, "list_contacts": True,
             "set_qq_profile": True,
         }
         for tool_name in default_enabled.keys():
@@ -776,7 +733,6 @@ class Main(Star):
         return default_enabled
 
     def _get_available_tools(self) -> Dict[str, dict]:
-        """返回已启用的工具注册表子集"""
         if not self.config.get("enabled", True):
             return {}
         available = {}
@@ -785,7 +741,6 @@ class Main(Star):
                 available[name] = meta
         return available
 
-    # ==================== 工具注册表构建 ====================
     def _build_tool_registry(self) -> Dict[str, dict]:
         registry = {}
 
@@ -804,7 +759,11 @@ class Main(Star):
             },
             "keywords": [
                 "记忆", "保存记忆", "记住", "添加记忆", "存储记忆", "备忘录", "笔记", "记录", "备忘", "提醒内容",
-                "个人信息", "偏好", "喜好", "习惯", "重要信息", "用户资料", "存档", "留存", "write memory", "save note"
+                "个人信息", "偏好", "喜好", "习惯", "重要信息", "用户资料", "存档", "留存", "write memory", "save note",
+                "记一下", "记下来", "帮我记", "给我记", "备注一下", "存一下", "写下来", "留个底", "别忘了", "提醒我",
+                "记个事", "记事本", "记忆本", "记忆库", "add note", "remember this", "memorize", "store info",
+                "keep in mind", "note down", "jot down", "record info", "存档信息", "保存资料", "记住这个", "别忘掉",
+                "脑子记一下", "记一笔", "留个记录", "俺记一下", "侬记牢", "记到", "记住哈", "记好", "mark memory", "set reminder"
             ],
             "handler": self.add_memory
         }
@@ -823,7 +782,12 @@ class Main(Star):
             },
             "keywords": [
                 "搜索记忆", "查找记忆", "回忆", "查询记忆", "记忆搜索", "检索笔记", "找一下", "记忆列表", "列出记忆",
-                "search memory", "find note", "recall", "查看记忆", "我的记忆", "用户记忆"
+                "search memory", "find note", "recall", "查看记忆", "我的记忆", "用户记忆", "搜寻记忆", "翻记忆",
+                "找记忆", "搜一下记忆", "记忆查询", "查询笔记", "查记录", "有啥记忆", "记得什么", "回忆一下", "回想",
+                "想想以前", "以前记的", "历史记录", "过往记录", "搜索笔记", "查找笔记", "找找看", "检索记忆", "找回忆",
+                "回忆录", "个人档案", "资料查询", "信息检索", "查存档", "看存档", "读记忆", "读取记忆", "翻阅记忆",
+                "查看记录", "看记录", "搜记录", "检索记录", "查备忘", "看备忘", "搜索备忘", "search note", "query memory",
+                "lookup memory", "find memory", "recall memory"
             ],
             "handler": self.search_memories
         }
@@ -842,7 +806,12 @@ class Main(Star):
                 "required": ["memory_id"]
             },
             "keywords": [
-                "修改记忆", "更新记忆", "编辑记忆", "更改笔记", "修改备忘", "update memory", "edit note"
+                "修改记忆", "更新记忆", "编辑记忆", "更改笔记", "修改备忘", "update memory", "edit note", "改记忆",
+                "修正记忆", "调整记忆", "刷新记忆", "更新笔记", "修改记录", "编辑记录", "改备注", "修正备注",
+                "改一下记忆", "更新一下", "编辑一下", "修改存档", "更新存档", "刷新存档", "修正信息", "更正信息",
+                "改内容", "更新内容", "修改内容", "编辑内容", "调整内容", "变更记忆", "改变记忆", "变动记忆",
+                "修改个人信息", "更新资料", "编辑资料", "change memory", "modify note", "revise memory",
+                "alter memory", "update note", "refresh memory", "correct memory", "amend memory"
             ],
             "handler": self.update_memory
         }
@@ -858,7 +827,12 @@ class Main(Star):
                 "required": ["memory_id"]
             },
             "keywords": [
-                "删除记忆", "移除记忆", "忘记", "清除记忆", "删掉笔记", "delete memory", "remove note"
+                "删除记忆", "移除记忆", "忘记", "清除记忆", "删掉笔记", "delete memory", "remove note", "删记忆",
+                "消除记忆", "抹除记忆", "擦除记忆", "去掉记忆", "清理记忆", "丢弃记忆", "舍弃记忆", "扔掉记忆",
+                "删了它", "不要了", "作废", "删除记录", "移除记录", "清除记录", "删档", "删掉存档", "删除备忘",
+                "移除备忘", "清除备忘", "删除存档", "移除存档", "清除存档", "forget", "erase memory", "wipe memory",
+                "discard memory", "drop memory", "purge memory", "clear memory", "delete note", "remove memory",
+                "clean memory", "删掉记忆", "抹掉记忆", "取消记忆", "撤销记忆"
             ],
             "handler": self.delete_memory
         }
@@ -874,7 +848,11 @@ class Main(Star):
                 "required": ["memory_id"]
             },
             "keywords": [
-                "记忆详情", "查看记忆", "记忆内容", "具体记忆", "detail memory", "show note"
+                "记忆详情", "查看记忆", "记忆内容", "具体记忆", "detail memory", "show note", "查看详细", "详细记忆",
+                "记忆明细", "记忆信息", "显示记忆", "展示记忆", "查看某条记忆", "看那条记忆", "那条记忆是什么",
+                "记忆详情页", "记忆详细内容", "具体内容", "查看具体", "详细内容", "完整记忆", "记忆全文",
+                "查看完整记录", "显示完整信息", "get memory detail", "view memory", "show memory", "inspect memory",
+                "memory info", "memory details", "look at memory", "examine memory", "check memory"
             ],
             "handler": self.get_memory_detail
         }
@@ -893,7 +871,11 @@ class Main(Star):
                 "required": ["target_id", "message"]
             },
             "keywords": [
-                "发消息", "发送消息", "发信息", "私聊", "群发", "告诉", "通知", "send msg", "message", "chat"
+                "发消息", "发送消息", "发信息", "私聊", "群发", "告诉", "通知", "send msg", "message", "chat",
+                "发一条", "发个消息", "发信息给", "给某人发消息", "传话", "转告", "告知", "通报", "传达", "发文字",
+                "发短信", "发送文本", "群内发", "群里说", "在群里发", "私信", "小窗", "私聊一下", "单独发", "send text",
+                "text someone", "message someone", "notify", "alert", "ping", "发个信息", "捎个话", "带个话",
+                "讲一声", "说一声", "通知一下", "告诉一下", "告知一下", "转达一下", "传达一下", "发过去"
             ],
             "handler": self.send_message_tool
         }
@@ -912,7 +894,11 @@ class Main(Star):
                 "required": ["target_id", "message", "send_time"]
             },
             "keywords": [
-                "定时消息", "定时发送", "延迟消息", "计划发送", "schedule", "reminder", "稍后发送", "预约消息"
+                "定时消息", "定时发送", "延迟消息", "计划发送", "schedule", "reminder", "稍后发送", "预约消息",
+                "定时发", "定时提醒", "到时发", "预约发送", "延迟发送", "预定消息", "设置定时", "定时任务", "闹钟消息",
+                "定时传话", "定时通知", "定时告知", "定时转告", "定时提醒我", "定时告诉他", "定时告诉她", "定时广播",
+                "定时群发", "定时私聊", "delay message", "send later", "schedule msg", "scheduled text",
+                "future message", "plan message", "time message", "set reminder", "alarm message"
             ],
             "handler": self.schedule_message
         }
@@ -928,7 +914,10 @@ class Main(Star):
                 "required": ["task_id"]
             },
             "keywords": [
-                "取消定时", "撤销定时", "取消任务", "cancel schedule", "删除定时"
+                "取消定时", "撤销定时", "取消任务", "cancel schedule", "删除定时", "取消预约", "取消预定", "取消闹钟",
+                "停止定时", "终止定时", "取消定时消息", "撤销定时消息", "取消延迟", "撤销延迟", "取消计划", "取消安排",
+                "cancel reminder", "stop schedule", "remove schedule", "unschedule", "drop task", "abort task",
+                "取消那个任务", "不要定时了", "算了别发了", "取消发送", "撤销发送"
             ],
             "handler": self.cancel_scheduled_message
         }
@@ -944,7 +933,10 @@ class Main(Star):
                 "required": []
             },
             "keywords": [
-                "定时列表", "查看定时", "任务列表", "pending tasks", "scheduled list"
+                "定时列表", "查看定时", "任务列表", "pending tasks", "scheduled list", "有哪些定时", "定时任务列表",
+                "查看预约", "查看计划", "定时清单", "待发送列表", "排队消息", "列出定时", "显示定时", "展示定时",
+                "list schedules", "show scheduled", "view schedules", "get tasks", "check tasks", "all timers",
+                "当前定时", "进行中的定时"
             ],
             "handler": self.list_scheduled_messages
         }
@@ -961,7 +953,9 @@ class Main(Star):
                 "required": ["content"]
             },
             "keywords": [
-                "发说说", "空间动态", "QQ空间", "发空间", "publish post", "qzone", "说说"
+                "发说说", "空间动态", "QQ空间", "发空间", "publish post", "qzone", "说说", "发一条说说", "写说说",
+                "分享到空间", "空间发文", "空间说说", "发表动态", "空间状态", "空间日志", "写日志", "post to qzone",
+                "update qzone", "share to qzone", "qzone feed", "说说内容", "发个说说", "更新空间", "发动态"
             ],
             "handler": self.publish_qzone
         }
@@ -979,7 +973,9 @@ class Main(Star):
                 "required": ["target_qq"]
             },
             "keywords": [
-                "戳一戳", "窗口抖动", "poke", "戳", "抖动", "提醒", "戳一下"
+                "戳一戳", "窗口抖动", "poke", "戳", "抖动", "提醒", "戳一下", "戳他", "戳她", "戳戳", "戳人", "抖窗",
+                "振屏", "拍一拍", "碰一碰", "轻触", "点一下", "戳一下用户", "抖动窗口", "send poke", "nudge", "tap",
+                "shake", "buzz", "ping someone"
             ],
             "handler": self.send_poke
         }
@@ -999,7 +995,10 @@ class Main(Star):
             },
             "keywords": [
                 "在线状态", "QQ状态", "设置状态", "隐身", "忙碌", "离开", "Q我吧", "请勿打扰", "听歌中", "睡觉中", "学习中",
-                "status", "online", "away", "busy", "invisible"
+                "status", "online", "away", "busy", "invisible", "状态切换", "改状态", "换状态", "设置在线", "设为隐身",
+                "设为忙碌", "设为离开", "设为Q我吧", "设为请勿打扰", "设为听歌中", "设为睡觉中", "设为学习中", "调整状态",
+                "变更状态", "修改状态", "更新状态", "change status", "set status", "update status", "status update",
+                "appear offline", "go invisible", "go busy", "go away", "set online", "状态设置"
             ],
             "handler": self.update_qq_status
         }
@@ -1009,7 +1008,9 @@ class Main(Star):
             "description": "获取当前QQ在线状态描述（包含剩余时间）。",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
-                "当前状态", "状态查询", "在线状态查询", "get status", "查看状态"
+                "当前状态", "状态查询", "在线状态查询", "get status", "查看状态", "我现在什么状态", "什么状态",
+                "查询状态", "看看状态", "我的状态", "机器人状态", "bot状态", "check status", "show status",
+                "status info", "current status", "what is my status"
             ],
             "handler": self.get_qq_status
         }
@@ -1019,7 +1020,8 @@ class Main(Star):
             "description": "获取可用的娱乐状态列表。",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
-                "娱乐状态", "fun status", "状态列表", "可用状态"
+                "娱乐状态", "fun status", "状态列表", "可用状态", "有哪些娱乐状态", "娱乐状态列表", "趣味状态",
+                "特殊状态", "所有状态", "状态选项", "可选状态", "list status", "get status list", "show statuses"
             ],
             "handler": self.get_fun_status_list
         }
@@ -1039,7 +1041,10 @@ class Main(Star):
                 "required": ["command_type", "execute_time", "params"]
             },
             "keywords": [
-                "高级定时", "持久定时", "定时指令", "计划任务", "cron", "scheduled command", "自动化", "定时发空间", "定时改状态"
+                "高级定时", "持久定时", "定时指令", "计划任务", "cron", "scheduled command", "自动化", "定时发空间",
+                "定时改状态", "定时提醒", "每天定时", "重复任务", "周期任务", "例行任务", "预约指令", "延迟执行",
+                "计划指令", "预置任务", "设置自动化", "自动化任务", "定时执行", "计划执行", "create cron", "schedule job",
+                "set cron", "add cron", "new schedule", "定时任务持久化", "重启后保留", "永久定时"
             ],
             "handler": self.create_scheduled_command
         }
@@ -1055,7 +1060,9 @@ class Main(Star):
                 "required": []
             },
             "keywords": [
-                "定时指令列表", "查看计划", "cron list", "scheduled commands list"
+                "定时指令列表", "查看计划", "cron list", "scheduled commands list", "列出高级定时", "高级定时列表",
+                "查看自动化任务", "自动化列表", "计划列表", "查看 cron", "show crons", "list jobs", "get schedules",
+                "有哪些定时任务"
             ],
             "handler": self.list_scheduled_commands
         }
@@ -1071,7 +1078,9 @@ class Main(Star):
                 "required": ["task_id"]
             },
             "keywords": [
-                "取消计划", "取消定时指令", "cancel cron", "delete scheduled command"
+                "取消计划", "取消定时指令", "cancel cron", "delete scheduled command", "停止高级定时",
+                "终止定时任务", "取消自动化", "取消预约", "取消周期", "取消重复", "取消计划任务", "abort cron",
+                "stop schedule", "remove cron"
             ],
             "handler": self.cancel_scheduled_command
         }
@@ -1087,7 +1096,8 @@ class Main(Star):
                 "required": ["task_id"]
             },
             "keywords": [
-                "删除计划", "移除定时指令", "永久删除", "delete cron"
+                "删除计划", "移除定时指令", "永久删除", "delete cron", "清除任务", "删除高级定时", "删除自动化",
+                "抹掉任务", "清除 cron", "移除 cron", "remove job", "delete job"
             ],
             "handler": self.delete_scheduled_command
         }
@@ -1098,7 +1108,9 @@ class Main(Star):
             "description": "通过引用消息撤回群聊消息。使用时需要引用要撤回的消息（回复时勾选引用）。仅支持QQ群聊。",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
-                "撤回", "撤回消息", "recall", "delete message", "撤销", "删消息"
+                "撤回", "撤回消息", "recall", "delete message", "撤销", "删消息", "撤回那条", "撤销消息", "收回",
+                "取消发送", "撤回我的", "撤了", "撤掉", "撤除", "撤回刚发的", "撤回上一句", "撤回群消息", "recall msg",
+                "unsend", "revoke", "retract", "withdraw", "remove message"
             ],
             "handler": self.recall_by_reply
         }
@@ -1118,7 +1130,9 @@ class Main(Star):
                 "required": ["to", "subject", "content"]
             },
             "keywords": [
-                "邮件", "发送邮件", "email", "QQ邮箱", "邮箱", "mail", "发信"
+                "邮件", "发送邮件", "email", "QQ邮箱", "邮箱", "mail", "发信", "发邮件", "寄信", "写信", "send email",
+                "e-mail", "电子邮件", "电邮", "发伊妹儿", "邮寄", "发封信", "发个邮件", "发一封邮件", "send mail",
+                "mail to", "email to", "compose email", "send an email"
             ],
             "handler": self.send_qq_email_tool
         }
@@ -1136,7 +1150,9 @@ class Main(Star):
                 "required": ["group_id", "user_id"]
             },
             "keywords": [
-                "群身份", "管理员", "群主", "成员", "权限", "role", "group role", "查身份"
+                "群身份", "管理员", "群主", "成员", "权限", "role", "group role", "查身份", "是什么身份", "什么角色",
+                "群内身份", "群内职位", "查看权限", "检查身份", "查询角色", "用户角色", "get role", "check role",
+                "user role", "member role", "群地位"
             ],
             "handler": self.get_user_group_role
         }
@@ -1147,7 +1163,8 @@ class Main(Star):
             "description": "将引用消息添加到群精华。使用时需要引用要设置精华的消息。",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
-                "精华消息", "加精", "设为精华", "essence", "pin message"
+                "精华消息", "加精", "设为精华", "essence", "pin message", "设置精华", "标记精华", "精华", "加精华",
+                "设为群精华", "添加精华", "推为精华", "加精消息", "pin msg", "set essence", "make essence"
             ],
             "handler": self.set_essence_msg
         }
@@ -1157,7 +1174,8 @@ class Main(Star):
             "description": "将引用消息从群精华中移除。使用时需要引用要取消精华的消息。",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
-                "取消精华", "移除精华", "unpin", "delete essence"
+                "取消精华", "移除精华", "unpin", "delete essence", "取消加精", "去掉精华", "删除精华", "撤销精华",
+                "移出精华", "unset essence", "remove essence", "unpin message", "取消精华消息"
             ],
             "handler": self.delete_essence_msg
         }
@@ -1174,7 +1192,9 @@ class Main(Star):
                 "required": ["user_id", "duration"]
             },
             "keywords": [
-                "禁言", "解禁", "ban", "mute", "禁言用户", "解除禁言", "unmute"
+                "禁言", "解禁", "ban", "mute", "禁言用户", "解除禁言", "unmute", "禁止发言", "不许说话", "闭嘴",
+                "关小黑屋", "封口", "禁言某人", "让他闭嘴", "把她禁言", "禁言多少分钟", "解封", "恢复发言",
+                "允许说话", "取消禁言", "ban user", "mute member", "unmute user", "shut up", "silence"
             ],
             "handler": self.set_group_ban
         }
@@ -1190,7 +1210,9 @@ class Main(Star):
                 "required": ["user_id"]
             },
             "keywords": [
-                "踢人", "移除成员", "kick", "踢出群", "请出群"
+                "踢人", "移除成员", "kick", "踢出群", "请出群", "踢掉", "移除", "逐出", "赶出去", "踢了",
+                "把他踢了", "把她踢了", "移除群聊", "移出群", "删除成员", "kick user", "remove member", "boot",
+                "expel", "banish"
             ],
             "handler": self.set_group_kick
         }
@@ -1206,7 +1228,8 @@ class Main(Star):
                 "required": ["enable"]
             },
             "keywords": [
-                "全体禁言", "全员禁言", "全群禁言", "mute all", "whole ban"
+                "全体禁言", "全员禁言", "全群禁言", "mute all", "whole ban", "全部禁言", "所有人禁言", "开启全员禁言",
+                "关闭全员禁言", "全群静音", "全体静音", "mute everyone", "ban all", "全群闭嘴"
             ],
             "handler": self.set_group_whole_ban
         }
@@ -1223,7 +1246,9 @@ class Main(Star):
                 "required": ["user_id", "card"]
             },
             "keywords": [
-                "群昵称", "群名片", "改名片", "set card", "改名", "nickname"
+                "群昵称", "群名片", "改名片", "set card", "改名", "nickname", "修改群昵称", "改群名", "设置群名片",
+                "修改名片", "改他的名片", "改她的名片", "群内昵称", "群别名", "group nickname", "set nickname",
+                "change card", "update card", "rename member"
             ],
             "handler": self.set_group_card
         }
@@ -1239,7 +1264,9 @@ class Main(Star):
                 "required": ["content"]
             },
             "keywords": [
-                "群公告", "发布公告", "notice", "announcement", "通知"
+                "群公告", "发布公告", "notice", "announcement", "通知", "发公告", "群通知", "发群公告", "写公告",
+                "贴公告", "公布", "广而告之", "群内通知", "发布群通知", "send notice", "post announcement",
+                "group notice", "make announcement"
             ],
             "handler": self.send_group_notice
         }
@@ -1255,7 +1282,8 @@ class Main(Star):
                 "required": ["notice_id"]
             },
             "keywords": [
-                "删除公告", "撤回公告", "delete notice"
+                "删除公告", "撤回公告", "delete notice", "取消公告", "移除公告", "撤公告", "删公告", "删除群公告",
+                "撤销群公告", "remove notice", "recall notice"
             ],
             "handler": self.delete_group_notice
         }
@@ -1265,7 +1293,8 @@ class Main(Star):
             "description": "查询群文件列表（根目录）。返回文件名和大小。",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
-                "群文件", "文件列表", "list files", "查看文件"
+                "群文件", "文件列表", "list files", "查看文件", "群共享文件", "群资料", "群文档", "有哪些文件",
+                "看看群文件", "列出群文件", "group files", "list group files", "show files", "dir"
             ],
             "handler": self.list_group_files
         }
@@ -1281,7 +1310,8 @@ class Main(Star):
                 "required": ["file_id"]
             },
             "keywords": [
-                "删除群文件", "删文件", "delete file", "移除文件"
+                "删除群文件", "删文件", "delete file", "移除文件", "删除群共享", "删掉群文件", "清除群文件",
+                "remove file", "delete group file", "erase file"
             ],
             "handler": self.delete_group_file
         }
@@ -1291,7 +1321,8 @@ class Main(Star):
             "description": "获取当前群聊的成员信息列表（包含user_id、display_name、username、role）。",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
-                "群成员", "成员列表", "member list", "群友", "查看成员"
+                "群成员", "成员列表", "member list", "群友", "查看成员", "群成员信息", "群内成员", "群成员名单",
+                "列出成员", "list members", "group members", "show members", "who is in group"
             ],
             "handler": self.get_group_members_info
         }
@@ -1309,7 +1340,9 @@ class Main(Star):
                 "required": ["user_id", "enable"]
             },
             "keywords": [
-                "设置管理员", "取消管理员", "admin", "群管", "任命"
+                "设置管理员", "取消管理员", "admin", "群管", "任命", "给管理", "提升为管理", "设为管理", "撤管理",
+                "下管理", "取消管理", "set admin", "promote to admin", "demote from admin", "make admin",
+                "remove admin", "群管理员"
             ],
             "handler": self.set_group_admin
         }
@@ -1325,7 +1358,8 @@ class Main(Star):
                 "required": ["group_name"]
             },
             "keywords": [
-                "群名称", "改名", "修改群名", "rename group", "群名"
+                "群名称", "改名", "修改群名", "rename group", "群名", "改群名", "重命名群", "变更群名称",
+                "set group name", "change group name", "update group name"
             ],
             "handler": self.set_group_name
         }
@@ -1335,7 +1369,8 @@ class Main(Star):
             "description": "获取群公告列表。",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
-                "公告列表", "查看公告", "list notices"
+                "公告列表", "查看公告", "list notices", "群公告列表", "所有公告", "列出公告", "show notices",
+                "get notices", "list group notices"
             ],
             "handler": self.get_group_notice_list
         }
@@ -1352,7 +1387,8 @@ class Main(Star):
                 "required": ["file_path"]
             },
             "keywords": [
-                "上传文件", "群文件上传", "upload file", "传文件"
+                "上传文件", "群文件上传", "upload file", "传文件", "上传到群", "群共享上传", "发送文件到群",
+                "upload to group", "share file"
             ],
             "handler": self.upload_group_file
         }
@@ -1368,7 +1404,8 @@ class Main(Star):
                 "required": ["folder_name"]
             },
             "keywords": [
-                "新建文件夹", "创建目录", "create folder", "新建目录"
+                "新建文件夹", "创建目录", "create folder", "新建目录", "创建群文件夹", "群文件新建文件夹",
+                "make directory", "new folder"
             ],
             "handler": self.create_group_file_folder
         }
@@ -1384,7 +1421,8 @@ class Main(Star):
                 "required": ["folder_id"]
             },
             "keywords": [
-                "删除文件夹", "删目录", "delete folder", "移除文件夹"
+                "删除文件夹", "删目录", "delete folder", "移除文件夹", "删除群文件夹", "remove folder",
+                "delete directory"
             ],
             "handler": self.delete_group_folder
         }
@@ -1400,7 +1438,8 @@ class Main(Star):
                 "required": []
             },
             "keywords": [
-                "龙王", "荣誉", "群聊之火", "快乐源泉", "honor", "群荣誉"
+                "龙王", "荣誉", "群聊之火", "快乐源泉", "honor", "群荣誉", "查看荣誉", "群内荣誉", "群称号",
+                "群活跃", "group honor", "查看龙王", "谁最活跃", "群称号列表"
             ],
             "handler": self.get_group_honor_info
         }
@@ -1410,7 +1449,8 @@ class Main(Star):
             "description": "查询群聊中 @全体成员 的剩余次数。",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
-                "@全体成员", "at全体", "剩余次数", "at all remain"
+                "@全体成员", "at全体", "剩余次数", "at all remain", "还能@几次", "@所有人剩余次数",
+                "at全体剩余", "查看@全体次数", "check at all", "at all quota"
             ],
             "handler": self.get_group_at_all_remain
         }
@@ -1427,7 +1467,8 @@ class Main(Star):
                 "required": ["user_id", "special_title"]
             },
             "keywords": [
-                "专属头衔", "头衔", "特殊头衔", "title", "special title"
+                "专属头衔", "头衔", "特殊头衔", "title", "special title", "给头衔", "设置头衔", "授予头衔",
+                "取消头衔", "群头衔", "成员头衔", "set title", "custom title"
             ],
             "handler": self.set_group_special_title
         }
@@ -1437,7 +1478,8 @@ class Main(Star):
             "description": "获取当前群聊中被禁言的成员列表。",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
-                "禁言列表", "被禁言", "shut list", "muted members"
+                "禁言列表", "被禁言", "shut list", "muted members", "谁被禁言了", "禁言人员", "查看禁言",
+                "list muted", "show muted", "禁言中的人"
             ],
             "handler": self.get_group_shut_list
         }
@@ -1447,7 +1489,8 @@ class Main(Star):
             "description": "获取群聊中被忽略的加群请求列表。",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
-                "加群请求", "忽略请求", "入群申请", "join request"
+                "加群请求", "忽略请求", "入群申请", "join request", "被忽略的加群", "忽略的申请", "查看忽略请求",
+                "pending requests", "ignored join requests"
             ],
             "handler": self.get_group_ignore_add_request
         }
@@ -1463,7 +1506,8 @@ class Main(Star):
                 "required": ["option"]
             },
             "keywords": [
-                "加群方式", "入群设置", "join option", "验证", "允许加群"
+                "加群方式", "入群设置", "join option", "验证", "允许加群", "禁止加群", "加群验证", "加群权限",
+                "设置加群", "群加入方式", "set join option", "group join setting"
             ],
             "handler": self.set_group_add_option
         }
@@ -1473,7 +1517,8 @@ class Main(Star):
             "description": "群打卡（需要机器人是群成员）。",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
-                "打卡", "群打卡", "签到", "sign"
+                "打卡", "群打卡", "签到", "sign", "群签到", "每日打卡", "群内打卡", "check in", "group sign",
+                "daily sign"
             ],
             "handler": self.send_group_sign
         }
@@ -1490,7 +1535,8 @@ class Main(Star):
                 "required": []
             },
             "keywords": [
-                "QQ头像", "设置头像", "更换头像", "avatar", "profile picture"
+                "QQ头像", "设置头像", "更换头像", "avatar", "profile picture", "改头像", "换头像", "头像设置",
+                "上传头像", "更新头像", "set avatar", "change avatar", "update avatar", "换一个头像"
             ],
             "handler": self.set_qq_avatar
         }
@@ -1509,7 +1555,8 @@ class Main(Star):
                 "required": ["file_id", "current_parent_directory", "target_parent_directory"]
             },
             "keywords": [
-                "移动文件", "移动群文件", "move file", "剪切"
+                "移动文件", "移动群文件", "move file", "剪切", "文件移动", "移动位置", "挪文件", "转移文件",
+                "移动群共享", "move group file", "relocate file"
             ],
             "handler": self.move_group_file
         }
@@ -1527,7 +1574,8 @@ class Main(Star):
                 "required": ["file_id", "current_parent_directory", "new_name"]
             },
             "keywords": [
-                "重命名文件", "改名", "rename file", "文件重命名"
+                "重命名文件", "改名", "rename file", "文件重命名", "修改文件名", "群文件改名", "更改文件名",
+                "rename group file"
             ],
             "handler": self.rename_group_file
         }
@@ -1543,7 +1591,8 @@ class Main(Star):
                 "required": ["file_id"]
             },
             "keywords": [
-                "传输文件", "获取文件链接", "trans file", "下载链接"
+                "传输文件", "获取文件链接", "trans file", "下载链接", "文件直链", "群文件下载", "获取下载地址",
+                "get file url", "transfer file"
             ],
             "handler": self.trans_group_file
         }
@@ -1561,7 +1610,8 @@ class Main(Star):
                 "required": ["user_id"]
             },
             "keywords": [
-                "点赞", "名片赞", "like", "送赞", "点个赞"
+                "点赞", "名片赞", "like", "送赞", "点个赞", "给个赞", "赞一个", "点赞一下", "刷赞", "送爱心",
+                "send like", "give like", "thumb up", "praise"
             ],
             "handler": self.send_like_tool
         }
@@ -1580,7 +1630,8 @@ class Main(Star):
                 "required": []
             },
             "keywords": [
-                "历史消息", "聊天记录", "history", "message log", "群记录"
+                "历史消息", "聊天记录", "history", "message log", "群记录", "群聊天记录", "过往消息", "旧消息",
+                "查看历史", "群历史", "group history", "get history", "past messages"
             ],
             "handler": self.get_group_msg_history
         }
@@ -1598,7 +1649,8 @@ class Main(Star):
                 "required": ["user_id"]
             },
             "keywords": [
-                "好友历史", "私聊记录", "friend history", "聊天记录"
+                "好友历史", "私聊记录", "friend history", "聊天记录", "私聊历史", "与某人的记录",
+                "查看私聊记录", "friend chat history", "private history"
             ],
             "handler": self.get_friend_msg_history
         }
@@ -1616,7 +1668,8 @@ class Main(Star):
                 "required": []
             },
             "keywords": [
-                "群头像", "设置群头像", "group portrait", "group avatar"
+                "群头像", "设置群头像", "group portrait", "group avatar", "改群头像", "换群头像", "群图标",
+                "set group avatar", "change group icon"
             ],
             "handler": self.set_group_portrait
         }
@@ -1633,7 +1686,8 @@ class Main(Star):
                 "required": []
             },
             "keywords": [
-                "自定义表情", "表情列表", "custom face", "emoji", "表情包"
+                "自定义表情", "表情列表", "custom face", "emoji", "表情包", "我的表情", "机器人表情", "收藏表情",
+                "get custom faces", "list faces", "fetch faces"
             ],
             "handler": self.fetch_custom_face
         }
@@ -1651,7 +1705,8 @@ class Main(Star):
                 "required": []
             },
             "keywords": [
-                "输入状态", "正在输入", "typing", "输入中"
+                "输入状态", "正在输入", "typing", "输入中", "显示输入", "设置输入中", "让对方看到正在输入",
+                "show typing", "typing indicator"
             ],
             "handler": self.set_input_status_tool
         }
@@ -1662,7 +1717,8 @@ class Main(Star):
             "description": "获取当前可用的 AI 语音角色列表。在发送 AI 语音前可调用此工具了解可选角色。",
             "parameters": {"type": "object", "properties": {}, "required": []},
             "keywords": [
-                "AI语音", "语音角色", "AI角色", "characters", "声聊", "音色"
+                "AI语音", "语音角色", "AI角色", "characters", "声聊", "音色", "有哪些角色", "AI音色列表",
+                "语音角色列表", "list characters", "get voices", "voice characters", "AI voice"
             ],
             "handler": self.get_ai_characters_tool
         }
@@ -1679,7 +1735,8 @@ class Main(Star):
                 "required": ["text"]
             },
             "keywords": [
-                "AI语音", "发送语音", "语音消息", "朗读", "voice", "speak", "tts"
+                "AI语音", "发送语音", "语音消息", "朗读", "voice", "speak", "tts", "语音合成", "文字转语音",
+                "让机器人说话", "机器人语音", "AI朗读", "ai voice", "text to speech", "say"
             ],
             "handler": self.send_ai_voice_tool
         }
@@ -1697,7 +1754,8 @@ class Main(Star):
                 "required": ["keyword"]
             },
             "keywords": [
-                "搜索好友", "搜索群", "查找联系人", "search contact", "找人", "找群"
+                "搜索好友", "搜索群", "查找联系人", "search contact", "找人", "找群", "搜索用户", "查找好友",
+                "查找群", "搜一下", "找一下", "搜索QQ", "search friend", "search group", "lookup"
             ],
             "handler": self.search_contacts
         }
@@ -1714,12 +1772,13 @@ class Main(Star):
                 "required": []
             },
             "keywords": [
-                "好友列表", "群列表", "联系人", "contact list", "friends", "groups"
+                "好友列表", "群列表", "联系人", "contact list", "friends", "groups", "列出好友", "列出群聊",
+                "所有好友", "所有群", "list friends", "list groups"
             ],
             "handler": self.list_contacts
         }
 
-        # ---------- 新增：设置个人资料 ----------
+        # ---------- 设置个人资料 ----------
         registry["set_qq_profile"] = {
             "name": "set_qq_profile",
             "description": "修改机器人自己的QQ个人资料，包括昵称和个人说明。",
@@ -1732,7 +1791,8 @@ class Main(Star):
                 "required": []
             },
             "keywords": [
-                "个人资料", "修改资料", "改昵称", "改签名", "个性签名", "QQ资料", "profile", "set profile"
+                "个人资料", "修改资料", "改昵称", "改签名", "个性签名", "QQ资料", "profile", "set profile",
+                "更新资料", "编辑资料", "修改个人信息", "change nickname", "update signature"
             ],
             "handler": self.set_qq_profile_tool
         }
@@ -1791,7 +1851,6 @@ class Main(Star):
         if not tool_name or tool_name not in available_tools:
             return {"status": "error", "message": f"无效的工具名称或工具未启用: {tool_name}。请先使用 search_wyc_tools 或 call_wyc_tools 获取可用工具。"}
         
-        # ===== 修复点：兼容 dict 类型的 tool_args =====
         try:
             if isinstance(tool_args, dict):
                 args_dict = tool_args
@@ -1801,7 +1860,6 @@ class Main(Star):
                 return {"status": "error", "message": "参数格式错误，必须是 JSON 字符串或字典。"}
         except json.JSONDecodeError:
             return {"status": "error", "message": "参数格式错误，必须是有效的 JSON 字符串。"}
-        # =============================================
         
         handler = available_tools[tool_name]["handler"]
         try:
@@ -2055,16 +2113,25 @@ class Main(Star):
         return None
 
     async def _get_image_file_from_event(self, event: AiocqhttpMessageEvent) -> Optional[str]:
+        """从消息事件中提取图片文件路径/URL/Base64"""
         chain = event.get_messages()
-        if chain and isinstance(chain[0], Reply):
+        if not chain:
+            return None
+        # 如果是回复消息，先检查被回复的消息链
+        if isinstance(chain[0], Reply):
             reply_chain = chain[0].chain
             if reply_chain:
                 for seg in reply_chain:
                     if isinstance(seg, Image):
                         return seg.file or seg.url or seg.path
+        # 再检查主消息链
         for seg in chain:
             if isinstance(seg, Image):
                 return seg.file or seg.url or seg.path
+        # 尝试从原始消息中提取
+        raw = event.message_obj.raw_message
+        if hasattr(raw, 'image') and raw.image:
+            return raw.image
         return None
 
     # ==================== 具体工具实现函数 ====================
@@ -2795,6 +2862,8 @@ class Main(Star):
             file = await self._get_image_file_from_event(event)
             if not file:
                 return {"status": "error", "message": "❌ 请引用一张图片或提供图片路径/URL"}
+        if not isinstance(file, str):
+            return {"status": "error", "message": "❌ 图片数据无效"}
         try:
             await client.call_action('set_qq_avatar', file=file)
             return {"status": "success", "message": "✅ QQ头像设置成功"}
@@ -3087,7 +3156,6 @@ class Main(Star):
         output = "\n".join(lines)
         return {"status": "success", "message": output}
 
-    # ==================== 新增工具：设置个人资料 ====================
     async def set_qq_profile_tool(self, event: AstrMessageEvent, nickname: str = None, personal_note: str = None) -> dict:
         """设置机器人的QQ个人资料（昵称、个人说明）。"""
         if not nickname and not personal_note:
@@ -3115,6 +3183,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_all_help")
     async def admin_all_help(self, event: AstrMessageEvent):
+        """显示本插件的所有管理命令帮助信息"""
         help_text = """【AstrBot 插件管理命令总览】
 
 /tool_memory - 记忆管理
@@ -3211,6 +3280,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_memory")
     async def admin_memory(self, event: AstrMessageEvent):
+        """记忆管理：list/add/delete/update/get"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/tool_memory list/add/delete/update/get [参数]"))
@@ -3272,6 +3342,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_send_message")
     async def admin_send_message(self, event: AstrMessageEvent):
+        """立即发送消息：/tool_send_message <目标ID> <消息内容> [chat_type]"""
         args = event.message_str.strip().split(maxsplit=2)
         if len(args) < 3:
             await event.send(MessageChain().message("用法：/tool_send_message <目标ID> <消息内容> [chat_type]"))
@@ -3283,6 +3354,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_schedule")
     async def admin_schedule(self, event: AstrMessageEvent):
+        """简单定时消息：/tool_schedule <目标ID> <消息内容> <时间> [chat_type]"""
         args = event.message_str.strip().split(maxsplit=3)
         if len(args) < 4:
             await event.send(MessageChain().message("用法：/tool_schedule <目标ID> <消息内容> <时间> [chat_type]"))
@@ -3294,6 +3366,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_publish_qzone")
     async def admin_publish_qzone(self, event: AstrMessageEvent):
+        """发布QQ空间说说：/tool_publish_qzone <说说内容>"""
         args = event.message_str.strip().split(maxsplit=1)
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/tool_publish_qzone <说说内容>"))
@@ -3304,6 +3377,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_status")
     async def admin_status(self, event: AstrMessageEvent):
+        """设置QQ在线状态：/tool_status <状态> <持续分钟> [延迟分钟]"""
         args = event.message_str.strip().split()
         if len(args) < 3:
             await event.send(MessageChain().message("用法：/tool_status <状态> <持续分钟> [延迟分钟]"))
@@ -3317,12 +3391,14 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_status_get")
     async def admin_status_get(self, event: AstrMessageEvent):
+        """获取当前QQ在线状态"""
         result = self.status_manager.get_current_status_desc()
         await event.send(MessageChain().message(result))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_poke")
     async def admin_poke(self, event: AstrMessageEvent):
+        """发送戳一戳：/tool_poke <目标QQ> [chat_type]"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/tool_poke <目标QQ> [chat_type]"))
@@ -3335,12 +3411,14 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_recall")
     async def admin_recall(self, event: AiocqhttpMessageEvent):
+        """引用消息撤回（仅QQ群聊）"""
         result = await self.recall_by_reply(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_email")
     async def admin_email(self, event: AstrMessageEvent):
+        """发送QQ邮箱邮件：/tool_email <收件人> <主题> <内容> [昵称]"""
         text = event.message_str.strip()
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
@@ -3362,6 +3440,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_scheduled_list")
     async def admin_scheduled_list(self, event: AstrMessageEvent):
+        """列出定时指令（持久化）"""
         args = event.message_str.strip().split()
         include = len(args) > 1 and args[1].lower() == "true"
         result = await self.list_scheduled_commands(event, include)
@@ -3370,6 +3449,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_scheduled_cancel")
     async def admin_scheduled_cancel(self, event: AstrMessageEvent):
+        """取消定时指令：/tool_scheduled_cancel <任务ID>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/tool_scheduled_cancel <任务ID>"))
@@ -3380,6 +3460,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_scheduled_delete")
     async def admin_scheduled_delete(self, event: AstrMessageEvent):
+        """彻底删除定时指令：/tool_scheduled_delete <任务ID>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/tool_scheduled_delete <任务ID>"))
@@ -3390,6 +3471,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_search")
     async def admin_search(self, event: AstrMessageEvent):
+        """搜索联系人：/tool_search <关键词> [类型]"""
         args = event.message_str.strip().split(maxsplit=2)
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/tool_search <关键词> [类型]"))
@@ -3402,6 +3484,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_list")
     async def admin_list(self, event: AstrMessageEvent):
+        """列出联系人：/tool_list [类型] [limit]"""
         args = event.message_str.strip().split()
         contact_type = args[1] if len(args) > 1 else "all"
         limit = int(args[2]) if len(args) > 2 and args[2].isdigit() else 20
@@ -3411,12 +3494,14 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ai_characters")
     async def cmd_ai_characters(self, event: AstrMessageEvent):
+        """查看可用 AI 语音角色列表"""
         result = await self.get_ai_characters_tool(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ai_voice")
     async def cmd_ai_voice(self, event: AiocqhttpMessageEvent):
+        """发送 AI 语音消息：/ai_voice [角色ID/名称] <文本>"""
         args = event.message_str.strip().split(maxsplit=2)
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/ai_voice [角色ID/名称] <文本>"))
@@ -3435,6 +3520,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ban_user")
     async def cmd_ban_user(self, event: AiocqhttpMessageEvent):
+        """禁言指定群成员：/ban_user <QQ号> <禁言分钟>"""
         args = event.message_str.strip().split()
         if len(args) < 3:
             await event.send(MessageChain().message("用法：/ban_user <QQ号> <禁言分钟>"))
@@ -3450,6 +3536,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("unban_user")
     async def cmd_unban_user(self, event: AiocqhttpMessageEvent):
+        """解除群成员禁言：/unban_user <QQ号>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/unban_user <QQ号>"))
@@ -3460,6 +3547,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("kick")
     async def cmd_kick(self, event: AiocqhttpMessageEvent):
+        """踢出群成员：/kick <QQ号>"""
         if not self.config.get("kick_enabled", True):
             await event.send(MessageChain().message("❌ 踢人功能已被禁用"))
             return
@@ -3473,6 +3561,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("whole_ban")
     async def cmd_whole_ban(self, event: AiocqhttpMessageEvent):
+        """开启或关闭全体禁言：/whole_ban <on/off>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/whole_ban <on/off>"))
@@ -3484,6 +3573,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_card")
     async def cmd_set_card(self, event: AiocqhttpMessageEvent):
+        """修改群成员群名片：/set_card <QQ号> <新群昵称>"""
         args = event.message_str.strip().split(maxsplit=2)
         if len(args) < 3:
             await event.send(MessageChain().message("用法：/set_card <QQ号> <新群昵称>"))
@@ -3494,6 +3584,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("send_notice")
     async def cmd_send_notice(self, event: AiocqhttpMessageEvent):
+        """发布群公告：/send_notice <公告内容>"""
         args = event.message_str.strip().split(maxsplit=1)
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/send_notice <公告内容>"))
@@ -3504,6 +3595,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("del_notice")
     async def cmd_del_notice(self, event: AiocqhttpMessageEvent):
+        """删除群公告：/del_notice <公告ID>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/del_notice <公告ID>"))
@@ -3514,12 +3606,14 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("list_files")
     async def cmd_list_files(self, event: AiocqhttpMessageEvent):
+        """查看群文件列表"""
         result = await self.list_group_files(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("delete_group_file")
     async def cmd_delete_group_file(self, event: AiocqhttpMessageEvent):
+        """删除群文件：/delete_group_file <file_id>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/delete_group_file <file_id>"))
@@ -3530,12 +3624,14 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("group_members")
     async def cmd_group_members(self, event: AiocqhttpMessageEvent):
+        """获取群成员信息列表"""
         result = await self.get_group_members_info(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_admin")
     async def cmd_set_admin(self, event: AiocqhttpMessageEvent):
+        """设置或取消群管理员：/set_admin <QQ号> <on/off>"""
         args = event.message_str.strip().split()
         if len(args) < 3:
             await event.send(MessageChain().message("用法：/set_admin <QQ号> <on/off>"))
@@ -3547,6 +3643,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_group_name")
     async def cmd_set_group_name(self, event: AiocqhttpMessageEvent):
+        """修改群名称：/set_group_name <新群名>"""
         args = event.message_str.strip().split(maxsplit=1)
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/set_group_name <新群名>"))
@@ -3557,12 +3654,14 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("list_notices")
     async def cmd_list_notices(self, event: AiocqhttpMessageEvent):
+        """获取群公告列表"""
         result = await self.get_group_notice_list(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("upload_file")
     async def cmd_upload_file(self, event: AiocqhttpMessageEvent):
+        """上传本地文件到群文件：/upload_file <文件路径> [文件名]"""
         args = event.message_str.strip().split(maxsplit=2)
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/upload_file <文件路径> [文件名]"))
@@ -3575,6 +3674,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("create_folder")
     async def cmd_create_folder(self, event: AiocqhttpMessageEvent):
+        """在群文件根目录创建文件夹：/create_folder <文件夹名>"""
         args = event.message_str.strip().split(maxsplit=1)
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/create_folder <文件夹名>"))
@@ -3585,6 +3685,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("del_folder")
     async def cmd_del_folder(self, event: AiocqhttpMessageEvent):
+        """删除群文件夹：/del_folder <文件夹ID>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/del_folder <文件夹ID>"))
@@ -3595,6 +3696,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("group_honor")
     async def cmd_group_honor(self, event: AiocqhttpMessageEvent):
+        """获取群荣誉信息：/group_honor [类型]"""
         args = event.message_str.strip().split()
         honor_type = args[1] if len(args) > 1 else "all"
         result = await self.get_group_honor_info(event, honor_type)
@@ -3603,12 +3705,14 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("at_all_remain")
     async def cmd_at_all_remain(self, event: AiocqhttpMessageEvent):
+        """查询群聊中 @全体成员 的剩余次数"""
         result = await self.get_group_at_all_remain(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_title")
     async def cmd_set_title(self, event: AiocqhttpMessageEvent):
+        """设置群成员专属头衔：/set_title <QQ号> <头衔>"""
         args = event.message_str.strip().split(maxsplit=2)
         if len(args) < 3:
             await event.send(MessageChain().message("用法：/set_title <QQ号> <头衔>"))
@@ -3619,18 +3723,21 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("shut_list")
     async def cmd_shut_list(self, event: AiocqhttpMessageEvent):
+        """获取被禁言的成员列表"""
         result = await self.get_group_shut_list(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("ignore_requests")
     async def cmd_ignore_requests(self, event: AiocqhttpMessageEvent):
+        """获取被忽略的加群请求列表"""
         result = await self.get_group_ignore_add_request(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_add_option")
     async def cmd_set_add_option(self, event: AiocqhttpMessageEvent):
+        """设置加群方式：/set_add_option <allow/need_verify/not_allow>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/set_add_option <allow/need_verify/not_allow>"))
@@ -3641,12 +3748,14 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("group_sign")
     async def cmd_group_sign(self, event: AiocqhttpMessageEvent):
+        """群打卡"""
         result = await self.send_group_sign(event)
         await event.send(MessageChain().message(result.get("message", "操作失败")))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_qq_avatar")
     async def cmd_set_qq_avatar(self, event: AiocqhttpMessageEvent):
+        """设置QQ头像（引用图片或提供路径）：/set_qq_avatar [图片]"""
         args = event.message_str.strip().split(maxsplit=1)
         file = args[1] if len(args) > 1 else ""
         result = await self.set_qq_avatar(event, file)
@@ -3655,6 +3764,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("move_group_file")
     async def cmd_move_group_file(self, event: AiocqhttpMessageEvent):
+        """移动群文件：/move_group_file <file_id> <当前目录> <目标目录>"""
         args = event.message_str.strip().split()
         if len(args) < 4:
             await event.send(MessageChain().message("用法：/move_group_file <file_id> <当前目录> <目标目录>"))
@@ -3666,6 +3776,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("rename_group_file")
     async def cmd_rename_group_file(self, event: AiocqhttpMessageEvent):
+        """重命名群文件：/rename_group_file <file_id> <当前目录> <新名称>"""
         args = event.message_str.strip().split(maxsplit=3)
         if len(args) < 4:
             await event.send(MessageChain().message("用法：/rename_group_file <file_id> <当前目录> <新名称>"))
@@ -3677,6 +3788,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("trans_group_file")
     async def cmd_trans_group_file(self, event: AiocqhttpMessageEvent):
+        """传输群文件（获取链接）：/trans_group_file <file_id>"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/trans_group_file <file_id>"))
@@ -3687,6 +3799,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("send_like")
     async def cmd_send_like(self, event: AstrMessageEvent):
+        """给用户点赞：/send_like <QQ号> [次数]"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/send_like <QQ号> [次数]"))
@@ -3699,6 +3812,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("get_group_msg_history")
     async def cmd_get_group_msg_history(self, event: AstrMessageEvent):
+        """获取群历史消息：/get_group_msg_history [群号] [起始序号] [数量]"""
         args = event.message_str.strip().split()
         group_id = args[1] if len(args) > 1 else ""
         message_seq = int(args[2]) if len(args) > 2 and args[2].isdigit() else 0
@@ -3709,6 +3823,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("get_friend_msg_history")
     async def cmd_get_friend_msg_history(self, event: AstrMessageEvent):
+        """获取好友历史消息：/get_friend_msg_history <QQ号> [起始序号] [数量]"""
         args = event.message_str.strip().split()
         if len(args) < 2:
             await event.send(MessageChain().message("用法：/get_friend_msg_history <QQ号> [起始序号] [数量]"))
@@ -3722,6 +3837,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_group_portrait")
     async def cmd_set_group_portrait(self, event: AiocqhttpMessageEvent):
+        """设置群头像（引用图片或提供路径）：/set_group_portrait [群号] [图片]"""
         args = event.message_str.strip().split(maxsplit=1)
         group_id = args[1] if len(args) > 1 else ""
         file = ""
@@ -3731,6 +3847,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("fetch_custom_face")
     async def cmd_fetch_custom_face(self, event: AstrMessageEvent):
+        """获取自定义表情列表：/fetch_custom_face [数量]"""
         args = event.message_str.strip().split()
         count = int(args[1]) if len(args) > 1 and args[1].isdigit() else 48
         result = await self.fetch_custom_face(event, count)
@@ -3739,6 +3856,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_input_status")
     async def cmd_set_input_status(self, event: AstrMessageEvent):
+        """设置输入状态：/set_input_status <QQ号> <类型>"""
         args = event.message_str.strip().split()
         if len(args) < 3:
             await event.send(MessageChain().message("用法：/set_input_status <QQ号> <类型>"))
@@ -3751,7 +3869,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("set_profile")
     async def cmd_set_profile(self, event: AstrMessageEvent):
-        """用法: /set_profile nickname=新昵称 personal_note=新签名"""
+        """修改机器人个人资料：/set_profile nickname=新昵称 personal_note=新签名"""
         args = event.message_str.strip()
         params = {}
         for part in args.split():
@@ -3805,16 +3923,23 @@ class Main(Star):
             else:
                 inject_parts.append("[AI语音配置] 未设置默认角色。调用 send_ai_voice 时若未指定角色，将自动选择第一个可用角色。")
 
-            if self.auto_input_status_enabled and hasattr(event, 'get_session_id'):
+            # 拟人化输入状态延迟处理（仅对私聊生效）
+            if self.enable_human_typing and event.is_private_chat():
+                user_key = event.unified_msg_origin
+                now = time.time()
+                last = self._user_last_active.get(user_key, 0)
+                if now - last > self.typing_idle_threshold:
+                    delay = random.uniform(self.typing_initial_delay_min, self.typing_initial_delay_max)
+                    logger.info(f"[拟人化] 用户 {user_key} 进入延迟 {delay:.2f} 秒")
+                    await asyncio.sleep(delay)
+                self._user_last_active[user_key] = now
+                # 设置输入状态为“正在输入中”
                 try:
                     client = await self._get_client(event)
                     if client:
-                        session_id = event.get_session_id()
-                        if event.is_private_chat():
-                            user_id = event.get_sender_id()
-                            await client.call_action('set_input_status', user_id=user_id, event_type=1)
+                        await client.call_action('set_input_status', user_id=event.get_sender_id(), event_type=1)
                 except Exception as e:
-                    logger.debug(f"自动设置输入状态失败: {e}")
+                    logger.debug(f"设置输入状态失败: {e}")
 
             if inject_parts:
                 inject_text = "\n".join(inject_parts)
@@ -3827,11 +3952,22 @@ class Main(Star):
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: Any) -> None:
-        if self.auto_input_status_enabled:
+        if self.enable_human_typing and event.is_private_chat():
             try:
                 client = await self._get_client(event)
-                if client and event.is_private_chat():
+                if client:
                     user_id = event.get_sender_id()
+                    # 停止输入状态
+                    await client.call_action('set_input_status', user_id=user_id, event_type=2)
+                    # 第一次闪烁
+                    await asyncio.sleep(random.uniform(0.5, 1.0))
+                    await client.call_action('set_input_status', user_id=user_id, event_type=1)
+                    await asyncio.sleep(random.uniform(0.5, 1.5))
+                    await client.call_action('set_input_status', user_id=user_id, event_type=2)
+                    # 第二次闪烁
+                    await asyncio.sleep(random.uniform(0.1, 0.7))
+                    await client.call_action('set_input_status', user_id=user_id, event_type=1)
+                    await asyncio.sleep(0.2)
                     await client.call_action('set_input_status', user_id=user_id, event_type=2)
             except Exception as e:
-                logger.debug(f"取消输入状态失败: {e}")
+                logger.debug(f"拟人化输入状态切换失败: {e}")
