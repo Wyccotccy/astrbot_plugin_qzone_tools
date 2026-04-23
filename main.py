@@ -27,6 +27,26 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 
 
+ROLE_MEMBER = "member"
+ROLE_ADMIN = "admin"
+ROLE_OWNER = "owner"
+ROLE_SUPER_ADMIN = "super_admin"
+
+ROLE_RANK = {
+    ROLE_MEMBER: 0,
+    ROLE_ADMIN: 1,
+    ROLE_OWNER: 2,
+    ROLE_SUPER_ADMIN: 3,
+}
+
+ROLE_LABELS = {
+    ROLE_MEMBER: "成员",
+    ROLE_ADMIN: "管理员",
+    ROLE_OWNER: "群主",
+    ROLE_SUPER_ADMIN: "超级管理员",
+}
+
+
 class MemoryManager:
     def __init__(self, data_dir: str, max_memories_per_user: int = 100):
         self.data_dir = data_dir
@@ -695,6 +715,7 @@ class Main(Star):
 
         self.tool_enabled = self._load_tool_enabled_flags()
         self._tool_registry = self._build_tool_registry()
+        self._tool_min_role = self._build_tool_permission_map()
 
         # 拟人化输入状态配置
         self.enable_human_typing = self.config.get("enable_human_typing", False)
@@ -740,6 +761,146 @@ class Main(Star):
             if self.tool_enabled.get(name, True):
                 available[name] = meta
         return available
+
+    def _build_tool_permission_map(self) -> Dict[str, str]:
+        """构建工具 -> 最低身份等级映射。"""
+        member_tools = {
+            "add_memory",
+            "search_memories",
+            "update_memory",
+            "delete_memory",
+            "get_memory_detail",
+            "send_message",
+            "schedule_message",
+            "cancel_scheduled_message",
+            "list_scheduled_messages",
+            "send_poke",
+            "get_user_group_role",
+            "get_qq_status",
+            "get_fun_status_list",
+            "get_group_members_info",
+            "list_group_files",
+            "get_group_honor_info",
+            "get_group_at_all_remain",
+            "get_group_shut_list",
+            "get_group_ignore_add_request",
+            "send_like",
+            "get_group_msg_history",
+            "get_friend_msg_history",
+            "fetch_custom_face",
+            "set_input_status",
+            "get_ai_characters",
+            "send_ai_voice",
+            "search_contacts",
+            "list_contacts",
+            "recall_by_reply",
+        }
+
+        admin_tools = {
+            "update_qq_status",
+            "send_qq_email",
+            "set_essence_msg",
+            "delete_essence_msg",
+            "set_group_ban",
+            "set_group_kick",
+            "set_group_whole_ban",
+            "set_group_card",
+            "send_group_notice",
+            "delete_group_notice",
+            "delete_group_file",
+            "set_group_name",
+            "get_group_notice_list",
+            "upload_group_file",
+            "create_group_file_folder",
+            "delete_group_folder",
+            "set_group_add_option",
+            "send_group_sign",
+            "set_qq_avatar",
+            "move_group_file",
+            "rename_group_file",
+            "trans_group_file",
+            "set_group_portrait",
+        }
+
+        owner_tools = {
+            "set_group_special_title",
+            "set_group_admin",
+        }
+
+        super_admin_tools = {
+            "publish_qzone",
+            "create_scheduled_command",
+            "list_scheduled_commands",
+            "cancel_scheduled_command",
+            "delete_scheduled_command",
+            "set_qq_profile",
+        }
+
+        tool_min_role: Dict[str, str] = {}
+
+        for tool_name in member_tools:
+            tool_min_role[tool_name] = ROLE_MEMBER
+        for tool_name in admin_tools:
+            tool_min_role[tool_name] = ROLE_ADMIN
+        for tool_name in owner_tools:
+            tool_min_role[tool_name] = ROLE_OWNER
+        for tool_name in super_admin_tools:
+            tool_min_role[tool_name] = ROLE_SUPER_ADMIN
+
+        # 兜底：新增工具若未配置权限，默认成员可用。
+        for tool_name in self._tool_registry.keys():
+            tool_min_role.setdefault(tool_name, ROLE_MEMBER)
+
+        return tool_min_role
+
+    def _get_super_admin_ids(self) -> set[str]:
+        """读取 AstrBot 全局超级管理员列表（admins_id）。"""
+        admin_ids: set[str] = set()
+        try:
+            global_cfg = self.context.get_config()
+            configured = global_cfg.get("admins_id", [])
+            if isinstance(configured, list):
+                for admin_id in configured:
+                    value = str(admin_id).strip()
+                    if value:
+                        admin_ids.add(value)
+            elif configured:
+                value = str(configured).strip()
+                if value:
+                    admin_ids.add(value)
+        except Exception as e:
+            logger.debug(f"[权限] 读取 admins_id 失败: {e}")
+
+        return admin_ids
+
+    async def _resolve_user_role(self, event: AstrMessageEvent) -> str:
+        """解析调用者身份等级：超级管理员 > 群主 > 管理员 > 成员。"""
+        sender_id = str(event.get_sender_id() or "").strip()
+
+        if sender_id and (event.is_admin() or sender_id in self._get_super_admin_ids()):
+            return ROLE_SUPER_ADMIN
+
+        group_id = str(event.get_group_id() or "").strip()
+        if not event.is_private_chat() and group_id:
+            group_role = await self._get_group_member_role(group_id, sender_id)
+            if group_role == "群主":
+                return ROLE_OWNER
+            if group_role == "管理员":
+                return ROLE_ADMIN
+
+        return ROLE_MEMBER
+
+    async def _check_tool_permission(
+        self,
+        event: AstrMessageEvent,
+        tool_name: str,
+    ) -> Tuple[bool, str, str]:
+        """校验用户是否有权限调用指定工具。"""
+        current_role = await self._resolve_user_role(event)
+        required_role = self._tool_min_role.get(tool_name, ROLE_MEMBER)
+
+        allowed = ROLE_RANK.get(current_role, 0) >= ROLE_RANK.get(required_role, 0)
+        return allowed, current_role, required_role
 
     def _build_tool_registry(self) -> Dict[str, dict]:
         registry = {}
@@ -1850,6 +2011,21 @@ class Main(Star):
         available_tools = self._get_available_tools()
         if not tool_name or tool_name not in available_tools:
             return {"status": "error", "message": f"无效的工具名称或工具未启用: {tool_name}。请先使用 search_wyc_tools 或 call_wyc_tools 获取可用工具。"}
+
+        allowed, current_role, required_role = await self._check_tool_permission(
+            event,
+            tool_name,
+        )
+        if not allowed:
+            required_label = ROLE_LABELS.get(required_role, required_role)
+            current_label = ROLE_LABELS.get(current_role, current_role)
+            return {
+                "status": "error",
+                "message": (
+                    f"❌ 权限不足：给 AI 发消息并触发工具 {tool_name} 的用户，"
+                    f"需要达到「{required_label}」权限；当前发起用户身份是「{current_label}」。"
+                ),
+            }
         
         try:
             if isinstance(tool_args, dict):
@@ -2076,6 +2252,68 @@ class Main(Star):
         except Exception as e:
             logger.debug(f"[Main] 获取群成员角色失败: {e}")
             return "unknown"
+
+    async def _resolve_role_by_group_user(
+        self,
+        group_id: str,
+        user_id: str,
+    ) -> Optional[str]:
+        """按指定群与用户 ID 解析身份等级。"""
+        uid = str(user_id or "").strip()
+        if not uid:
+            return None
+
+        if uid in self._get_super_admin_ids():
+            return ROLE_SUPER_ADMIN
+
+        group_role = await self._get_group_member_role(group_id, uid)
+        if group_role == "群主":
+            return ROLE_OWNER
+        if group_role == "管理员":
+            return ROLE_ADMIN
+        if group_role == "成员":
+            return ROLE_MEMBER
+
+        return None
+
+    async def _check_target_user_permission(
+        self,
+        event: AstrMessageEvent,
+        target_user_id: str,
+        action_name: str,
+    ) -> Tuple[bool, str]:
+        """检查对目标用户执行敏感操作时的权限。"""
+        group_id = str(event.get_group_id() or "").strip()
+        if not group_id:
+            return True, ""
+
+        actor_role = await self._resolve_user_role(event)
+        actor_rank = ROLE_RANK.get(actor_role, 0)
+
+        # 仅对管理员及以上身份做同级/越级目标限制
+        if actor_rank < ROLE_RANK[ROLE_ADMIN]:
+            return True, ""
+
+        target_role = await self._resolve_role_by_group_user(group_id, target_user_id)
+        if target_role is None:
+            return (
+                False,
+                "❌ 无法确认目标用户身份，请稍后重试。",
+            )
+
+        target_rank = ROLE_RANK.get(target_role, 0)
+        if target_rank >= actor_rank:
+            actor_label = ROLE_LABELS.get(actor_role, actor_role)
+            target_label = ROLE_LABELS.get(target_role, target_role)
+            return (
+                False,
+                (
+                    f"❌ 权限不足：你当前身份为「{actor_label}」，"
+                    f"不能对身份为「{target_label}」的用户执行{action_name}操作。"
+                ),
+            )
+
+        return True, ""
 
     async def _get_ai_characters_raw(self, event: AstrMessageEvent, group_id: str) -> list:
         cache_key = f"ai_characters_{group_id}"
@@ -2460,6 +2698,15 @@ class Main(Star):
             group_id = event.get_group_id()
             if not group_id:
                 return {"status": "error", "message": "无法获取群号"}
+
+            allowed, deny_message = await self._check_target_user_permission(
+                event,
+                user_id,
+                "禁言/解禁",
+            )
+            if not allowed:
+                return {"status": "error", "message": deny_message}
+
             await event.bot.set_group_ban(group_id=int(group_id), user_id=int(user_id), duration=duration)
             if duration == 0:
                 msg = f"已解禁用户 {user_id}"
@@ -2479,6 +2726,15 @@ class Main(Star):
             group_id = event.get_group_id()
             if not group_id:
                 return {"status": "error", "message": "无法获取群号"}
+
+            allowed, deny_message = await self._check_target_user_permission(
+                event,
+                user_id,
+                "踢人",
+            )
+            if not allowed:
+                return {"status": "error", "message": deny_message}
+
             await event.bot.set_group_kick(group_id=int(group_id), user_id=int(user_id), reject_add_request=False)
             return {"status": "success", "message": f"已踢出用户 {user_id}"}
         except Exception as e:
@@ -2504,6 +2760,15 @@ class Main(Star):
             group_id = event.get_group_id()
             if not group_id:
                 return {"status": "error", "message": "无法获取群号"}
+
+            allowed, deny_message = await self._check_target_user_permission(
+                event,
+                user_id,
+                "修改群名片",
+            )
+            if not allowed:
+                return {"status": "error", "message": deny_message}
+
             await event.bot.set_group_card(group_id=int(group_id), user_id=int(user_id), card=card)
             if card:
                 msg = f"已将用户 {user_id} 的群昵称修改为：{card}"
@@ -2606,6 +2871,15 @@ class Main(Star):
         group_id = event.get_group_id()
         if not group_id:
             return {"status": "error", "message": "无法获取群号"}
+
+        allowed, deny_message = await self._check_target_user_permission(
+            event,
+            user_id,
+            "设置/取消管理员",
+        )
+        if not allowed:
+            return {"status": "error", "message": deny_message}
+
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
@@ -2757,6 +3031,15 @@ class Main(Star):
         group_id = event.get_group_id()
         if not group_id:
             return {"status": "error", "message": "无法获取群号"}
+
+        allowed, deny_message = await self._check_target_user_permission(
+            event,
+            user_id,
+            "设置专属头衔",
+        )
+        if not allowed:
+            return {"status": "error", "message": deny_message}
+
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
