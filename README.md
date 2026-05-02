@@ -1,6 +1,6 @@
 # QzoneTools - AstrBot QQ空间与消息工具插件
 
-为 AstrBot 提供完整的 QQ 空间操作、消息管理与QQ状态控制功能。
+为 AstrBot 提供完整的 QQ 空间操作、消息管理、群管理、记忆管理与QQ状态控制功能。
 
 ## 功能特性
 
@@ -16,14 +16,16 @@
 | ↩️ **消息撤回** | 群聊中通过引用消息撤回（仅支持群聊） | ✅ 可用 |
 | 📧 **发送邮件** | 通过QQ邮箱发送邮件 | ✅ 可用 |
 | ㊙️ **群内身份获取** | 可以选择默认注入群身份，也可以LLM自动使用工具获取xx群xx人的身份 | ✅ 可用 |
-| 👍🏻 **超多超棒的群管功能** | AI自主管群 | ✅ 可用|
+| 👍🏻 **超多超棒的群管功能** | AI自主管群，支持禁言、踢人、全体禁言、改名片、群公告、群文件管理、设置管理员、群名称修改、群荣誉查看、加群方式设置等 | ✅ 可用 |
 | 🎉 **AI声聊**（免费tts） | 使用QQ官方的tts | ✅ 可用 |
 | 😍 **输入状态同步** | Bot被唤醒时会议设置当前输入状态为对方正在输入中，更拟人 | 自己去配置文件启用功能 |
+| 🧠 **记忆管理** | 自动提取并保存用户重要信息，支持搜索、更新、删除 | ✅ 可用 |
+| 🎨 **个人资料管理** | 修改机器人昵称、个性签名、QQ头像 | ✅ 可用 |
 
 ## 安装方法
 
 ### 方式一：通过AstrBot插件市场（推荐）
-等待上架后直接在WebUI搜索 `qzone_tools` 安装
+直接在WebUI搜索 `qzone_tools` 安装
 
 ### 方式二：手动安装
 1. 下载本插件压缩包
@@ -31,143 +33,207 @@
 3. 重启或重载插件
 
 ### 方式三：Git安装
+
     # 在AstrBot插件目录执行
     cd /AstrBot/data/plugins
     git clone https://github.com/Wyccotccy/astrbot_plugin_qzone_tools.git
 
+
 ## 使用方法
 
-⚠️ 重要提示：为了获得最佳体验，建议在 系统提示词（System Prompt） 或 人格设定 中提醒 LLM 本插件的功能，这样 LLM 会主动调用这些工具。
+⚠️ **重要提示**：插件采用特殊的三步工具调用机制，LLM **必须**遵循以下流程调用任何功能：
+
+### 工具调用机制（LLM必读）
+
+1. **第一步**：使用 `search_wyc_tools` 工具，传入简短关键词（如"邮箱"、"禁言"、"发说说"、"记忆"），搜索匹配的工具。**禁止使用完整问句！**
+2. **第二步**：如果 `search_wyc_tools` 未找到，再使用 `call_wyc_tools` 查看全部可用工具列表。
+3. **第三步**：确定工具名称后，使用 `run_wyc_tool` 并传入工具名称和 JSON 格式的参数执行。
 
 ### 推荐系统提示词
 
 在你的 AstrBot 配置中，添加以下提示词到 系统提示词 或 人格设定：
 
-    你拥有以下工具能力，在适当场景下请主动调用：
+    你拥有通过工具调用实现的以下能力，在适当场景下请主动使用：
 
-    1. **QQ空间操作**：你可以帮用户发表QQ空间说说，当用户提到"发空间"、"发动态"、"发朋友圈"时，主动调用 publish_qzone 工具。
+    **调用任何功能前，必须先使用 search_wyc_tools 搜索工具名称（使用简短关键词），再通过 run_wyc_tool 执行。禁止直接猜测或编造工具名称！**
 
-    2. **戳一戳**：你可以发送戳一戳提醒用户，当用户说"戳一下"、"提醒他"、"打个招呼"时，调用 send_poke。
-
-    3. **联系人搜索**：你可以搜索群聊和好友（支持通过名字或QQ号模糊匹配），当用户需要找某个群或某人时，调用 search_contacts。
-       - 注意：搜索时使用简短关键词即可，不需要同时提供名字和QQ号
-
-    4. **主动发消息**：你可以向指定群或好友发送消息，当用户要求"通知大家"、"发消息给XX"时，先搜索联系人，再调用 send_message。
-
-    5. **定时消息**：你可以创建定时提醒任务，当用户说"明天提醒我"、"定时发送"、"8点叫醒我"时，调用 schedule_message。
-       - 支持格式："明天 08:00"、"30分钟后"、"2026-03-15 14:00"、"每天的08:00"
-
-    6. **定时指令（高级）**：你可以创建更复杂的定时任务，包括：
-       - 定时发表QQ空间说说（qzone_post）
-       - 定时更改QQ状态（status_change）
-       - 定时发送消息（send_message）
-       - 定时LLM提醒，到时间后由你回复用户（llm_remind）
-       - 使用 create_scheduled_command 创建，支持持久化存储，重启后仍然有效
-
-    7. **QQ状态管理**：你可以帮用户设置QQ在线状态，当用户说"我要隐身"、"设置忙碌状态"、"显示听歌中"时，调用 update_qq_status。
-       - 基础状态：在线、Q我吧、离开、忙碌、请勿打扰、隐身
-       - 娱乐状态：听歌中、睡觉中、学习中
-       - 支持定时自动恢复在线状态
-
-    8. **消息撤回**：在群聊中，你可以帮用户撤回消息。当用户引用一条消息并说"撤回这条"、"删掉这个"时，调用 recall_by_reply。
-       - 注意：仅支持群聊，且必须在2分钟内撤回
-
-    9. **QQ邮箱发送**：你可以通过QQ邮箱发送邮件，当用户说"发邮件"、"发送邮件给xxx"、"给xx发一封邮件"时，调用 send_email。
-       - 需要提前在插件配置中填写发件人QQ邮箱和授权码
-       - 支持发送纯文本邮件和HTML邮件
+    可用功能领域包括：
+    - QQ空间操作（发说说）
+    - 戳一戳提醒
+    - 联系人搜索（好友/群聊模糊搜索）
+    - 主动发消息（群聊/私聊）
+    - 定时消息与高级定时指令（支持发空间、改状态、LLM提醒，高级指令持久化存储）
+    - QQ状态管理（在线/离开/忙碌/隐身/听歌中/睡觉中等）
+    - 群聊消息撤回（需引用消息）
+    - QQ邮件发送
+    - 记忆管理（添加/搜索/更新/删除用户记忆）
+    - 群管理（禁言/踢人/全体禁言/改名片/群公告/群文件/设置管理员/群荣誉等）
+    - AI语音消息（TTS）
+    - 个人资料修改（昵称/签名/头像）
 
     注意：
     - 发表说说和主动发消息需要确保 NapCat 已登录且状态正常
-    - 定时指令（create_scheduled_command）比定时消息（schedule_message）功能更强大且数据持久化
-    - 撤回消息功能仅支持群聊中通过引用方式撤回
-    - 发送邮件功能需要在插件配置文件中填写发件人邮箱和授权码
+    - 高级定时指令（create_scheduled_command）支持持久化存储，重启后保留
+    - 撤回消息仅支持群聊，需引用消息且2分钟内
+    - 发送邮件需在插件配置中填写发件人邮箱和授权码
 
 ## 使用示例
 
 ### 1. 发表QQ空间说说
-用户："帮我发条空间说说，今天天气真好"
-LLM：调用 publish_qzone → 成功发表
+- 用户："帮我发条空间说说，今天天气真好"
+- LLM：`search_wyc_tools("发说说")` → `run_wyc_tool("publish_qzone", {"content": "今天天气真好"})`
 
 ### 2. 戳一戳提醒
-用户："戳一下刚才说话的那个人"
-LLM：调用 send_poke → 发送窗口抖动
+- 用户："戳一下刚才说话的那个人"
+- LLM：`search_wyc_tools("戳")` → `run_wyc_tool("send_poke", {"target_qq": "123456"})`
 
 ### 3. 搜索联系人
-用户："找一下通知群"
-LLM：调用 search_contacts(keyword="通知") → 返回匹配的群列表
-
-用户："搜索QQ号123456"
-LLM：调用 search_contacts(keyword="123456") → 返回匹配的好友或群
+- 用户："找一下通知群"
+- LLM：`search_wyc_tools("搜索")` → `run_wyc_tool("search_contacts", {"keyword": "通知"})`
 
 ### 4. 主动发消息
-用户："给刚才那个群发个通知，说会议取消了"
-LLM：
-1. 从上下文获取群ID
-2. 调用 send_message → 发送"会议取消了"
+- 用户："给刚才那个群发个通知，说会议取消了"
+- LLM：`search_wyc_tools("发消息")` → `run_wyc_tool("send_message", {"target_id": "群号", "message": "会议取消了"})`
 
-### 5. 定时消息（内存存储，重启丢失）
-用户："明天早上8点叫我起床"
-LLM：
-1. 询问或确认目标（私聊还是某个群）
-2. 调用 schedule_message(send_time="明天 08:00") → 创建任务
-3. 返回任务ID供后续管理
+### 5. 记忆管理
+- 用户："记住我喜欢喝咖啡"
+- LLM：`search_wyc_tools("记忆")` → `run_wyc_tool("add_memory", {"content": "用户喜欢喝咖啡", "tags": "偏好,饮食"})`
+- 用户："我之前说过我喜欢什么？"
+- LLM：`search_wyc_tools("记忆")` → `run_wyc_tool("search_memories", {"keyword": "喜欢"})`
 
-**管理定时任务：**
-- "查看我的定时任务" → list_scheduled_messages
-- "取消任务 abc123" → cancel_scheduled_message
+### 6. QQ状态管理
+- 用户："我要隐身玩游戏"
+- LLM：`search_wyc_tools("状态")` → `run_wyc_tool("update_qq_status", {"status": "invisible", "duration_minutes": 60})`
 
-### 6. 定时指令（持久化存储，重启保留）
-用户："每天晚上10点自动发一条空间说说'晚安'"
-LLM：
-1. 调用 create_scheduled_command，设置 command_type="qzone_post"，recurrence="daily"
-2. 返回任务ID
+### 7. 群聊消息撤回
+- 用户：[引用一条消息] "撤回这条"
+- LLM：`search_wyc_tools("撤回")` → `run_wyc_tool("recall_by_reply", {})`
 
-用户："30分钟后提醒我喝水"
-LLM：
-1. 调用 create_scheduled_command，设置 command_type="llm_remind"
-2. 到时间后LLM会收到提醒并回复用户
+### 8. 发送邮件
+- 用户："给 friend@qq.com 发邮件，主题测试，内容你好"
+- LLM：`search_wyc_tools("邮件")` → `run_wyc_tool("send_qq_email", {"to": "friend@qq.com", "subject": "测试", "content": "你好"})`
 
-**管理定时指令：**
-- "查看所有定时指令" → list_scheduled_commands
-- "取消指令 xxx" → cancel_scheduled_command
-- "删除指令 xxx" → delete_scheduled_command（彻底删除记录）
+### 9. AI语音消息
+- 用户："用语音说大家好"
+- LLM：`search_wyc_tools("语音")` → `run_wyc_tool("send_ai_voice", {"text": "大家好"})`
 
-### 7. QQ状态管理
-用户："我要隐身玩游戏"
-LLM：调用 update_qq_status(status="invisible", duration_minutes=60) → 设置隐身状态，1小时后自动恢复在线
+### 10. 个人资料修改
+- 用户："把机器人昵称改成小助手"
+- LLM：`search_wyc_tools("资料")` → `run_wyc_tool("set_qq_profile", {"nickname": "小助手"})`
 
-用户："设置成听歌中状态"
-LLM：调用 update_qq_status(status="listening", duration_minutes=120) → 显示听歌中状态
+## 完整工具列表
 
-**查看当前状态：**
-- "我现在是什么状态" → get_qq_status
+插件提供以下LLM可调用工具（按功能分类）：
 
-### 8. 群聊消息撤回
-用户：[引用一条消息] "撤回这条消息"
-LLM：调用 recall_by_reply → 撤回引用的消息
+### 记忆管理
+- `add_memory` - 添加用户记忆
+- `search_memories` - 搜索记忆
+- `update_memory` - 更新记忆
+- `delete_memory` - 删除记忆
+- `get_memory_detail` - 获取记忆详情
 
-**注意：**
-- 仅支持群聊
-- 必须在消息发送后2分钟内撤回
-- 必须通过引用消息方式调用
+### 消息与定时
+- `send_message` - 发送消息
+- `schedule_message` - 创建定时消息（内存存储，重启丢失）
+- `cancel_scheduled_message` - 取消定时消息
+- `list_scheduled_messages` - 列出定时消息
 
-### 9. 发送邮件
-用户："给 friend@qq.com 发一封邮件，主题是'测试'，内容说'你好，这是测试邮件'"
-LLM：调用 send_email(recipient="friend@qq.com", subject="测试", body="你好，这是测试邮件") → 发送成功
+### QQ空间
+- `publish_qzone` - 发表QQ空间说说
 
-用户："发送一封HTML格式的邮件，收件人是 admin@example.com，内容是带链接的"
-LLM：调用 send_email(recipient="admin@example.com", subject="HTML邮件", body="<a href='https://example.com'>点击链接</a>", is_html=True)
+### 戳一戳
+- `send_poke` - 发送戳一戳
+
+### QQ状态
+- `update_qq_status` - 设置QQ在线状态
+- `get_qq_status` - 查看当前状态
+- `get_fun_status_list` - 获取娱乐状态列表
+
+### 高级定时指令（持久化）
+- `create_scheduled_command` - 创建定时指令
+- `list_scheduled_commands` - 列出定时指令
+- `cancel_scheduled_command` - 取消定时指令
+- `delete_scheduled_command` - 删除定时指令
+
+### 消息操作
+- `recall_by_reply` - 引用撤回消息
+
+### 邮件
+- `send_qq_email` - 发送QQ邮件
+
+### 联系人
+- `search_contacts` - 搜索联系人
+- `list_contacts` - 列出联系人
+
+### 群管理
+- `get_user_group_role` - 查询群成员身份
+- `set_essence_msg` - 设置群精华
+- `delete_essence_msg` - 取消群精华
+- `set_group_ban` - 禁言/解禁用户
+- `set_group_kick` - 踢出群成员
+- `set_group_whole_ban` - 全体禁言
+- `set_group_card` - 修改群名片
+- `send_group_notice` - 发布群公告
+- `delete_group_notice` - 删除群公告
+- `get_group_notice_list` - 获取公告列表
+- `list_group_files` - 查看群文件
+- `delete_group_file` - 删除群文件
+- `upload_group_file` - 上传群文件
+- `create_group_file_folder` - 创建群文件夹
+- `delete_group_folder` - 删除群文件夹
+- `move_group_file` - 移动群文件
+- `rename_group_file` - 重命名群文件
+- `trans_group_file` - 传输群文件
+- `get_group_members_info` - 获取群成员列表
+- `set_group_admin` - 设置/取消管理员
+- `set_group_name` - 修改群名称
+- `get_group_honor_info` - 获取群荣誉信息
+- `get_group_at_all_remain` - 查看@全体成员剩余次数
+- `set_group_special_title` - 设置专属头衔
+- `get_group_shut_list` - 获取禁言列表
+- `get_group_ignore_add_request` - 获取被忽略的加群请求
+- `set_group_add_option` - 设置加群方式
+- `send_group_sign` - 群打卡
+
+### 其他
+- `set_qq_avatar` - 设置QQ头像
+- `set_qq_profile` - 修改个人资料（昵称/签名）
+- `send_like` - 点赞
+- `get_group_msg_history` - 获取群历史消息
+- `get_friend_msg_history` - 获取好友历史消息
+- `set_group_portrait` - 设置群头像
+- `fetch_custom_face` - 获取自定义表情列表
+- `set_input_status` - 设置输入状态
+- `get_ai_characters` - 获取AI语音角色列表
+- `send_ai_voice` - 发送AI语音消息
+
+## 配置说明
+
+插件支持通过配置文件灵活启用/禁用各个工具，以及调整各项参数。主要配置项包括：
+
+- `enabled` - 插件总开关
+- `enable_<工具名>` - 单独控制每个工具的启用状态（如 `enable_add_memory: true`）
+- `group_manage_enabled` - 群管理功能总开关
+- `kick_enabled` - 踢人功能开关
+- `email_sender` / `email_authorization_code` - 邮件发送配置
+- `ai_voice_default_character` - AI语音默认角色
+- `max_memories_per_user` - 每用户最大记忆数
+- `memory_inject_enabled` - 是否自动注入用户记忆到LLM上下文
+- `inject_group_role_enabled` - 是否自动注入群成员身份
+- `auto_input_status_enabled` - 是否自动设置输入状态
+- `enable_human_typing` - 是否启用拟人化输入延迟
 
 ## 注意事项
 
 ### 1. NapCat 兼容性
-- 需要 NapCat 支持 get_credentials 或 get_cookies API 来获取 QQ 空间 Cookie
-- 如果发表说说失败，请检查 NapCat 日志确认是否成功获取 Cookie
-- 消息撤回功能需要 NapCat 支持 delete_msg API
+- 需要 NapCat 支持 `get_credentials` 或 `get_cookies` API 来获取 QQ 空间 Cookie
+- 消息撤回功能需要 NapCat 支持 `delete_msg` API
+- QQ状态设置需要 `set_online_status` API
+- AI语音需要 `get_ai_characters` 和 `send_group_ai_record` API
 
 ### 2. Cookie 有效期
 - QQ 空间 Cookie 通常几天到几周会过期
-- 插件会自动从 NapCat 获取最新 Cookie，无需手动配置
+- 插件每次发空间都会自动获取最新 Cookie，无需手动配置
 
 ### 3. 风控提醒
 - 频繁发表说说可能导致 QQ 空间被限制
@@ -180,131 +246,131 @@ LLM：调用 send_email(recipient="admin@example.com", subject="HTML邮件", bod
 |------|----------------------------|-----------------------------------|
 | 存储方式 | 内存 | JSON文件持久化 |
 | 重启保留 | ❌ 丢失 | ✅ 保留 |
-| 功能范围 | 仅发送消息 | 发空间、改状态、发消息、LLM提醒 |
-| 重复支持 | 单次 | 支持单次/每天重复 |
+| 功能范围 | 仅发送消息 | 发空间、改状态、LLM提醒 |
 
-### 5. QQ状态管理说明
-- 设置非在线状态后，插件会自动计时，到期后自动恢复在线
-- 支持延迟设置（如"30分钟后设置为离开状态"）
-- 状态数据持久化存储，重启后会自动恢复之前的设置
-
-### 6. 撤回功能限制
-- 仅支持群聊，私聊无法使用
-- 必须通过引用消息方式触发，不支持关键词搜索撤回
-- 超过2分钟的消息无法撤回
-- 需要机器人有相应权限（管理员或消息发送者）
-
-### 7. 邮件发送配置
-- 需要先在插件配置文件中填写发件人QQ邮箱地址和授权码（SMTP密码）
-- 授权码获取方式：登录QQ邮箱 → 设置 → 账户 → POP3/IMAP/SMTP服务 → 生成授权码
-- 邮件发送使用QQ邮箱的SMTP服务器（smtp.qq.com:587，支持TLS）
-- 如果发送失败，请检查授权码是否正确，以及是否开启了SMTP服务
+### 5. 记忆管理说明
+- 记忆按用户ID隔离存储
+- 超过最大记忆数时自动清理最旧的记忆
+- 支持标签和重要度（1-10）分类
+- 可配置将记忆自动注入LLM上下文
 
 ## 故障排查
 
 ### 发表说说失败
-**现象：** 返回"Cookie无效"或"返回HTML页面"
+**现象：** 返回"Cookie无效"或"会话未初始化"
+
 **解决：**
 1. 检查 NapCat 是否已登录
 2. 检查 NapCat 版本是否支持 get_credentials API
 3. 尝试重新登录 NapCat 刷新 Cookie
 
-### 搜索联系人为空
-**现象：** 返回"未找到联系人"
+### LLM不调用工具
+**现象：** LLM 回复不知道如何操作
+
 **解决：**
-1. 确认关键词正确（支持模糊搜索名字或QQ号）
-2. 检查 NapCat 是否能正常获取群列表/好友列表
-3. 等待5分钟后重试（缓存过期）
+1. 确认系统提示词中已包含工具使用规范
+2. 检查插件是否已启用（enabled: true）
+3. 查看日志确认 search_wyc_tools 是否被加载
 
 ### 定时任务未执行
-**现象：** 到时间后没有发送消息
-**解决：**
-- 如果是 schedule_message：检查插件是否重启（重启会丢失任务）
-- 如果是 create_scheduled_command：检查日志，确认任务是否被加载
-- 确认目标ID（群号/QQ号）在发送时仍然有效
+**现象：** 到时间后没有执行
 
-### 撤回消息失败
-**现象：** 返回"消息ID解析失败"或"无权撤回"
 **解决：**
-1. 确认消息在2分钟内
-2. 确认在群聊中使用（私聊不支持）
-3. 确认通过引用消息方式调用
-4. 检查机器人是否有管理员权限（针对非自己发送的消息）
-
-### QQ状态设置失败
-**现象：** 返回"设置失败"
-**解决：**
-1. 检查 NapCat 版本是否支持 set_online_status API
-2. 检查是否使用了有效的状态码
-3. 部分娱乐状态可能需要较新的QQ客户端支持
+- schedule_message：检查插件是否重启（重启丢失）
+- create_scheduled_command：检查日志确认任务是否被加载
+- 确认目标ID在发送时仍然有效
 
 ### 发送邮件失败
-**现象：** 返回"邮件发送失败"或认证错误
+**现象：** 返回认证错误
+
 **解决：**
 1. 确认插件配置中已正确填写发件人邮箱和授权码
-2. 检查授权码是否为最新（QQ邮箱授权码会定期失效）
+2. 检查授权码是否为最新
 3. 确认发件人QQ邮箱已开启SMTP服务
-4. 检查收件人地址是否有效
-5. 查看插件日志获取详细错误信息
+
+## 管理员命令
+
+插件提供以下管理员命令（需AstrBot管理员权限）：
+
+| 命令 | 说明 |
+|------|------|
+| /tool_memory list/add/delete/update/get | 记忆管理 |
+| /tool_send_message <目标ID> <消息> | 发送消息 |
+| /tool_schedule <目标ID> <消息> <时间> | 创建定时消息 |
+| /tool_publish_qzone <内容> | 发说说 |
+| /tool_status <状态> <分钟> | 设置QQ状态 |
+| /tool_status_get | 查看当前状态 |
+| /tool_poke <QQ号> | 戳一戳 |
+| /tool_recall | 引用撤回消息 |
+| /tool_email <收件人> <主题> <内容> | 发送邮件 |
+| /tool_search <关键词> | 搜索联系人 |
+| /ai_characters | 查看AI语音角色 |
+| /ai_voice [角色] <文本> | 发送AI语音 |
+| /ban_user <QQ号> <分钟> | 禁言用户 |
+| /unban_user <QQ号> | 解禁用户 |
+| /kick <QQ号> | 踢出用户 |
+| /whole_ban <on/off> | 全体禁言开关 |
+| /set_card <QQ号> <昵称> | 修改群名片 |
+| /send_notice <内容> | 发布群公告 |
+| /set_admin <QQ号> <on/off> | 设置管理员 |
+| /set_group_name <名称> | 修改群名称 |
+| /set_qq_avatar [图片] | 设置QQ头像 |
+| /set_profile nickname=xxx personal_note=xxx | 修改个人资料 |
+| /tool_all_help | 查看完整帮助 |
 
 ## 开发者信息
 - 作者：Wyccotccy
 - GitHub：https://github.com/Wyccotccy/astrbot_plugin_qzone_tools
 - 问题反馈：请提交 GitHub Issue
 
-## 温馨提示：
-***更多更新内容，请前往更新日志查看，我他妈懒得写README了哈哈哈***
-
 ## 更新日志
- ## ***详细更新日志请查看CHANGELOG.md***
+
+详细更新日志请查看 CHANGELOG.md
 
 ### v3.0.0
--重点优化了LLM工具调用逻辑，避免一次性注入过多工具造成token浪费
+- 重点优化了LLM工具调用逻辑，采用 search_wyc_tools → run_wyc_tool 三步机制，避免一次性注入过多工具造成token浪费
+- 新增记忆管理功能（MemoryManager），支持添加、搜索、更新、删除用户记忆
+- 新增个人资料管理（set_qq_profile），支持修改昵称和个性签名
+- 新增设置QQ头像功能（set_qq_avatar）
+- 新增群文件移动/重命名/传输功能
+- 新增点赞、历史消息获取、群头像设置等功能
+- 新增拟人化输入状态延迟功能
+- 工具注册表增加关键词匹配，提升LLM搜索准确度
 
 ### v2.1.0
-- Ok啊，也是每天更新一次
-- 加了一堆工具，群管工具也加了不少，群文件也加了不少
-- 最他妈喜欢的就是那个设置输入状态呦吼吼吼吼 不是，哪来的骚福瑞啊怎么这么有才
+- 新增大量群管工具和群文件管理功能
+- 新增设置输入状态功能
 
 ### v2.0.0
-- ✨ 又加了16个群管功能
-- ✨ 加了AI声聊功能
-- 🈲 修复已知问题
+- 新增16个群管功能
+- 新增AI声聊功能
+- 修复已知问题
 
-### v1.4.0  
-- ✨ 新增了超级多群管功能
-- ㊙️ 修复已知问题
+### v1.4.0
+- 新增大量群管功能
+- 修复已知问题
 
-### v1.3.0 
-- ✨ 新增：支持了群成员关系获取/注入功能
-- 🤫 修复了已知问题
+### v1.3.0
+- 新增群成员关系获取/注入功能
+- 修复已知问题
 
-### v1.2.1 
-- 很抱歉，呃没有做到上下文注入功能，我遭不住了，我他妈真的不知道怎么搞，总之先搁一边，先搞点别的
-- ✨ 新增：群聊列表/好友列表的搜索功能，并且支持模糊搜索
-- 🔧 优化 完善“定时任务”与“定时消息”的区分，避免某些模型会混用2种工具
-- 🔧 优化：修复了如果插件长时间运行，QQ空间Cookie会过期的问题，现在改为每次发空间都获取一次最新Cookue
+### v1.2.1
+- 新增群聊列表/好友列表搜索功能，支持模糊搜索
+- 优化定时任务与定时消息的区分
+- 修复QQ空间Cookie过期问题，改为每次发空间都获取最新Cookie
 
-### v1.2.0 
-- ✨ 新增：QQ邮箱发送功能，支持通过SMTP发送纯文本和HTML邮件
-- ✨ 新增：插件配置文件中可设置发件人邮箱和授权码
-- 🔧 优化：完善系统提示词，增加邮件发送工具描述
+### v1.2.0
+- 新增QQ邮箱发送功能，支持纯文本和HTML邮件
+- 完善系统提示词
 
 ### v1.1.0
-- ✨ 新增：QQ状态管理功能（支持在线/Q我吧/离开/忙碌/隐身/听歌中/睡觉中/学习中）
-- ✨ 新增：定时指令功能（create_scheduled_command），支持发空间、改状态、发消息、LLM提醒
-- ✨ 新增：群聊消息撤回功能（recall_by_reply），支持引用撤回
-- ✨ 新增：定时指令持久化存储，重启后自动恢复
-- 🔧 优化：所有函数工具添加标准文档字符串，修复参数绑定问题
-- 🔧 优化：搜索联系人支持名字和QQ号模糊匹配
+- 新增QQ状态管理功能
+- 新增定时指令功能（持久化存储）
+- 新增群聊消息撤回功能
+- 优化搜索联系人功能
 
 ### v1.0.0
-- ✨ 初始版本发布
-- 📝 支持发表QQ空间说说
-- 👆 支持发送戳一戳
-- 🔍 支持搜索联系人（群聊/好友）
-- 💬 支持主动发送消息
-- ⏰ 支持定时消息任务
+- 初始版本发布，支持发表说说、戳一戳、搜索联系人、发送消息、定时消息
 
 ## 许可证
 MIT License
