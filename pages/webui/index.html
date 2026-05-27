@@ -1,0 +1,877 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QZone Tools</title>
+    <style>
+        :root {
+            --bg: #f5f6fa;
+            --card-bg: rgba(255, 255, 255, 0.7);
+            --card-border: rgba(255, 255, 255, 0.6);
+            --primary: #5b6abf;
+            --primary-hover: #4a56a8;
+            --danger: #d15b5b;
+            --danger-hover: #b84a4a;
+            --text: #2c3e50;
+            --text-light: #7f8c8d;
+            --shadow: 0 8px 32px rgba(0, 0, 0, 0.06);
+            --radius: 16px;
+            --input-bg: rgba(255, 255, 255, 0.8);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #e8ecf1 0%, #f0f3f8 50%, #e8ecf1 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            padding: 40px 20px;
+            color: var(--text);
+            position: relative;
+        }
+        .signature {
+            position: fixed;
+            left: 24px;
+            bottom: 24px;
+            font-size: 0.85rem;
+            color: var(--text-light);
+            opacity: 0.2;
+            pointer-events: none;
+            user-select: none;
+        }
+        .container { width: 100%; max-width: 1100px; display: flex; flex-direction: column; gap: 24px; }
+        .nav { display: flex; gap: 12px; padding: 10px 0; }
+        .nav-btn {
+            padding: 10px 24px; border-radius: 30px;
+            background: var(--card-bg); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.6); color: var(--text); font-weight: 500; cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .nav-btn.active { background: var(--primary); color: white; border-color: var(--primary); box-shadow: 0 4px 12px rgba(91,106,191,0.3); }
+        .content { display: none; }
+        .content.active { display: block; }
+        .card {
+            backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+            background: var(--card-bg); border: 1px solid var(--card-border);
+            border-radius: var(--radius); box-shadow: var(--shadow); padding: 28px;
+        }
+        .section-title { font-size: 1.1rem; font-weight: 600; color: var(--primary); margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid rgba(0,0,0,0.06); }
+        .field { margin-bottom: 16px; }
+        label { display: block; font-size: 0.85rem; font-weight: 500; color: var(--text-light); margin-bottom: 6px; }
+        input, textarea, select {
+            width: 100%; padding: 10px 14px; border: 1px solid rgba(200,200,210,0.8); border-radius: 10px;
+            background: var(--input-bg); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+            font-size: 0.9rem; color: var(--text); transition: border 0.2s, box-shadow 0.2s;
+        }
+        input:focus, textarea:focus, select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(91,106,191,0.15); }
+        input[type="checkbox"] { width: auto; margin-right: 8px; accent-color: var(--primary); }
+        .checkbox-wrap { display: flex; align-items: center; margin-bottom: 12px; font-size: 0.9rem; }
+        .btn {
+            display: inline-flex; align-items: center; justify-content: center;
+            background: var(--primary); color: white; border: none; padding: 10px 24px; border-radius: 10px;
+            font-size: 0.95rem; font-weight: 500; cursor: pointer; backdrop-filter: blur(8px);
+            transition: background 0.2s;
+        }
+        .btn:hover { background: var(--primary-hover); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-danger { background: var(--danger); }
+        .btn-danger:hover { background: var(--danger-hover); }
+        .status { margin-top: 14px; padding: 10px 14px; border-radius: 10px; font-size: 0.85rem; display: none; }
+        .status.show { display: block; }
+        .status.success { background: rgba(46,204,113,0.15); color: #1e8449; }
+        .status.error { background: rgba(231,76,60,0.15); color: #b03a2e; }
+        .loading-text { font-size: 0.85rem; color: var(--primary); margin-left: 12px; }
+        .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        .list { margin-top: 12px; }
+        .list-item {
+            background: rgba(255,255,255,0.55); backdrop-filter: blur(10px);
+            border-radius: 12px; padding: 14px 18px; margin-bottom: 8px;
+            display: flex; justify-content: space-between; align-items: center;
+            border: 1px solid rgba(255,255,255,0.5);
+        }
+        .list-item .info { flex: 1; min-width: 0; }
+        .list-item .info strong { display: block; font-size: 0.95rem; margin-bottom: 4px; }
+        .list-item .info .meta { font-size: 0.8rem; color: var(--text-light); }
+        .list-item .actions { display: flex; gap: 8px; flex-shrink: 0; margin-left: 16px; }
+        .empty { text-align: center; color: var(--text-light); padding: 20px 0; }
+    </style>
+</head>
+<body>
+    <div id="bridgeStatus" class="status error" style="position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:9999;min-width:300px;text-align:center;display:none;"></div>
+    <div class="signature">Wyccotccy &amp; 烬熵Cinder(DEMO预览版，暂不支持编辑，还没研究清楚......）</div>
+    <div class="container">
+        <div class="card">
+            <h1 style="font-size:1.5rem; font-weight:600; margin-bottom:6px;">QZone Tools</h1>
+            <p style="font-size:0.9rem; color:var(--text-light);">配置、记忆与定时消息管理面板</p>
+            <div class="nav" id="nav">
+                <button class="nav-btn active" data-page="config">配置</button>
+                <button class="nav-btn" data-page="capability">能力控制</button>
+                <button class="nav-btn" data-page="workspace">文件管理</button>
+                <button class="nav-btn" data-page="memory">记忆</button>
+                <button class="nav-btn" data-page="schedule">定时消息</button>
+            </div>
+        </div>
+
+        <!-- 配置面板 -->
+        <div id="configPage" class="content active">
+            <div class="card">
+                <div class="section-title">邮箱设置</div>
+                <div class="field"><label>发件人邮箱</label><input id="email_sender" /></div>
+                <div class="field"><label>授权码</label><input id="email_authorization_code" type="password" /></div>
+                <div class="two-col">
+                    <div class="field"><label>SMTP 服务器</label><input id="email_smtp_server" /></div>
+                    <div class="field"><label>端口</label><input id="email_smtp_port" type="number" /></div>
+                </div>
+            </div>
+            <div class="card" style="margin-top:20px;">
+                <div class="section-title">记忆管理</div>
+                <div class="field"><label>每用户最大记忆数</label><input id="max_memories_per_user" type="number" /></div>
+                <div class="field"><label>LLM 注入最大条数</label><input id="max_inject_memories" type="number" /></div>
+                <div class="checkbox-wrap"><input type="checkbox" id="memory_inject_enabled" /><label for="memory_inject_enabled">启用记忆注入</label></div>
+            </div>
+            <div class="card" style="margin-top:20px;">
+                <div class="section-title">AI 语音</div>
+                <div class="field"><label>默认角色 ID</label><input id="ai_voice_default_character" /></div>
+                <div class="field"><label>文本最大长度</label><input id="ai_voice_max_text_length" type="number" /></div>
+            </div>
+            <div class="card" style="margin-top:20px;">
+                <div class="section-title">输入状态 / 拟人化</div>
+                <div class="checkbox-wrap"><input type="checkbox" id="auto_input_status_enabled" /><label for="auto_input_status_enabled">自动输入状态</label></div>
+                <div class="field"><label>自动超时 (秒)</label><input id="auto_input_status_timeout" type="number" /></div>
+                <div class="checkbox-wrap"><input type="checkbox" id="enable_human_typing" /><label for="enable_human_typing">拟人化延迟</label></div>
+                <div class="two-col">
+                    <div class="field"><label>延迟最小 (秒)</label><input id="typing_initial_delay_min" type="number" /></div>
+                    <div class="field"><label>延迟最大 (秒)</label><input id="typing_initial_delay_max" type="number" /></div>
+                    <div class="field"><label>空闲阈值 (秒)</label><input id="typing_idle_threshold" type="number" /></div>
+                </div>
+            </div>
+            <div class="card" style="margin-top:20px;">
+                <div class="section-title">全局开关</div>
+                <div class="checkbox-wrap"><input type="checkbox" id="enabled" /><label for="enabled">启用插件</label></div>
+                <div class="checkbox-wrap"><input type="checkbox" id="group_manage_enabled" /><label for="group_manage_enabled">群管理功能</label></div>
+                <div class="checkbox-wrap"><input type="checkbox" id="kick_enabled" /><label for="kick_enabled">允许踢人</label></div>
+                <div class="checkbox-wrap"><input type="checkbox" id="search_enabled" /><label for="search_enabled">联系人搜索</label></div>
+                <div class="checkbox-wrap" style="border:1px solid #d15b5b;border-radius:10px;padding:10px;background:rgba(209,91,91,0.06);margin-top:8px;">
+                    <input type="checkbox" id="inject_tool_prompt_enabled" style="accent-color:#d15b5b;" />
+                    <label for="inject_tool_prompt_enabled" style="color:#b03a2e;font-weight:500;">注入插件工具提示词 <span style="font-weight:400;font-size:0.8rem;">（⚠️ 每次对话额外消耗约 500 token）</span></label>
+                </div>
+            </div>
+            <div class="card" style="margin-top:20px;">
+                <div class="section-title">工作区设置</div>
+                <div class="checkbox-wrap"><input type="checkbox" id="workspace_enabled" /><label for="workspace_enabled">启用工区功能</label></div>
+                <div class="form-item">
+                    <label>闪传中转目录</label>
+                    <p style="font-size:12px;color:#888;margin:4px 0 8px">用于在 AstrBot 和 NapCat 之间共享文件（仅 Docker 环境需要配置）</p>
+                    <input type="text" id="flash_transfer_dir" placeholder="/tmp/astrbot_flash" style="width:100%" />
+                    <details style="margin-top:8px;font-size:12px;color:#666">
+                        <summary>Docker 环境配置说明</summary>
+                        <pre style="background:#f5f5f5;padding:8px;border-radius:4px;margin-top:4px;white-space:pre-wrap">⚠️ 闪传功能需要 AstrBot 和 NapCat 共享文件目录。
+
+如果你是 Docker 环境，请按以下步骤配置：
+
+1. 创建共享目录（宿主机）
+mkdir -p /opt/astrbot_flash
+
+2. AstrBot 容器添加挂载
+docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:rw ...
+
+3. NapCat 容器添加挂载
+docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
+
+4. 在上方填入容器内路径: /tmp/astrbot_flash
+
+如果不是 Docker 环境，可以忽略此配置。</pre>
+                    </details>
+                </div>
+                <div class="field"><label>禁止执行的代码模式（正则表达式，每行一个）</label><textarea id="workspace_banned_patterns" rows="3" placeholder="例如：import os\nsubprocess"></textarea></div>
+            </div>
+            <div class="card" style="margin-top:20px;">
+                <button class="btn" id="saveConfigBtn">保存配置</button>
+                <span id="configLoading" class="loading-text"></span>
+                <div id="configStatus" class="status"></div>
+            </div>
+        </div>
+
+        <!-- 能力控制面板 -->
+        <div id="capabilityPage" class="content">
+            <div class="card">
+                <div class="section-title">能力控制</div>
+                <p style="font-size:0.85rem;color:var(--text-light);margin-bottom:16px;">启用或禁用各个工具功能。关闭后该工具将不会被LLM调用。</p>
+                <div id="capabilityList" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;"></div>
+                <div style="margin-top:20px;display:flex;gap:10px;align-items:center;">
+                    <button class="btn" id="saveCapabilityBtn">保存设置</button>
+                    <span id="capLoading" class="loading-text"></span>
+                </div>
+                <div id="capStatus" class="status"></div>
+            </div>
+        </div>
+
+        <!-- 文件管理面板 -->
+        <div id="workspacePage" class="content">
+            <div class="card">
+                <div class="section-title">工作区文件管理</div>
+                <p style="font-size:0.85rem;color:var(--text-light);margin-bottom:16px;">管理工作区中的文件。LLM生成的文件、闪传接收的文件都会保存在这里。</p>
+                <div style="display:flex;gap:10px;margin-bottom:16px;">
+                    <button class="btn" id="refreshFilesBtn">刷新</button>
+                    <button class="btn" id="uploadFileBtn">上传文件</button>
+                    <input type="file" id="fileInput" style="display:none;" />
+                    <span id="wsLoading" class="loading-text"></span>
+                </div>
+                <div id="fileList" class="list"></div>
+                <div id="wsStatus" class="status"></div>
+            </div>
+        </div>
+
+        <!-- 记忆面板 -->
+        <div id="memoryPage" class="content">
+            <div class="card">
+                <div class="section-title">添加 / 编辑记忆</div>
+                <div style="font-size:0.85rem;color:var(--text-light);margin-bottom:12px;" id="memoryFormHint">填写信息后添加新记忆，或选择记忆进行编辑。</div>
+                <div class="field"><label>用户ID</label><input id="memoryUserId" placeholder="QQ号/用户标识" /></div>
+                <div class="field"><label>内容</label><textarea id="memoryContent" rows="2" placeholder="记忆内容"></textarea></div>
+                <div class="two-col">
+                    <div class="field"><label>标签(逗号分隔)</label><input id="memoryTags" /></div>
+                    <div class="field"><label>重要度(1-10)</label><input id="memoryImportance" type="number" value="5" min="1" max="10" /></div>
+                </div>
+                <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                    <button class="btn" id="saveMemoryBtn">添加记忆</button>
+                    <button class="btn btn-danger" id="cancelEditMemoryBtn" style="display:none;">取消编辑</button>
+                </div>
+                <input type="hidden" id="editingMemoryId" value="" />
+            </div>
+            <div class="card" style="margin-top:20px;">
+                <div class="section-title">搜索 / 管理</div>
+                <div style="display:flex; gap:12px; margin-bottom:16px;">
+                    <input id="memoryKeyword" placeholder="输入关键词（留空显示全部）" style="flex:1" />
+                    <button class="btn" id="searchMemoryBtn">搜索</button>
+                </div>
+                <div id="memoryList" class="list"></div>
+                <div id="memoryStatus" class="status"></div>
+            </div>
+        </div>
+
+        <!-- 定时消息面板 -->
+        <div id="schedulePage" class="content">
+            <div class="card">
+                <div class="section-title">未执行的定时消息</div>
+                <div id="scheduleList" class="list"></div>
+                <div id="scheduleStatus" class="status"></div>
+            </div>
+            <div class="card" style="margin-top:20px;">
+                <div class="section-title">新建定时消息</div>
+                <div class="field"><label>目标ID (QQ号/群号)</label><input id="newTargetId" /></div>
+                <div class="field"><label>消息内容</label><textarea id="newMessage" rows="2"></textarea></div>
+                <div class="two-col">
+                    <div class="field"><label>发送时间</label><input id="newSendTime" placeholder="例如 18:00 或 2026-05-10 18:00" /></div>
+                    <div class="field"><label>类型</label>
+                        <select id="newChatType">
+                            <option value="group">群聊</option>
+                            <option value="private">私聊</option>
+                        </select>
+                    </div>
+                </div>
+                <button class="btn" id="addScheduleBtn">创建定时</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Inlined bridge SDK -->
+    <script>
+if (!window.AstrBotPluginPage) {
+(function attachAstrBotPluginPageBridge() {
+  const CHANNEL = "astrbot-plugin-page";
+  const SELF_ORIGIN = window.location.origin;
+  const pendingRequests = new Map();
+  const sseHandlers = new Map();
+  const contextHandlers = new Set();
+  let requestCounter = 0;
+  let subscriptionCounter = 0;
+  let context = null;
+  let parentOrigin = null;
+  let resolveReady;
+  const readyPromise = new Promise((resolve) => {
+    resolveReady = resolve;
+  });
+
+  function getTargetOrigin() {
+    if (typeof parentOrigin === "string" && parentOrigin && parentOrigin !== "null") { return parentOrigin; }
+    if (SELF_ORIGIN !== "null") { return SELF_ORIGIN; }
+    return "*";
+  }
+
+  function isAllowedParentOrigin(origin) {
+    if (typeof origin !== "string" || !origin) { return false; }
+    if (parentOrigin) { return origin === parentOrigin; }
+    if (SELF_ORIGIN === "null") { return true; }
+    return origin === SELF_ORIGIN;
+  }
+
+  function send(kind, payload) {
+    window.parent.postMessage({ channel: CHANNEL, kind: kind, ...(payload || {}) }, getTargetOrigin());
+  }
+
+  function makeRequest(action, payload) {
+    return new Promise((resolve, reject) => {
+      requestCounter += 1;
+      var requestId = "plugin_req_" + requestCounter;
+      pendingRequests.set(requestId, { resolve: resolve, reject: reject });
+      send("request", { requestId: requestId, action: action, ...(payload || {}) });
+    });
+  }
+
+  function applyContext(nextContext) {
+    if (!nextContext || typeof nextContext !== "object") { return; }
+    context = { ...(context || {}), ...nextContext };
+    if (resolveReady) { resolveReady(context); resolveReady = null; }
+  }
+
+  window.addEventListener("message", function(event) {
+    if (event.source !== window.parent) { return; }
+    if (!isAllowedParentOrigin(event.origin)) { return; }
+    if (!parentOrigin) { parentOrigin = event.origin; }
+    var msg = event.data;
+    if (!msg || msg.channel !== CHANNEL) { return; }
+    if (msg.kind === "context") { applyContext(msg.context); return; }
+    if (msg.kind === "response") {
+      var p = pendingRequests.get(msg.requestId);
+      if (!p) { return; }
+      pendingRequests.delete(msg.requestId);
+      if (msg.ok) { p.resolve(msg.data); }
+      else { p.reject(new Error(msg.error || "Plugin bridge request failed.")); }
+    }
+  });
+
+  window.AstrBotPluginPage = {
+    ready: function() { return readyPromise; },
+    getContext: function() { return context; },
+    getLocale: function() { return (context && context.locale) || "zh-CN"; },
+    apiGet: function(endpoint, params) { return makeRequest("api:get", { endpoint: endpoint, params: params }); },
+    apiPost: function(endpoint, body) { return makeRequest("api:post", { endpoint: endpoint, body: body }); }
+  };
+
+  send("ready");
+
+  // Auto-resolve ready() if parent doesn't send context within 4 seconds
+  setTimeout(function() {
+    if (resolveReady) {
+      resolveReady({ locale: "zh-CN", i18n: {} });
+      resolveReady = null;
+    }
+  }, 4000);
+})();
+}
+    </script>
+
+    <script type="module">
+        const bridge = window.AstrBotPluginPage;
+        if (!bridge) console.warn("AstrBotPluginPage bridge not detected, API calls will fail");
+
+        // 导航
+        document.getElementById('nav').addEventListener('click', e => {
+            if (e.target.classList.contains('nav-btn')) {
+                document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                const page = e.target.dataset.page;
+                document.querySelectorAll('.content').forEach(c => c.classList.remove('active'));
+                document.getElementById(page + 'Page').classList.add('active');
+                if (page === 'capability') loadCapability();
+                if (page === 'workspace') loadFiles();
+                if (page === 'memory') loadMemories();
+                if (page === 'schedule') loadSchedules();
+            }
+        });
+
+        // ========== 配置 ==========
+        const configStatus = document.getElementById('configStatus');
+        const configLoading = document.getElementById('configLoading');
+        const saveConfigBtn = document.getElementById('saveConfigBtn');
+
+        function showConfigStatus(msg, type) {
+            configStatus.textContent = msg;
+            configStatus.className = `status show ${type}`;
+            setTimeout(() => configStatus.classList.remove('show'), 3000);
+        }
+
+        function getFormValues() {
+            return {
+                email_sender: document.getElementById('email_sender').value,
+                email_authorization_code: document.getElementById('email_authorization_code').value,
+                email_smtp_server: document.getElementById('email_smtp_server').value,
+                email_smtp_port: parseInt(document.getElementById('email_smtp_port').value) || 465,
+                max_memories_per_user: parseInt(document.getElementById('max_memories_per_user').value) || 100,
+                max_inject_memories: parseInt(document.getElementById('max_inject_memories').value) || 5,
+                memory_inject_enabled: document.getElementById('memory_inject_enabled').checked,
+                ai_voice_default_character: document.getElementById('ai_voice_default_character').value,
+                ai_voice_max_text_length: parseInt(document.getElementById('ai_voice_max_text_length').value) || 500,
+                auto_input_status_enabled: document.getElementById('auto_input_status_enabled').checked,
+                auto_input_status_timeout: parseInt(document.getElementById('auto_input_status_timeout').value) || 10,
+                enable_human_typing: document.getElementById('enable_human_typing').checked,
+                typing_idle_threshold: parseInt(document.getElementById('typing_idle_threshold').value) || 900,
+                typing_initial_delay_min: parseInt(document.getElementById('typing_initial_delay_min').value) || 5,
+                typing_initial_delay_max: parseInt(document.getElementById('typing_initial_delay_max').value) || 15,
+                enabled: document.getElementById('enabled').checked,
+                group_manage_enabled: document.getElementById('group_manage_enabled').checked,
+                kick_enabled: document.getElementById('kick_enabled').checked,
+                search_enabled: document.getElementById('search_enabled').checked,
+                inject_tool_prompt_enabled: document.getElementById('inject_tool_prompt_enabled').checked,
+                workspace_enabled: document.getElementById('workspace_enabled').checked,
+                workspace_banned_patterns: document.getElementById('workspace_banned_patterns').value.split('\n').filter(p => p.trim()),
+                flash_transfer_dir: document.getElementById('flash_transfer_dir').value || '/tmp/astrbot_flash',
+            };
+        }
+
+        async function loadConfig() {
+            try {
+                configLoading.textContent = '加载中...';
+                const res = await bridge.apiGet('get_config');
+                if (!res.success) throw new Error(res.error || '加载失败');
+                const cfg = res.config;
+                Object.entries(cfg).forEach(([key, val]) => {
+                    const el = document.getElementById(key);
+                    if (!el) return;
+                    if (el.type === 'checkbox') el.checked = val ?? false;
+                    else el.value = val ?? '';
+                });
+                configLoading.textContent = '';
+            } catch (e) {
+                configLoading.textContent = '';
+                showBridgeError('配置加载失败: ' + e.message);
+                throw e;
+            }
+        }
+
+        saveConfigBtn.addEventListener('click', async () => {
+            configLoading.textContent = '保存中...';
+            saveConfigBtn.disabled = true;
+            try {
+                const res = await bridge.apiPost('save_config', { config: getFormValues() });
+                if (res.success) {
+                    showConfigStatus('配置已保存', 'success');
+                } else {
+                    showConfigStatus(res.error || '保存失败', 'error');
+                }
+            } catch (e) {
+                showConfigStatus(e.message, 'error');
+            } finally {
+                configLoading.textContent = '';
+                saveConfigBtn.disabled = false;
+            }
+        });
+
+        // ========== 文件管理 ==========
+        const wsStatus = document.getElementById('wsStatus');
+        const wsLoading = document.getElementById('wsLoading');
+        const fileList = document.getElementById('fileList');
+        const refreshFilesBtn = document.getElementById('refreshFilesBtn');
+        const uploadFileBtn = document.getElementById('uploadFileBtn');
+        const fileInput = document.getElementById('fileInput');
+
+        function showWsStatus(msg, type) {
+            wsStatus.textContent = msg;
+            wsStatus.className = `status show ${type}`;
+            setTimeout(() => wsStatus.classList.remove('show'), 3000);
+        }
+
+        async function loadFiles() {
+            try {
+                wsLoading.textContent = '加载中...';
+                const res = await bridge.apiGet('workspace_files');
+                if (!res.success) throw new Error(res.error || '加载失败');
+                const files = res.files || [];
+                if (files.length === 0) {
+                    fileList.innerHTML = '<div class="empty">工作区为空</div>';
+                    wsLoading.textContent = '';
+                    return;
+                }
+                fileList.innerHTML = files.map(f => {
+                    const size = f.size < 1024*1024 ? (f.size/1024).toFixed(1) + ' KB' : (f.size/1024/1024).toFixed(1) + ' MB';
+                    return `<div class="list-item">
+                        <div class="info">
+                            <strong>📄 ${escapeHtml(f.name)}</strong>
+                            <div class="meta">${size}</div>
+                        </div>
+                        <div class="actions">
+                            <button class="btn" onclick="downloadFile('${escapeHtml(f.name)}')">下载</button>
+                            <button class="btn btn-danger" onclick="deleteFile('${escapeHtml(f.name)}')">删除</button>
+                        </div>
+                    </div>`;
+                }).join('');
+                wsLoading.textContent = '';
+            } catch (e) {
+                wsLoading.textContent = '';
+                fileList.innerHTML = `<div class="empty">加载失败: ${escapeHtml(e.message)}</div>`;
+            }
+        }
+
+        async function downloadFile(filename) {
+            try {
+                const res = await bridge.apiGet('workspace_file_content', { filename: filename });
+                if (!res.success) throw new Error(res.error || '读取失败');
+                const blob = new Blob([res.content], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                a.click();
+                URL.revokeObjectURL(url);
+                showWsStatus('已下载 ' + filename, 'success');
+            } catch (e) {
+                showWsStatus('下载失败: ' + e.message, 'error');
+            }
+        }
+
+        async function deleteFile(filename) {
+            if (!confirm('确定删除文件 ' + filename + '？')) return;
+            try {
+                const res = await bridge.apiPost('workspace_delete_file', { filename: filename });
+                if (res.success) {
+                    showWsStatus('已删除 ' + filename, 'success');
+                    loadFiles();
+                } else {
+                    showWsStatus(res.error || '删除失败', 'error');
+                }
+            } catch (e) {
+                showWsStatus('删除失败: ' + e.message, 'error');
+            }
+        }
+
+        refreshFilesBtn.addEventListener('click', loadFiles);
+
+        uploadFileBtn.addEventListener('click', () => fileInput.click());
+
+        fileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            try {
+                wsLoading.textContent = '上传中...';
+                const reader = new FileReader();
+                reader.onload = async () => {
+                    const base64 = reader.result.split(',')[1];
+                    const res = await bridge.apiPost('workspace_upload_file', { filename: file.name, content: base64 });
+                    if (res.success) {
+                        showWsStatus('已上传 ' + file.name, 'success');
+                        loadFiles();
+                    } else {
+                        showWsStatus(res.error || '上传失败', 'error');
+                    }
+                    wsLoading.textContent = '';
+                };
+                reader.readAsDataURL(file);
+            } catch (e) {
+                showWsStatus('上传失败: ' + e.message, 'error');
+                wsLoading.textContent = '';
+            }
+            fileInput.value = '';
+        });
+
+        // ========== 能力控制 ==========
+        const capStatus = document.getElementById('capStatus');
+        const capLoading = document.getElementById('capLoading');
+        const capabilityList = document.getElementById('capabilityList');
+        const saveCapabilityBtn = document.getElementById('saveCapabilityBtn');
+
+        const TOOL_CATEGORIES = {
+            '记忆管理': ['add_memory', 'search_memories', 'update_memory', 'delete_memory', 'get_memory_detail'],
+            '消息与定时': ['send_message', 'schedule_message', 'cancel_scheduled_message', 'list_scheduled_messages', 'create_scheduled_command', 'list_scheduled_commands', 'cancel_scheduled_command', 'delete_scheduled_command'],
+            'QQ空间': ['publish_qzone'],
+            '戳一戳与状态': ['send_poke', 'update_qq_status', 'get_qq_status', 'get_fun_status_list'],
+            '撤回与邮件': ['recall_by_reply', 'send_qq_email'],
+            '群管理基础': ['get_user_group_role', 'set_essence_msg', 'delete_essence_msg', 'set_group_ban', 'set_group_kick', 'set_group_whole_ban', 'set_group_card', 'send_group_notice', 'delete_group_notice', 'list_group_files', 'delete_group_file', 'get_group_members_info'],
+            '群管理增强': ['set_group_admin', 'set_group_name', 'get_group_notice_list', 'upload_group_file', 'create_group_file_folder', 'delete_group_folder', 'get_group_honor_info', 'get_group_at_all_remain', 'set_group_special_title', 'get_group_shut_list', 'get_group_ignore_add_request', 'set_group_add_option', 'send_group_sign'],
+            '文件操作': ['set_group_portrait', 'move_group_file', 'rename_group_file', 'trans_group_file'],
+            '社交互动': ['send_like', 'get_group_msg_history', 'get_friend_msg_history', 'fetch_custom_face'],
+            'AI语音': ['get_ai_characters', 'send_ai_voice'],
+            '联系人': ['search_contacts', 'list_contacts'],
+            '个人资料': ['set_qq_avatar', 'set_input_status', 'set_qq_profile'],
+
+            '闪传功能': ['create_flash_task', 'get_flash_file_list', 'get_flash_file_url', 'send_flash_msg', 'get_share_link', 'get_fileset_info', 'get_fileset_id', 'download_fileset'],
+            '在线文件': ['get_online_file_msg', 'send_online_file', 'send_online_folder', 'receive_online_file', 'refuse_online_file', 'cancel_online_file'],
+            '好友管理': ['delete_friend'],
+            '工作区': ['run_python_code', 'list_workspace_files', 'read_workspace_file', 'delete_workspace_file', 'fetch_url', 'open_page', 'click_element', 'type_text', 'screenshot_page', 'close_page']
+        };
+
+        const TOOL_NAMES = {
+            'add_memory': '添加记忆', 'search_memories': '搜索记忆', 'update_memory': '更新记忆', 'delete_memory': '删除记忆', 'get_memory_detail': '记忆详情',
+            'send_message': '发送消息', 'schedule_message': '定时消息', 'cancel_scheduled_message': '取消定时消息', 'list_scheduled_messages': '定时消息列表',
+            'create_scheduled_command': '创建定时指令', 'list_scheduled_commands': '定时指令列表', 'cancel_scheduled_command': '取消定时指令', 'delete_scheduled_command': '删除定时指令',
+            'publish_qzone': '发QQ空间', 'send_poke': '戳一戳', 'update_qq_status': '设置在线状态', 'get_qq_status': '获取在线状态', 'get_fun_status_list': '娱乐状态列表',
+            'recall_by_reply': '撤回消息', 'send_qq_email': '发送邮件',
+            'get_user_group_role': '查询群身份', 'set_essence_msg': '设置精华', 'delete_essence_msg': '取消精华',
+            'set_group_ban': '禁言/解禁', 'set_group_kick': '踢人', 'set_group_whole_ban': '全员禁言', 'set_group_card': '修改群名片',
+            'send_group_notice': '发送公告', 'delete_group_notice': '删除公告', 'list_group_files': '群文件列表', 'delete_group_file': '删除群文件', 'get_group_members_info': '群成员列表',
+            'set_group_admin': '设置管理员', 'set_group_name': '修改群名', 'get_group_notice_list': '公告列表',
+            'upload_group_file': '上传群文件', 'create_group_file_folder': '创建文件夹', 'delete_group_folder': '删除文件夹',
+            'get_group_honor_info': '群荣誉', 'get_group_at_all_remain': '@全体次数', 'set_group_special_title': '专属头衔',
+            'get_group_shut_list': '禁言列表', 'get_group_ignore_add_request': '忽略列表', 'set_group_add_option': '加群验证', 'send_group_sign': '群签到',
+            'set_group_portrait': '设置群头像', 'move_group_file': '移动群文件', 'rename_group_file': '重命名群文件', 'trans_group_file': '传输群文件',
+            'send_like': '给用户点赞', 'get_group_msg_history': '群历史消息', 'get_friend_msg_history': '好友历史消息', 'fetch_custom_face': '自定义表情',
+            'get_ai_characters': 'AI角色列表', 'send_ai_voice': '发送AI语音',
+            'search_contacts': '搜索联系人', 'list_contacts': '列出联系人',
+            'set_qq_avatar': '设置头像', 'set_input_status': '输入状态', 'set_qq_profile': '修改资料',
+
+            'create_flash_task': '创建闪传', 'get_flash_file_list': '闪传文件列表', 'get_flash_file_url': '闪传下载链接', 'send_flash_msg': '发送闪传',
+            'get_share_link': '分享链接', 'get_fileset_info': '文件集信息', 'get_fileset_id': '文件集ID', 'download_fileset': '下载文件集',
+            'get_online_file_msg': '在线文件消息', 'send_online_file': '发送文件', 'send_online_folder': '发送文件夹',
+            'receive_online_file': '接收文件', 'refuse_online_file': '拒绝文件', 'cancel_online_file': '取消传输',
+            'delete_friend': '删除好友',
+            'run_python_code': '执行Python代码', 'list_workspace_files': '工作区文件列表', 'fetch_url': '获取网页内容', 'open_page': '打开网页', 'click_element': '点击元素', 'type_text': '输入文字', 'screenshot_page': '网页截图', 'close_page': '关闭浏览器',
+            'read_workspace_file': '读取工作区文件', 'delete_workspace_file': '删除工作区文件'
+        };
+
+        let capabilityConfig = {};
+
+        function showCapStatus(msg, type) {
+            capStatus.textContent = msg;
+            capStatus.className = `status show ${type}`;
+            setTimeout(() => capStatus.classList.remove('show'), 3000);
+        }
+
+        async function loadCapability() {
+            try {
+                capLoading.textContent = '加载中...';
+                const res = await bridge.apiGet('get_config');
+                if (!res.success) throw new Error(res.error || '加载失败');
+                capabilityConfig = res.config || {};
+                renderCapabilityList();
+                capLoading.textContent = '';
+            } catch (e) {
+                capLoading.textContent = '';
+                showCapStatus('加载失败: ' + e.message, 'error');
+            }
+        }
+
+        function renderCapabilityList() {
+            let html = '';
+            for (const [category, tools] of Object.entries(TOOL_CATEGORIES)) {
+                html += '<div style="margin-bottom:8px;"><strong style="font-size:0.9rem;color:var(--primary);">' + escapeHtml(category) + '</strong></div>';
+                for (const tool of tools) {
+                    const name = TOOL_NAMES[tool] || tool;
+                    const checked = capabilityConfig['enable_' + tool] !== false ? 'checked' : '';
+                    html += '<div class="checkbox-wrap" style="background:rgba(255,255,255,0.5);padding:8px 12px;border-radius:8px;margin-bottom:4px;">';
+                    html += '<input type="checkbox" id="enable_' + tool + '" ' + checked + ' /><label for="enable_' + tool + '" style="margin:0;font-size:0.88rem;">' + escapeHtml(name) + '</label>';
+                    html += '</div>';
+                }
+            }
+            capabilityList.innerHTML = html;
+        }
+
+        saveCapabilityBtn.addEventListener('click', async () => {
+            capLoading.textContent = '保存中...';
+            saveCapabilityBtn.disabled = true;
+            try {
+                const updates = {};
+                for (const tools of Object.values(TOOL_CATEGORIES)) {
+                    for (const tool of tools) {
+                        const el = document.getElementById('enable_' + tool);
+                        if (el) updates['enable_' + tool] = el.checked;
+                    }
+                }
+                const res = await bridge.apiPost('save_config', { config: updates });
+                if (res.success) {
+                    showCapStatus('设置已保存', 'success');
+                    Object.assign(capabilityConfig, updates);
+                } else {
+                    showCapStatus(res.error || '保存失败', 'error');
+                }
+            } catch (e) {
+                showCapStatus(e.message, 'error');
+            } finally {
+                capLoading.textContent = '';
+                saveCapabilityBtn.disabled = false;
+            }
+        });
+
+        // ========== 记忆 ==========
+        const memoryStatus = document.getElementById('memoryStatus');
+
+        function showMemoryStatus(msg, type) {
+            memoryStatus.textContent = msg;
+            memoryStatus.className = `status show ${type}`;
+            setTimeout(() => memoryStatus.classList.remove('show'), 3000);
+        }
+
+        function fillMemoryForm(m) {
+            document.getElementById('memoryUserId').value = m.user_id || '';
+            document.getElementById('memoryContent').value = m.content || '';
+            document.getElementById('memoryTags').value = (m.tags || []).join(', ');
+            document.getElementById('memoryImportance').value = m.importance || 5;
+            document.getElementById('editingMemoryId').value = m.id || '';
+            document.getElementById('saveMemoryBtn').textContent = '保存修改';
+            document.getElementById('cancelEditMemoryBtn').style.display = '';
+        }
+
+        function resetMemoryForm() {
+            document.getElementById('memoryUserId').value = '';
+            document.getElementById('memoryContent').value = '';
+            document.getElementById('memoryTags').value = '';
+            document.getElementById('memoryImportance').value = '5';
+            document.getElementById('editingMemoryId').value = '';
+            document.getElementById('saveMemoryBtn').textContent = '添加记忆';
+            document.getElementById('cancelEditMemoryBtn').style.display = 'none';
+        }
+
+        document.getElementById('saveMemoryBtn').addEventListener('click', async () => {
+            const editingId = document.getElementById('editingMemoryId').value;
+            const userId = document.getElementById('memoryUserId').value.trim();
+            const content = document.getElementById('memoryContent').value.trim();
+            const tagsStr = document.getElementById('memoryTags').value.trim();
+            const importance = parseInt(document.getElementById('memoryImportance').value) || 5;
+            if (!userId || !content) { showMemoryStatus('请填写完整', 'error'); return; }
+            const tags = tagsStr ? tagsStr.split(/[,，]/).map(t => t.trim()).filter(t => t) : [];
+            try {
+                if (editingId) {
+                    const res = await bridge.apiPost('update_memory', { memory_id: editingId, content, tags, importance });
+                    if (res.success) { showMemoryStatus('已更新', 'success'); resetMemoryForm(); loadMemories(); }
+                    else showMemoryStatus(res.error || '失败', 'error');
+                } else {
+                    const res = await bridge.apiPost('add_memory', { user_id: userId, content, tags, importance });
+                    if (res.success) { showMemoryStatus('已添加', 'success'); resetMemoryForm(); loadMemories(); }
+                    else showMemoryStatus(res.error || '失败', 'error');
+                }
+            } catch (e) { showMemoryStatus(e.message, 'error'); }
+        });
+
+        document.getElementById('cancelEditMemoryBtn').addEventListener('click', () => { resetMemoryForm(); showMemoryStatus('已取消', 'success'); });
+
+        async function loadMemories(keyword) {
+            const container = document.getElementById('memoryList');
+            try {
+                const res = await bridge.apiGet('memories', { keyword: keyword || '', limit: 99999 });
+                if (!res.success) { container.innerHTML = '<div class="empty">加载失败</div>'; return; }
+                const arr = res.memories || [];
+                if (arr.length === 0) { container.innerHTML = '<div class="empty">没有记忆</div>'; return; }
+                container.innerHTML = arr.map(m => '<div class="list-item"><div class="info"><strong>' + escapeHtml(m.content) + '</strong><div class="meta">用户:' + escapeHtml(m.user_id) + ' | 标签:' + escapeHtml((m.tags||[]).join(', ')) + ' | 重要:' + m.importance + ' | ' + m.updated_at + '</div></div><div class="actions"><button class="btn" data-m="' + encodeURIComponent(JSON.stringify(m)) + '">编辑</button><button class="btn btn-danger" data-mid="' + m.id + '">删除</button></div></div>').join('');
+                container.querySelectorAll('.btn-danger').forEach(b => b.addEventListener('click', () => deleteMemory(b.dataset.mid)));
+                container.querySelectorAll('.list-item .actions .btn:not(.btn-danger)').forEach(b => b.addEventListener('click', () => {
+                    try { fillMemoryForm(JSON.parse(decodeURIComponent(b.dataset.m))); } catch(e) {}
+                }));
+            } catch (e) { container.innerHTML = '<div class="empty">请求错误</div>'; }
+        }
+
+        async function deleteMemory(id) {
+            if (!confirm('确定删除该记忆？')) return;
+            try {
+                const res = await bridge.apiPost('delete_memory', { memory_id: id });
+                if (res.success) { showMemoryStatus('已删除', 'success'); loadMemories(); }
+                else showMemoryStatus(res.error || '失败', 'error');
+            } catch (e) { showMemoryStatus(e.message, 'error'); }
+        }
+
+        document.getElementById('searchMemoryBtn').addEventListener('click', () => loadMemories(document.getElementById('memoryKeyword').value));
+
+        // ========== 定时消息 ==========
+        const scheduleStatus = document.getElementById('scheduleStatus');
+
+        function showScheduleStatus(msg, type) {
+            scheduleStatus.textContent = msg;
+            scheduleStatus.className = `status show ${type}`;
+            setTimeout(() => scheduleStatus.classList.remove('show'), 3000);
+        }
+
+        async function loadSchedules() {
+            const container = document.getElementById('scheduleList');
+            try {
+                const res = await bridge.apiGet('scheduled_messages');
+                if (!res.success) {
+                    container.innerHTML = `<div class="empty">加载失败: ${escapeHtml(res.error || '未知错误')}</div>`;
+                    return;
+                }
+                const tasks = res.tasks || [];
+                if (tasks.length === 0) {
+                    container.innerHTML = '<div class="empty">暂无未执行定时消息</div>';
+                    return;
+                }
+                container.innerHTML = tasks.map(t => `
+                    <div class="list-item">
+                        <div class="info">
+                            <strong>${escapeHtml(t.message)}</strong>
+                            <div class="meta">目标:${escapeHtml(t.target_id)} | 时间:${t.send_time} | 类型:${t.chat_type==='group'?'群聊':'私聊'}</div>
+                        </div>
+                        <div class="actions"><button class="btn btn-danger" data-tid="${t.task_id}">取消</button></div>
+                    </div>`).join('');
+                container.querySelectorAll('.btn-danger').forEach(b => b.addEventListener('click', () => cancelSchedule(b.dataset.tid)));
+            } catch (e) {
+                container.innerHTML = `<div class="empty">请求错误: ${escapeHtml(e.message)}</div>`;
+            }
+        }
+
+        async function cancelSchedule(id) {
+            if (!confirm('确定取消该定时消息？')) return;
+            try {
+                const res = await bridge.apiPost('cancel_scheduled_message', { task_id: id });
+                if (res.success) {
+                    showScheduleStatus(res.message || '已取消', 'success');
+                    loadSchedules();
+                } else {
+                    showScheduleStatus(res.error || '取消失败', 'error');
+                }
+            } catch (e) {
+                showScheduleStatus(e.message, 'error');
+            }
+        }
+
+        document.getElementById('addScheduleBtn').addEventListener('click', async () => {
+            const target = document.getElementById('newTargetId').value.trim();
+            const message = document.getElementById('newMessage').value.trim();
+            const sendTime = document.getElementById('newSendTime').value.trim();
+            const chatType = document.getElementById('newChatType').value;
+            if (!target || !message || !sendTime) {
+                showScheduleStatus('请填写完整信息', 'error');
+                return;
+            }
+            try {
+                const res = await bridge.apiPost('add_scheduled_message', {
+                    target_id: target,
+                    message: message,
+                    send_time: sendTime,
+                    chat_type: chatType
+                });
+                if (res.success) {
+                    showScheduleStatus(res.message || '定时消息已创建', 'success');
+                    document.getElementById('newTargetId').value = '';
+                    document.getElementById('newMessage').value = '';
+                    document.getElementById('newSendTime').value = '';
+                    loadSchedules();
+                } else {
+                    showScheduleStatus(res.error || '创建失败', 'error');
+                }
+            } catch (e) {
+                showScheduleStatus(e.message, 'error');
+            }
+        });
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.appendChild(document.createTextNode(text));
+            return div.innerHTML;
+        }
+
+        function showBridgeError(msg) {
+            const el = document.getElementById('bridgeStatus');
+            if (!el) return;
+            el.textContent = msg;
+            el.className = 'status show error';
+            el.style.display = 'block';
+        }
+
+        // 初始化
+        (async () => {
+            if (!bridge) {
+                showBridgeError('桥接 SDK 未加载，请刷新页面重试');
+                return;
+            }
+            // 等待 bridge ready，5秒后不管有没有上下文都继续
+            const fallback = new Promise(resolve =>
+                setTimeout(() => resolve('timeout'), 5000)
+            );
+            const result = await Promise.race([bridge.ready(), fallback]);
+            if (result === 'timeout') {
+                console.warn('[QZoneTools] bridge.ready() timed out, continuing anyway');
+                // 仍然尝试加载配置，API调用会通过postMessage
+            }
+            await loadConfig();
+        })();
+    </script>
+</body>
+</html>
