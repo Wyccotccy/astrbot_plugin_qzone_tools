@@ -476,7 +476,6 @@ close_page()
 
 ## 🌐 高级浏览器自动化（v4.1.0 新增）
 
-复刻自 [astrbot_plugin_browser](https://github.com/Zhalslar/astrbot_plugin_browser)，功能更完整。
 
 ### 搜索引擎
 
