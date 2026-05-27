@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from urllib.parse import urlencode
 
 import aiohttp
+from pathlib import Path
 from quart import jsonify, request
 from astrbot.api import logger
 from astrbot.api.event import filter, AstrMessageEvent
@@ -28,6 +29,9 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.star_tools import StarTools
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+from .core.supervisor import BrowserSupervisor
+from .core.favorite import FavoriteManager
+from .core.ticks_overlay import TickOverlay
 
 PLUGIN_NAME = "astrbot_plugin_qzone_tools"
 
@@ -706,6 +710,11 @@ class Main(Star):
         self._browser = None
         self._browser_context = None
         self._playwright = None
+        
+        # 高级浏览器管理（来自 astrbot_plugin_browser）
+        self.browser_supervisor = None
+        self.fav_mgr = None
+        self.overlay = None
 
     def _load_tool_enabled_flags(self) -> Dict[str, bool]:
         default_enabled = {
@@ -739,6 +748,14 @@ class Main(Star):
             "fetch_url": True,
             "open_page": True, "click_element": True, "type_text": True,
             "screenshot_page": True, "close_page": True,
+            # 高级浏览器工具
+            "browser_search": True, "browser_visit": True, "browser_click": True,
+            "browser_input": True, "browser_scroll": True, "browser_swipe": True,
+            "browser_zoom": True, "browser_screenshot": True, "browser_back": True,
+            "browser_forward": True, "browser_tabs": True, "browser_close_tab": True,
+            "browser_close": True, "browser_chat": True,
+            "browser_favorite_list": True, "browser_favorite_add": True, "browser_favorite_delete": True,
+            "browser_install": True,
         }
         for tool_name in default_enabled.keys():
             config_key = f"enable_{tool_name}"
@@ -2159,9 +2176,253 @@ class Main(Star):
             "handler": self.fetch_url_tool
         }
 
+        registry["browser_search"] = {
+            "name": "browser_search",
+            "description": "搜索关键词。使用浏览器打开搜索引擎搜索指定关键词。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "搜索关键词，必填"},
+                    "engine": {"type": "string", "description": "搜索引擎，可选值：百度、必应、谷歌，默认百度"}
+                },
+                "required": ["keyword"]
+            },
+            "keywords": ["搜索", "百度搜索", "必应搜索", "谷歌搜索", "search"],
+            "handler": self.browser_search_tool
+        }
+
+        registry["browser_visit"] = {
+            "name": "browser_visit",
+            "description": "访问指定链接。打开浏览器访问URL。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "要访问的URL，必填"}
+                },
+                "required": ["url"]
+            },
+            "keywords": ["访问链接", "打开网址", "visit url", "open url"],
+            "handler": self.browser_visit_tool
+        }
+
+        registry["browser_click"] = {
+            "name": "browser_click",
+            "description": "点击页面上的坐标位置。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "X坐标，必填"},
+                    "y": {"type": "integer", "description": "Y坐标，必填"}
+                },
+                "required": ["x", "y"]
+            },
+            "keywords": ["点击坐标", "click coord", "点击位置"],
+            "handler": self.browser_click_tool
+        }
+
+        registry["browser_input"] = {
+            "name": "browser_input",
+            "description": "在当前页面的输入框中输入文字。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "要输入的文字，必填"},
+                    "enter": {"type": "boolean", "description": "输入后是否按回车，默认true"}
+                },
+                "required": ["text"]
+            },
+            "keywords": ["输入文字", "input text", "填写输入框"],
+            "handler": self.browser_input_tool
+        }
+
+        registry["browser_scroll"] = {
+            "name": "browser_scroll",
+            "description": "滚动页面。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string", "description": "方向：上/下/左/右，默认下"},
+                    "distance": {"type": "integer", "description": "滚动距离，默认1300"}
+                }
+            },
+            "keywords": ["滚动页面", "scroll", "上下滚动"],
+            "handler": self.browser_scroll_tool
+        }
+
+        registry["browser_swipe"] = {
+            "name": "browser_swipe",
+            "description": "模拟滑动操作。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_x": {"type": "integer", "description": "起始X坐标"},
+                    "start_y": {"type": "integer", "description": "起始Y坐标"},
+                    "end_x": {"type": "integer", "description": "结束X坐标"},
+                    "end_y": {"type": "integer", "description": "结束Y坐标"}
+                },
+                "required": ["start_x", "start_y", "end_x", "end_y"]
+            },
+            "keywords": ["滑动", "swipe", "拖拽"],
+            "handler": self.browser_swipe_tool
+        }
+
+        registry["browser_zoom"] = {
+            "name": "browser_zoom",
+            "description": "缩放页面。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scale": {"type": "number", "description": "缩放比例，默认1.5"}
+                }
+            },
+            "keywords": ["缩放", "zoom", "放大缩小"],
+            "handler": self.browser_zoom_tool
+        }
+
+        registry["browser_screenshot"] = {
+            "name": "browser_screenshot",
+            "description": "对当前页面截图。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "full_page": {"type": "boolean", "description": "是否截取整个页面，默认false"},
+                    "zoom_factor": {"type": "number", "description": "截图缩放比例，可选"}
+                }
+            },
+            "keywords": ["截图", "screenshot", "截取页面", "获取验证码"],
+            "handler": self.browser_screenshot_tool
+        }
+
+        registry["browser_back"] = {
+            "name": "browser_back",
+            "description": "返回上一页。",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            },
+            "keywords": ["返回", "go back", "上一页"],
+            "handler": self.browser_back_tool
+        }
+
+        registry["browser_forward"] = {
+            "name": "browser_forward",
+            "description": "前进到下一页。",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            },
+            "keywords": ["前进", "go forward", "下一页"],
+            "handler": self.browser_forward_tool
+        }
+
+        registry["browser_tabs"] = {
+            "name": "browser_tabs",
+            "description": "查看所有标签页或切换标签页。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer", "description": "标签页序号（从1开始），不填则查看所有标签页"}
+                }
+            },
+            "keywords": ["标签页", "tabs", "切换标签", "查看标签"],
+            "handler": self.browser_tabs_tool
+        }
+
+        registry["browser_close_tab"] = {
+            "name": "browser_close_tab",
+            "description": "关闭指定标签页。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer", "description": "标签页序号（从1开始），必填"}
+                },
+                "required": ["index"]
+            },
+            "keywords": ["关闭标签", "close tab"],
+            "handler": self.browser_close_tab_tool
+        }
+
+        registry["browser_close"] = {
+            "name": "browser_close",
+            "description": "关闭浏览器。",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            },
+            "keywords": ["关闭浏览器", "close browser"],
+            "handler": self.browser_close_tool
+        }
+
+        registry["browser_chat"] = {
+            "name": "browser_chat",
+            "description": "向当前页面的输入框发送对话内容。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "要发送的内容，必填"}
+                },
+                "required": ["text"]
+            },
+            "keywords": ["对话", "发送消息", "chat"],
+            "handler": self.browser_chat_tool
+        }
+
+        registry["browser_favorite_list"] = {
+            "name": "browser_favorite_list",
+            "description": "查看收藏夹列表。",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            },
+            "keywords": ["收藏夹", "查看收藏", "favorites"],
+            "handler": self.browser_favorite_list_tool
+        }
+
+        registry["browser_favorite_add"] = {
+            "name": "browser_favorite_add",
+            "description": "添加收藏。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "收藏名称，必填"},
+                    "url": {"type": "string", "description": "收藏URL，必填"}
+                },
+                "required": ["name", "url"]
+            },
+            "keywords": ["添加收藏", "收藏链接", "add favorite"],
+            "handler": self.browser_favorite_add_tool
+        }
+
+        registry["browser_favorite_delete"] = {
+            "name": "browser_favorite_delete",
+            "description": "删除收藏。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "收藏名称，必填"}
+                },
+                "required": ["name"]
+            },
+            "keywords": ["删除收藏", "取消收藏", "delete favorite"],
+            "handler": self.browser_favorite_delete_tool
+        }
+
+        registry["browser_install"] = {
+            "name": "browser_install",
+            "description": "安装浏览器依赖。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "browser_type": {"type": "string", "description": "浏览器类型：chromium/firefox/webkit，默认chromium"}
+                }
+            },
+            "keywords": ["安装浏览器", "install browser"],
+            "handler": self.browser_install_tool
+        }
+
         registry["open_page"] = {
             "name": "open_page",
-            "description": "打开网页。可以指定URL打开浏览器页面，用于网页交互、验证码识别等场景。",
+            "description": "打开网页（简化版，使用内置浏览器）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2175,7 +2436,7 @@ class Main(Star):
 
         registry["click_element"] = {
             "name": "click_element",
-            "description": "点击网页元素。可以通过CSS选择器或文字内容点击按钮、链接等。",
+            "description": "点击网页元素（简化版，使用CSS选择器）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2189,7 +2450,7 @@ class Main(Star):
 
         registry["type_text"] = {
             "name": "type_text",
-            "description": "在网页输入框中输入文字。",
+            "description": "在网页输入框中输入文字（简化版）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2205,7 +2466,7 @@ class Main(Star):
 
         registry["screenshot_page"] = {
             "name": "screenshot_page",
-            "description": "对当前网页截图。用于获取验证码图片、查看页面状态等。",
+            "description": "对当前网页截图（简化版）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2218,7 +2479,7 @@ class Main(Star):
 
         registry["close_page"] = {
             "name": "close_page",
-            "description": "关闭浏览器。释放资源。",
+            "description": "关闭浏览器（简化版）。",
             "parameters": {
                 "type": "object",
                 "properties": {}
@@ -2564,7 +2825,46 @@ class Main(Star):
         # 检查并安装 Playwright
         asyncio.create_task(self._check_and_install_playwright())
         
+        # 初始化高级浏览器管理
+        self._init_browser_advanced()
+        
         logger.info(f"[Main] 插件已加载")
+    
+    def _init_browser_advanced(self):
+        """初始化高级浏览器管理组件"""
+        try:
+            # 收藏夹
+            favorite_file = Path(__file__).parent / "favorite.json"
+            self.fav_mgr = FavoriteManager(favorite_file)
+            
+            # 刻度叠加
+            self.overlay = TickOverlay(self.data_dir, Path(__file__).parent / "resource")
+            
+            # 浏览器监控器
+            browser_config = {
+                "browser_type": self.config.get("browser_type", "chromium"),
+                "browser_mode": self.config.get("browser_mode", "embedded"),
+                "cdp_url": self.config.get("cdp_url", "http://127.0.0.1:9222"),
+                "verify_browser": self.config.get("verify_browser", True),
+                "default_url": self.config.get("default_url", "https://www.baidu.com"),
+                "proxy": self.config.get("proxy", ""),
+                "viewport_size": self.config.get("viewport_size", {"width": 1280, "height": 720}),
+                "max_pages": self.config.get("max_pages", 10),
+                "timeout": self.config.get("timeout", 30),
+                "screenshot_quality": self.config.get("screenshot_quality", 80),
+                "zoom_factor": self.config.get("zoom_factor", 1.0),
+                "enable_overlay": self.config.get("enable_overlay", False),
+                "supervisor": {
+                    "max_memory_percent": self.config.get("max_memory_percent", 90),
+                    "idle_timeout": self.config.get("idle_timeout", 300),
+                    "monitor_interval": self.config.get("monitor_interval", 10),
+                }
+            }
+            self.browser_supervisor = BrowserSupervisor(browser_config, str(self.data_dir))
+            asyncio.create_task(self.browser_supervisor.start())
+            logger.info("[Browser] 高级浏览器管理已初始化")
+        except Exception as e:
+            logger.error(f"[Browser] 初始化高级浏览器管理失败: {e}")
     
     async def _check_and_install_playwright(self):
         """检查 Playwright 是否安装，未安装则自动安装"""
@@ -4335,8 +4635,346 @@ except Exception as e:
         except Exception as e:
             return {"status": "error", "message": f"截图失败: {str(e)[:200]}"}
     
-    async def close_page_tool(self, event: AstrMessageEvent) -> dict:
+
+
+
+
+    # ==================== 高级浏览器工具 ====================
+
+    async def browser_search_tool(self, event: AstrMessageEvent, keyword: str, engine: str = "百度") -> dict:
+        """搜索关键词"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        # 构建搜索URL
+        engine_urls = {
+            "百度": "https://www.baidu.com/s?wd={keyword}",
+            "必应": "https://www.bing.com/search?q={keyword}",
+            "谷歌": "https://www.google.com/search?q={keyword}",
+        }
+        url_template = engine_urls.get(engine, engine_urls["百度"])
+        url = url_template.format(keyword=keyword)
+        
+        try:
+            await self.browser_supervisor.call("search", url=url)
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                return {"status": "success", "message": f"已搜索: {keyword}", "screenshot": screenshot}
+            return {"status": "success", "message": f"已搜索: {keyword}"}
+        except Exception as e:
+            return {"status": "error", "message": f"搜索失败: {str(e)[:200]}"}
+
+    async def browser_visit_tool(self, event: AstrMessageEvent, url: str) -> dict:
+        """访问指定链接"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        try:
+            await self.browser_supervisor.call("search", url=url)
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                return {"status": "success", "message": f"已访问: {url}", "screenshot": screenshot}
+            return {"status": "success", "message": f"已访问: {url}"}
+        except Exception as e:
+            return {"status": "error", "message": f"访问失败: {str(e)[:200]}"}
+
+    async def browser_click_tool(self, event: AstrMessageEvent, x: int, y: int) -> dict:
+        """点击页面坐标"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        try:
+            await self.browser_supervisor.call("click_coord", coords=[x, y])
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                return {"status": "success", "message": f"已点击: ({x}, {y})", "screenshot": screenshot}
+            return {"status": "success", "message": f"已点击: ({x}, {y})"}
+        except Exception as e:
+            return {"status": "error", "message": f"点击失败: {str(e)[:200]}"}
+
+    async def browser_input_tool(self, event: AstrMessageEvent, text: str, enter: bool = True) -> dict:
+        """输入文字"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        try:
+            await self.browser_supervisor.call("text_input", text=text, enter=enter)
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                return {"status": "success", "message": f"已输入: {text[:50]}", "screenshot": screenshot}
+            return {"status": "success", "message": f"已输入: {text[:50]}"}
+        except Exception as e:
+            return {"status": "error", "message": f"输入失败: {str(e)[:200]}"}
+
+    async def browser_scroll_tool(self, event: AstrMessageEvent, direction: str = "下", distance: int = 1300) -> dict:
+        """滚动页面"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        try:
+            await self.browser_supervisor.call("scroll_by", distance=distance, direction=direction)
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                return {"status": "success", "message": f"已向{direction}滚动{distance}px", "screenshot": screenshot}
+            return {"status": "success", "message": f"已向{direction}滚动{distance}px"}
+        except Exception as e:
+            return {"status": "error", "message": f"滚动失败: {str(e)[:200]}"}
+
+    async def browser_swipe_tool(self, event: AstrMessageEvent, start_x: int, start_y: int, end_x: int, end_y: int) -> dict:
+        """滑动操作"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        try:
+            await self.browser_supervisor.call("swipe", coords=[start_x, start_y, end_x, end_y])
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                return {"status": "success", "message": f"已滑动", "screenshot": screenshot}
+            return {"status": "success", "message": f"已滑动"}
+        except Exception as e:
+            return {"status": "error", "message": f"滑动失败: {str(e)[:200]}"}
+
+    async def browser_zoom_tool(self, event: AstrMessageEvent, scale: float = 1.5) -> dict:
+        """缩放页面"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        try:
+            await self.browser_supervisor.call("zoom_to_scale", scale=scale)
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                return {"status": "success", "message": f"已缩放到 {scale}x", "screenshot": screenshot}
+            return {"status": "success", "message": f"已缩放到 {scale}x"}
+        except Exception as e:
+            return {"status": "error", "message": f"缩放失败: {str(e)[:200]}"}
+
+    async def browser_screenshot_tool(self, event: AstrMessageEvent, full_page: bool = False, zoom_factor: float = None) -> dict:
+        """截图"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        try:
+            screenshot = await self.browser_supervisor.call("screenshot", full_page=full_page, zoom_factor=zoom_factor)
+            if screenshot:
+                return {"status": "success", "message": "截图成功", "screenshot": screenshot}
+            return {"status": "error", "message": "截图失败"}
+        except Exception as e:
+            return {"status": "error", "message": f"截图失败: {str(e)[:200]}"}
+
+    async def browser_back_tool(self, event: AstrMessageEvent) -> dict:
+        """返回上一页"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        try:
+            await self.browser_supervisor.call("go_back")
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                return {"status": "success", "message": "已返回上一页", "screenshot": screenshot}
+            return {"status": "success", "message": "已返回上一页"}
+        except Exception as e:
+            return {"status": "error", "message": f"返回失败: {str(e)[:200]}"}
+
+    async def browser_forward_tool(self, event: AstrMessageEvent) -> dict:
+        """前进到下一页"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        try:
+            await self.browser_supervisor.call("go_forward")
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                return {"status": "success", "message": "已前进到下一页", "screenshot": screenshot}
+            return {"status": "success", "message": "已前进到下一页"}
+        except Exception as e:
+            return {"status": "error", "message": f"前进失败: {str(e)[:200]}"}
+
+    async def browser_tabs_tool(self, event: AstrMessageEvent, index: int = None) -> dict:
+        """查看标签页或切换标签页"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        try:
+            if index is not None:
+                await self.browser_supervisor.call("switch_tab", index=index - 1)
+                screenshot = await self.browser_supervisor.call("screenshot")
+                if screenshot:
+                    return {"status": "success", "message": f"已切换到标签页 {index}", "screenshot": screenshot}
+                return {"status": "success", "message": f"已切换到标签页 {index}"}
+            else:
+                titles = await self.browser_supervisor.call("get_all_tabs_titles")
+                if not titles:
+                    return {"status": "success", "message": "暂无打开的标签页"}
+                text = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+                return {"status": "success", "message": f"标签页列表:\n{text}"}
+        except Exception as e:
+            return {"status": "error", "message": f"标签页操作失败: {str(e)[:200]}"}
+
+    async def browser_close_tab_tool(self, event: AstrMessageEvent, index: int) -> dict:
+        """关闭标签页"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        try:
+            result = await self.browser_supervisor.call("close_tab", index=index - 1)
+            return {"status": "success", "message": result or f"已关闭标签页 {index}"}
+        except Exception as e:
+            return {"status": "error", "message": f"关闭标签页失败: {str(e)[:200]}"}
+
+    async def browser_close_tool(self, event: AstrMessageEvent) -> dict:
         """关闭浏览器"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        try:
+            await self.browser_supervisor._stop_browser()
+            return {"status": "success", "message": "浏览器已关闭"}
+        except Exception as e:
+            return {"status": "error", "message": f"关闭浏览器失败: {str(e)[:200]}"}
+
+    async def browser_chat_tool(self, event: AstrMessageEvent, text: str) -> dict:
+        """向当前页面发送对话"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        
+        try:
+            await self.browser_supervisor.call("chat_send", text=text)
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                return {"status": "success", "message": f"已发送: {text[:50]}", "screenshot": screenshot}
+            return {"status": "success", "message": f"已发送: {text[:50]}"}
+        except Exception as e:
+            return {"status": "error", "message": f"发送失败: {str(e)[:200]}"}
+
+    async def browser_favorite_list_tool(self, event: AstrMessageEvent) -> dict:
+        """查看收藏夹"""
+        if not self.fav_mgr:
+            return {"status": "error", "message": "收藏夹管理器未初始化"}
+        
+        favorites = self.fav_mgr.dump()
+        if not favorites:
+            return {"status": "success", "message": "收藏夹为空"}
+        
+        lines = [f"{idx}. {name}: {url}" for idx, (name, url) in enumerate(favorites.items(), 1)]
+        return {"status": "success", "message": "收藏夹列表:\n" + "\n".join(lines)}
+
+    async def browser_favorite_add_tool(self, event: AstrMessageEvent, name: str, url: str) -> dict:
+        """添加收藏"""
+        if not self.fav_mgr:
+            return {"status": "error", "message": "收藏夹管理器未初始化"}
+        
+        if self.fav_mgr.add(name, url):
+            return {"status": "success", "message": f"已收藏: {name}"}
+        return {"status": "success", "message": f"{name} 已存在于收藏夹中"}
+
+    async def browser_favorite_delete_tool(self, event: AstrMessageEvent, name: str) -> dict:
+        """删除收藏"""
+        if not self.fav_mgr:
+            return {"status": "error", "message": "收藏夹管理器未初始化"}
+        
+        if self.fav_mgr.remove(name):
+            return {"status": "success", "message": f"已取消收藏: {name}"}
+        return {"status": "success", "message": f"{name} 不在收藏夹中"}
+
+    async def browser_install_tool(self, event: AstrMessageEvent, browser_type: str = "chromium") -> dict:
+        """安装浏览器"""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                'playwright', 'install', browser_type,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode == 0:
+                return {"status": "success", "message": f"{browser_type} 浏览器安装成功"}
+            return {"status": "error", "message": f"安装失败: {stderr.decode()[:200]}"}
+        except Exception as e:
+            return {"status": "error", "message": f"安装失败: {str(e)[:200]}"}
+
+    # ==================== 简化版浏览器工具 ====================
+
+    async def open_page_tool(self, event: AstrMessageEvent, url: str) -> dict:
+        """打开网页（简化版）"""
+        browser, err = await self._get_browser()
+        if err:
+            return {"status": "error", "message": err}
+        
+        try:
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+            
+            if not self._browser_context:
+                self._browser_context = await browser.new_context(
+                    viewport={'width': 1280, 'height': 720},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                )
+            
+            page = await self._browser_context.new_page()
+            await page.goto(url, timeout=30000, wait_until='domcontentloaded')
+            title = await page.title()
+            return {"status": "success", "message": f"已打开: {title or url}"}
+        except Exception as e:
+            return {"status": "error", "message": f"打开网页失败: {str(e)[:200]}"}
+
+    async def click_element_tool(self, event: AstrMessageEvent, selector: str) -> dict:
+        """点击网页元素（简化版）"""
+        if not self._browser_context:
+            return {"status": "error", "message": "请先使用 open_page 打开网页"}
+        
+        try:
+            pages = self._browser_context.pages
+            if not pages:
+                return {"status": "error", "message": "没有打开的页面"}
+            page = pages[-1]
+            
+            try:
+                await page.click(selector, timeout=5000)
+                return {"status": "success", "message": f"已点击: {selector}"}
+            except:
+                await page.click(f'text="{selector}"', timeout=5000)
+                return {"status": "success", "message": f"已点击: {selector}"}
+        except Exception as e:
+            return {"status": "error", "message": f"点击失败: {str(e)[:200]}"}
+
+    async def type_text_tool(self, event: AstrMessageEvent, selector: str, text: str, press_enter: bool = False) -> dict:
+        """在输入框中输入文字（简化版）"""
+        if not self._browser_context:
+            return {"status": "error", "message": "请先使用 open_page 打开网页"}
+        
+        try:
+            pages = self._browser_context.pages
+            if not pages:
+                return {"status": "error", "message": "没有打开的页面"}
+            page = pages[-1]
+            
+            await page.fill(selector, text, timeout=5000)
+            if press_enter:
+                await page.press(selector, 'Enter')
+            return {"status": "success", "message": f"已输入: {text[:50]}{'...' if len(text)>50 else ''}"}
+        except Exception as e:
+            return {"status": "error", "message": f"输入失败: {str(e)[:200]}"}
+
+    async def screenshot_page_tool(self, event: AstrMessageEvent, save_path: str = None) -> dict:
+        """对当前网页截图（简化版）"""
+        if not self._browser_context:
+            return {"status": "error", "message": "请先使用 open_page 打开网页"}
+        
+        try:
+            pages = self._browser_context.pages
+            if not pages:
+                return {"status": "error", "message": "没有打开的页面"}
+            page = pages[-1]
+            
+            if not save_path:
+                save_path = os.path.join(self.workspace_dir, f"screenshot_{int(time.time())}.png")
+            
+            await page.screenshot(path=save_path, full_page=False)
+            return {"status": "success", "message": f"截图已保存: {save_path}"}
+        except Exception as e:
+            return {"status": "error", "message": f"截图失败: {str(e)[:200]}"}
+
+    async def close_page_tool(self, event: AstrMessageEvent) -> dict:
+        """关闭浏览器（简化版）"""
         try:
             if self._browser_context:
                 await self._browser_context.close()
@@ -4351,12 +4989,9 @@ except Exception as e:
         except Exception as e:
             return {"status": "error", "message": f"关闭浏览器失败: {str(e)[:200]}"}
 
-    # ==================== 新增工具处理函数 ====================
-
-
+    # ==================== 闪传工具 ====================
 
     async def _copy_file_to_napcat(self, file_path: str) -> str:
-        """将文件复制到 NapCat 容器中，返回容器内的路径"""
         import subprocess
         filename = os.path.basename(file_path)
         # NapCat 容器内的临时目录

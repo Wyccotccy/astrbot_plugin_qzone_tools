@@ -473,6 +473,75 @@ close_page()
 
 在 WebUI 的"能力控制"页面，可以单独开关每个浏览器工具。
 
+
+## 🌐 高级浏览器自动化（v4.1.0 新增）
+
+复刻自 [astrbot_plugin_browser](https://github.com/Zhalslar/astrbot_plugin_browser)，功能更完整。
+
+### 搜索引擎
+
+| 搜索引擎 | 搜索关键词 |
+|---------|-----------|
+| 百度 | `搜索 关键词` |
+| 必应 | `必应 关键词` |
+| 谷歌 | `谷歌 关键词` |
+
+### 完整工具列表
+
+| 工具 | 功能 | 搜索关键词 |
+|------|------|-----------|
+| `browser_search` | 搜索网页 | 搜索、百度搜索、必应搜索 |
+| `browser_visit` | 访问链接 | 访问链接、打开网址 |
+| `browser_click` | 点击坐标 | 点击坐标、点击位置 |
+| `browser_input` | 输入文字 | 输入文字、填写输入框 |
+| `browser_scroll` | 滚动页面 | 滚动页面、上下滚动 |
+| `browser_swipe` | 滑动操作 | 滑动、拖拽 |
+| `browser_zoom` | 缩放页面 | 缩放、放大缩小 |
+| `browser_screenshot` | 截图 | 截图、截取页面 |
+| `browser_back` | 返回上一页 | 返回、上一页 |
+| `browser_forward` | 下一页 | 前进、下一页 |
+| `browser_tabs` | 标签页管理 | 标签页、切换标签 |
+| `browser_close_tab` | 关闭标签页 | 关闭标签 |
+| `browser_close` | 关闭浏览器 | 关闭浏览器 |
+| `browser_chat` | 发送对话 | 对话、发送消息 |
+| `browser_favorite_list` | 查看收藏夹 | 收藏夹、查看收藏 |
+| `browser_favorite_add` | 添加收藏 | 添加收藏、收藏链接 |
+| `browser_favorite_delete` | 删除收藏 | 删除收藏、取消收藏 |
+| `browser_install` | 安装浏览器 | 安装浏览器 |
+
+### 使用示例
+
+```
+# 搜索
+browser_search("Python教程", "百度")
+
+# 访问网页
+browser_visit("https://example.com")
+
+# 页面交互
+browser_input("Hello World", true)
+browser_click(200, 300)
+browser_scroll("下", 1000)
+
+# 截图
+browser_screenshot()
+
+# 标签页
+browser_tabs()
+browser_tabs(2)
+browser_close_tab(1)
+
+# 收藏夹
+browser_favorite_add("GitHub", "https://github.com")
+browser_favorite_list()
+```
+
+### 浏览器引擎支持
+
+- **chromium**：默认，通用性强
+- **firefox**：兼容性好，稳定
+- **webkit**：资源占用低
+
 ## ⚠️ 闪传功能说明
 
 闪传功能（`create_flash_task` 等）**仅支持非 Docker 环境**直接使用。
