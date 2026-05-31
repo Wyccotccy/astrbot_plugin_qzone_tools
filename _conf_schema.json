@@ -451,5 +451,11 @@
     "type": "bool",
     "default": false,
     "hint": "启用后每次LLM对话都会额外注入约800-1000字符的工具说明到系统提示词中，建议优先在人格设定中写入必要的工具用法"
+  },
+  "privacy_mode": {
+    "description": "隐私模式（normal=普通模式LLM可看到所有ID, privacy=隐私模式隐藏群号/QQ号等敏感信息）",
+    "type": "string",
+    "default": "normal",
+    "hint": "隐私模式下LLM只能看到群名字，无法看到群号和QQ号"
   }
 }

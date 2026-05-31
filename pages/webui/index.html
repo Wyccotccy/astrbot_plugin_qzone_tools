@@ -110,6 +110,7 @@
                 <button class="nav-btn" data-page="workspace">文件管理</button>
                 <button class="nav-btn" data-page="memory">记忆</button>
                 <button class="nav-btn" data-page="schedule">定时消息</button>
+                <button class="nav-btn" data-page="permission">权限控制</button>
             </div>
         </div>
 
@@ -274,6 +275,49 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
                 <button class="btn" id="addScheduleBtn">创建定时</button>
             </div>
         </div>
+
+        <!-- 权限控制面板 -->
+        <div id="permissionPage" class="content">
+            <div class="card">
+                <div class="section-title">工具权限控制</div>
+                <p style="font-size:0.85rem;color:var(--text-light);margin-bottom:16px;">为每个工具设置访问权限。<strong>全局</strong>=所有人都可用，<strong>超管</strong>=仅管理员可用，<strong>禁用</strong>=任何人都不能使用。</p>
+                <div style="display:flex;gap:10px;margin-bottom:16px;align-items:center;">
+                    <label style="font-size:0.85rem;font-weight:500;color:var(--text-light);white-space:nowrap;">批量设置分类：</label>
+                    <select id="batchPermCategory" style="width:auto;min-width:160px;"></select>
+                    <select id="batchPermLevel" style="width:auto;min-width:120px;">
+                        <option value="global">全局</option>
+                        <option value="admin">超管</option>
+                        <option value="disabled">禁用</option>
+                    </select>
+                    <button class="btn" id="batchPermBtn">应用</button>
+                </div>
+                <div id="permissionList" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;"></div>
+                <div style="margin-top:20px;display:flex;gap:10px;align-items:center;">
+                    <button class="btn" id="savePermBtn">保存设置</button>
+                    <span id="permLoading" class="loading-text"></span>
+                </div>
+                <div id="permStatus" class="status"></div>
+            </div>
+            <div class="card" style="margin-top:20px;">
+                <div class="section-title">隐私控制</div>
+                <p style="font-size:0.85rem;color:var(--text-light);margin-bottom:16px;">控制 LLM 能看到的聊天数据范围。</p>
+                <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;">
+                    <div style="flex:1;min-width:260px;">
+                        <label style="font-size:0.85rem;font-weight:500;color:var(--text-light);margin-bottom:6px;display:block;">隐私模式</label>
+                        <select id="privacyMode" style="width:100%;">
+                            <option value="normal">普通模式 — LLM 可看到群号、QQ号等所有信息</option>
+                            <option value="privacy">隐私模式 — LLM 只能看到群名字，无法看到群号和QQ号</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="privacyDesc" style="margin-top:14px;padding:12px 16px;border-radius:10px;font-size:0.85rem;line-height:1.6;"></div>
+                <div style="margin-top:16px;">
+                    <button class="btn" id="savePrivacyBtn">保存隐私设置</button>
+                    <span id="privacyLoading" class="loading-text"></span>
+                </div>
+                <div id="privacyStatus" class="status"></div>
+            </div>
+        </div>
     </div>
 
     <!-- Inlined bridge SDK -->
@@ -379,6 +423,7 @@ if (!window.AstrBotPluginPage) {
                 if (page === 'workspace') loadFiles();
                 if (page === 'memory') loadMemories();
                 if (page === 'schedule') loadSchedules();
+                if (page === 'permission') loadPermission();
             }
         });
 
@@ -681,6 +726,174 @@ if (!window.AstrBotPluginPage) {
                 saveCapabilityBtn.disabled = false;
             }
         });
+
+        // ========== 权限控制 ==========
+        const permStatus = document.getElementById('permStatus');
+        const permLoading = document.getElementById('permLoading');
+        const permissionList = document.getElementById('permissionList');
+        const savePermBtn = document.getElementById('savePermBtn');
+        const privacyStatus = document.getElementById('privacyStatus');
+        const privacyLoading = document.getElementById('privacyLoading');
+        const savePrivacyBtn = document.getElementById('savePrivacyBtn');
+        const privacyMode = document.getElementById('privacyMode');
+        const privacyDesc = document.getElementById('privacyDesc');
+
+        const TOOL_CATEGORIES_PERM = {
+            '记忆管理': ['add_memory', 'search_memories', 'update_memory', 'delete_memory', 'get_memory_detail'],
+            '消息与定时': ['send_message', 'schedule_message', 'cancel_scheduled_message', 'list_scheduled_messages', 'create_scheduled_command', 'list_scheduled_commands', 'cancel_scheduled_command', 'delete_scheduled_command'],
+            'QQ空间': ['publish_qzone'],
+            '戳一戳与状态': ['send_poke', 'update_qq_status', 'get_qq_status', 'get_fun_status_list'],
+            '撤回与邮件': ['recall_by_reply', 'send_qq_email'],
+            '群管理基础': ['get_user_group_role', 'set_essence_msg', 'delete_essence_msg', 'set_group_ban', 'set_group_kick', 'set_group_whole_ban', 'set_group_card', 'send_group_notice', 'delete_group_notice', 'list_group_files', 'delete_group_file', 'get_group_members_info'],
+            '群管理增强': ['set_group_admin', 'set_group_name', 'get_group_notice_list', 'upload_group_file', 'create_group_file_folder', 'delete_group_folder', 'get_group_honor_info', 'get_group_at_all_remain', 'set_group_special_title', 'get_group_shut_list', 'get_group_ignore_add_request', 'set_group_add_option', 'send_group_sign'],
+            '群文件扩展': ['set_group_portrait', 'move_group_file', 'rename_group_file', 'trans_group_file'],
+            '资料与互动': ['send_like', 'get_group_msg_history', 'get_friend_msg_history', 'fetch_custom_face', 'set_qq_avatar', 'set_input_status', 'set_qq_profile'],
+            'AI语音': ['get_ai_characters', 'send_ai_voice'],
+            '联系人': ['search_contacts', 'list_contacts'],
+            '闪传': ['create_flash_task', 'get_flash_file_list', 'get_flash_file_url', 'send_flash_msg', 'get_share_link', 'get_fileset_info', 'get_fileset_id', 'download_fileset'],
+            '在线文件': ['get_online_file_msg', 'send_online_file', 'send_online_folder', 'receive_online_file', 'refuse_online_file', 'cancel_online_file'],
+            '好友管理': ['delete_friend'],
+            '工作区': ['run_python_code', 'list_workspace_files', 'read_workspace_file', 'delete_workspace_file', 'send_file_to_user'],
+            '浏览器': ['fetch_url', 'open_page', 'click_element', 'type_text', 'screenshot_page', 'close_page', 'browser_search', 'browser_visit', 'browser_click', 'browser_input', 'browser_scroll', 'browser_swipe', 'browser_zoom', 'browser_screenshot', 'browser_back', 'browser_forward', 'browser_tabs', 'browser_close_tab', 'browser_close', 'browser_chat', 'browser_favorite_list', 'browser_favorite_add', 'browser_favorite_delete', 'browser_install']
+        };
+
+        let permConfig = {};
+
+        function showPermStatus(msg, type) {
+            permStatus.textContent = msg;
+            permStatus.className = `status show ${type}`;
+            setTimeout(() => permStatus.classList.remove('show'), 3000);
+        }
+
+        function showPrivacyStatus(msg, type) {
+            privacyStatus.textContent = msg;
+            privacyStatus.className = `status show ${type}`;
+            setTimeout(() => privacyStatus.classList.remove('show'), 3000);
+        }
+
+        function updatePrivacyDesc() {
+            const mode = privacyMode.value;
+            if (mode === 'privacy') {
+                privacyDesc.style.background = 'rgba(231,76,60,0.08)';
+                privacyDesc.style.border = '1px solid rgba(231,76,60,0.2)';
+                privacyDesc.innerHTML = '<strong style="color:#b03a2e;">🔒 隐私模式已开启</strong><br>' +
+                    '• LLM 无法看到群号，只能看到群名字<br>' +
+                    '• LLM 无法看到用户 QQ 号，只能看到昵称<br>' +
+                    '• 聊天记录中的发送者 QQ 号将被替换为 [用户]<br>' +
+                    '• 群成员列表中将隐藏 QQ 号<br>' +
+                    '<span style="font-size:0.8rem;color:var(--text-light);">提示：LLM 仍可通过群名字间接查询群聊记录</span>';
+            } else {
+                privacyDesc.style.background = 'rgba(46,204,113,0.08)';
+                privacyDesc.style.border = '1px solid rgba(46,204,113,0.2)';
+                privacyDesc.innerHTML = '<strong style="color:#1e8449;">🌐 普通模式</strong><br>' +
+                    '• LLM 可以看到群号、QQ号等所有信息<br>' +
+                    '• 所有聊天数据对 LLM 完全可见';
+            }
+        }
+
+        async function loadPermission() {
+            try {
+                permLoading.textContent = '加载中...';
+                const res = await bridge.apiGet('get_config');
+                if (!res.success) throw new Error(res.error || '加载失败');
+                permConfig = res.config || {};
+                renderPermissionList();
+                // 加载隐私模式
+                privacyMode.value = permConfig.privacy_mode || 'normal';
+                updatePrivacyDesc();
+                permLoading.textContent = '';
+            } catch (e) {
+                permLoading.textContent = '';
+                showPermStatus('加载失败: ' + e.message, 'error');
+            }
+        }
+
+        function renderPermissionList() {
+            let html = '';
+            // 填充批量设置下拉
+            const batchCat = document.getElementById('batchPermCategory');
+            batchCat.innerHTML = '';
+            for (const cat of Object.keys(TOOL_CATEGORIES_PERM)) {
+                batchCat.innerHTML += '<option value="' + escapeHtml(cat) + '">' + escapeHtml(cat) + '</option>';
+            }
+            for (const [category, tools] of Object.entries(TOOL_CATEGORIES_PERM)) {
+                html += '<div style="margin-bottom:8px;"><strong style="font-size:0.9rem;color:var(--primary);">' + escapeHtml(category) + '</strong></div>';
+                for (const tool of tools) {
+                    const name = TOOL_NAMES[tool] || tool;
+                    const perm = (permConfig.tool_permissions || {})[tool] || 'global';
+                    html += '<div class="checkbox-wrap" style="background:rgba(255,255,255,0.5);padding:8px 12px;border-radius:8px;margin-bottom:4px;justify-content:space-between;">';
+                    html += '<label style="margin:0;font-size:0.88rem;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(name) + '</label>';
+                    html += '<select id="perm_' + tool + '" style="width:auto;min-width:100px;margin-left:8px;font-size:0.82rem;padding:4px 8px;">';
+                    html += '<option value="global"' + (perm === 'global' ? ' selected' : '') + '>🌐 全局</option>';
+                    html += '<option value="admin"' + (perm === 'admin' ? ' selected' : '') + '>🛡️ 超管</option>';
+                    html += '<option value="disabled"' + (perm === 'disabled' ? ' selected' : '') + '>🚫 禁用</option>';
+                    html += '</select>';
+                    html += '</div>';
+                }
+            }
+            permissionList.innerHTML = html;
+        }
+
+        // 批量设置
+        document.getElementById('batchPermBtn').addEventListener('click', () => {
+            const cat = document.getElementById('batchPermCategory').value;
+            const level = document.getElementById('batchPermLevel').value;
+            const tools = TOOL_CATEGORIES_PERM[cat] || [];
+            for (const tool of tools) {
+                const el = document.getElementById('perm_' + tool);
+                if (el) el.value = level;
+            }
+            showPermStatus('已将「' + cat + '」全部设为 ' + (level === 'global' ? '全局' : level === 'admin' ? '超管' : '禁用'), 'success');
+        });
+
+        // 保存权限设置
+        savePermBtn.addEventListener('click', async () => {
+            permLoading.textContent = '保存中...';
+            savePermBtn.disabled = true;
+            try {
+                const permissions = {};
+                for (const tools of Object.values(TOOL_CATEGORIES_PERM)) {
+                    for (const tool of tools) {
+                        const el = document.getElementById('perm_' + tool);
+                        if (el) permissions[tool] = el.value;
+                    }
+                }
+                const res = await bridge.apiPost('save_config', { config: { tool_permissions: permissions } });
+                if (res.success) {
+                    showPermStatus('权限设置已保存', 'success');
+                    permConfig.tool_permissions = permissions;
+                } else {
+                    showPermStatus(res.error || '保存失败', 'error');
+                }
+            } catch (e) {
+                showPermStatus(e.message, 'error');
+            } finally {
+                permLoading.textContent = '';
+                savePermBtn.disabled = false;
+            }
+        });
+
+        // 保存隐私设置
+        savePrivacyBtn.addEventListener('click', async () => {
+            privacyLoading.textContent = '保存中...';
+            savePrivacyBtn.disabled = true;
+            try {
+                const res = await bridge.apiPost('save_config', { config: { privacy_mode: privacyMode.value } });
+                if (res.success) {
+                    showPrivacyStatus('隐私设置已保存', 'success');
+                    permConfig.privacy_mode = privacyMode.value;
+                } else {
+                    showPrivacyStatus(res.error || '保存失败', 'error');
+                }
+            } catch (e) {
+                showPrivacyStatus(e.message, 'error');
+            } finally {
+                privacyLoading.textContent = '';
+                savePrivacyBtn.disabled = false;
+            }
+        });
+
+        privacyMode.addEventListener('change', updatePrivacyDesc);
 
         // ========== 记忆 ==========
         const memoryStatus = document.getElementById('memoryStatus');
