@@ -689,8 +689,6 @@ class Main(Star):
         self.auto_input_status_enabled = self.config.get("auto_input_status_enabled", False)
         self.auto_input_status_timeout = self.config.get("auto_input_status_timeout", 10)
         self.tool_enabled = self._load_tool_enabled_flags()
-        self.config.setdefault("tool_permissions", {})
-        self.config.setdefault("privacy_mode", "normal")
         self._tool_registry = self._build_tool_registry()
         self.enable_human_typing = self.config.get("enable_human_typing", False)
         self.typing_idle_threshold = self.config.get("typing_idle_threshold", 900)
@@ -747,7 +745,6 @@ class Main(Star):
             "delete_friend": True,
             "run_python_code": True, "list_workspace_files": True,
             "read_workspace_file": True, "delete_workspace_file": True,
-            "send_file_to_user": True,
             "fetch_url": True,
             "open_page": True, "click_element": True, "type_text": True,
             "screenshot_page": True, "close_page": True,
@@ -766,112 +763,14 @@ class Main(Star):
                 default_enabled[tool_name] = self.config.get(config_key)
         return default_enabled
 
-    def _get_available_tools(self, event=None) -> Dict[str, dict]:
+    def _get_available_tools(self) -> Dict[str, dict]:
         if not self.config.get("enabled", True):
             return {}
         available = {}
         for name, meta in self._tool_registry.items():
-            if not self.tool_enabled.get(name, True):
-                continue
-            perm = self.config.get("tool_permissions", {}).get(name, "global")
-            if perm == "disabled":
-                continue
-            if perm == "admin" and event is not None and not self._is_admin(event):
-                continue
-            available[name] = meta
+            if self.tool_enabled.get(name, True):
+                available[name] = meta
         return available
-
-    def _is_admin(self, event) -> bool:
-        """检查当前用户是否为 AstrBot 管理员"""
-        try:
-            sender_id = str(event.get_sender_id())
-            astrbot_cfg = self.context.get_config()
-            admin_ids = astrbot_cfg.get("admins_id", [])
-            return sender_id in [str(a) for a in admin_ids]
-        except Exception:
-            return False
-
-    def _check_tool_permission(self, event, tool_name: str) -> tuple:
-        """检查工具权限。返回 (allowed: bool, error_msg: str)"""
-        perm = self.config.get("tool_permissions", {}).get(tool_name, "global")
-        if perm == "disabled":
-            return False, f"工具 {tool_name} 已被禁用"
-        if perm == "admin" and not self._is_admin(event):
-            return False, f"权限不足：工具 {tool_name} 仅管理员可用"
-        return True, ""
-
-    def _apply_privacy_filter(self, tool_name: str, result: dict) -> dict:
-        """隐私模式下过滤工具输出中的敏感信息（群号、QQ号等）"""
-        if self.config.get("privacy_mode", "normal") != "privacy":
-            return result
-        if result.get("status") != "success":
-            return result
-        message = result.get("message", "")
-        if not message:
-            return result
-        # 需要过滤的工具列表
-        privacy_tools = {
-            "get_group_msg_history", "get_friend_msg_history",
-            "search_contacts", "list_contacts", "get_group_members_info",
-        }
-        if tool_name not in privacy_tools:
-            return result
-        filtered = message
-        if tool_name == "get_group_msg_history":
-            # 替换群号标题
-            import re as _re
-            filtered = _re.sub(r'群\s*(\d+)\s*最近', '该群最近', filtered)
-            # 替换消息中的 QQ 号（纯数字序列）
-            filtered = _re.sub(r'\b(\d{5,12})\b', '[用户]', filtered)
-        elif tool_name == "get_friend_msg_history":
-            import re as _re
-            filtered = _re.sub(r'好友\s*(\d+)\s*最近', '该好友最近', filtered)
-            filtered = _re.sub(r'\b(\d{5,12})\b', '[用户]', filtered)
-        elif tool_name == "search_contacts":
-            import re as _re
-            # 好友格式: 👤 好友 | 123456 | 名字 → 👤 好友 | 名字
-            filtered = _re.sub(r'👤\s*好友\s*\|\s*\d+\s*\|\s*', '👤 好友 | ', filtered)
-            # 群聊格式: 👥 群聊 | 123456 | 名字 → 👥 群聊 | 名字
-            filtered = _re.sub(r'👥\s*群聊\s*\|\s*\d+\s*\|\s*', '👥 群聊 | ', filtered)
-        elif tool_name == "list_contacts":
-            import re as _re
-            filtered = _re.sub(r'👤\s*\d+\s*\|\s*', '👤 ', filtered)
-            filtered = _re.sub(r'👥\s*\d+\s*\|\s*', '👥 ', filtered)
-        elif tool_name == "get_group_members_info":
-            # JSON 输出，需要解析并移除 user_id
-            try:
-                data = json.loads(message)
-                if "members" in data:
-                    for m in data["members"]:
-                        m.pop("user_id", None)
-                if "group_id" in data:
-                    del data["group_id"]
-                filtered = json.dumps(data, ensure_ascii=False, indent=2)
-            except (json.JSONDecodeError, KeyError):
-                import re as _re
-                filtered = _re.sub(r'"user_id"\s*:\s*"\d+"\s*,?\s*\n?', '', filtered)
-                filtered = _re.sub(r'"group_id"\s*:\s*"\d+"\s*,?\s*\n?', '', filtered)
-        result = dict(result)
-        result["message"] = filtered
-        return result
-
-    async def _resolve_group_name_to_id(self, name_or_id: str) -> str:
-        """隐私模式下将群名字解析为群ID。如果已经是纯数字则直接返回。"""
-        if not name_or_id:
-            return name_or_id
-        # 纯数字认为是 ID
-        if name_or_id.isdigit():
-            return name_or_id
-        # 隐私模式下，名字可能是群名字，需要解析
-        if self.config.get("privacy_mode", "normal") != "privacy":
-            return name_or_id
-        # 从缓存中查找
-        for group in self._groups_cache:
-            if group.get("group_name", "") == name_or_id:
-                return str(group.get("group_id", ""))
-        # 缓存为空时尝试刷新
-        # 注意：这里无法获取 client，返回原值让调用方处理
-        return name_or_id
 
     def _build_tool_registry(self) -> Dict[str, dict]:
         registry = {}
@@ -2259,27 +2158,6 @@ class Main(Star):
             "handler": self.delete_workspace_file_tool
         }
 
-        registry["send_file_to_user"] = {
-            "name": "send_file_to_user",
-            "description": "将工作区中的文件发送给当前对话的用户。支持发送图片、文件、音视频等。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filename": {"type": "string", "description": "工作区中的文件名，必填"},
-                    "target_id": {"type": "string", "description": "目标QQ号或群号，可选，不填则发送到当前对话"},
-                    "chat_type": {"type": "string", "description": "聊天类型：auto/group/private，默认auto自动判断"}
-                },
-                "required": ["filename"]
-            },
-            "keywords": [
-                "发送文件给用户", "send file to user", "发文件", "发送图片", "发图片",
-                "发送工作区文件", "send workspace file", "把文件发出来", "文件发出来",
-                "发给用户", "send to user", "发给我", "发过来", "下载文件",
-                "发个图", "发张图", "发照片", "发音频", "发视频"
-            ],
-            "handler": self.send_file_to_user_tool
-        }
-
         registry["fetch_url"] = {
             "name": "fetch_url",
             "description": "获取网页内容。可以打开链接并返回网页文本内容，用于阅读文章、获取信息等。",
@@ -2642,7 +2520,7 @@ class Main(Star):
         """
         if not query or not query.strip():
             return {"status": "error", "message": "请提供搜索关键词（简短词语，如邮箱、禁言）"}
-        available_tools = self._get_available_tools(event)
+        available_tools = self._get_available_tools()
         query_lower = query.strip().lower()
         matched = []
         for name, meta in available_tools.items():
@@ -2665,7 +2543,7 @@ class Main(Star):
     @filter.llm_tool(name="call_wyc_tools")
     async def call_wyc_tools(self, event: AstrMessageEvent, **kwargs) -> dict:
         """返回当前可用的所有工具的简要列表（名称 + 描述）。此工具无需参数，仅当 search_wyc_tools 找不到合适工具时使用。"""
-        available_tools = self._get_available_tools(event)
+        available_tools = self._get_available_tools()
         tools_list = []
         for name, meta in available_tools.items():
             tools_list.append(f"- {name}: {meta['description']}")
@@ -2680,11 +2558,7 @@ class Main(Star):
             tool_name(string): 要执行的工具名称，必填
             tool_args(string): 工具参数的 JSON 字符串，必填。例如：'{"content": "你好"}'
         """
-        # 权限检查（代码层面硬拦截，非 LLM 判断）
-        allowed, err_msg = self._check_tool_permission(event, tool_name)
-        if not allowed:
-            return {"status": "error", "message": err_msg}
-        available_tools = self._get_available_tools(event)
+        available_tools = self._get_available_tools()
         if not tool_name or tool_name not in available_tools:
             return {"status": "error", "message": f"无效的工具名称或工具未启用: {tool_name}。请先使用 search_wyc_tools 或 call_wyc_tools 获取可用工具。"}
         try:
@@ -2696,15 +2570,9 @@ class Main(Star):
                 return {"status": "error", "message": "参数格式错误，必须是 JSON 字符串或字典。"}
         except json.JSONDecodeError:
             return {"status": "error", "message": "参数格式错误，必须是有效的 JSON 字符串。"}
-        # 隐私模式：将群名字解析为群 ID
-        if self.config.get("privacy_mode", "normal") == "privacy":
-            if "group_id" in args_dict and tool_name in ("get_group_msg_history",):
-                args_dict["group_id"] = await self._resolve_group_name_to_id(args_dict["group_id"])
         handler = available_tools[tool_name]["handler"]
         try:
             result = await handler(event, **args_dict)
-            # 隐私过滤
-            result = self._apply_privacy_filter(tool_name, result)
             return result
         except Exception as e:
             logger.error(f"[run_wyc_tool] 执行工具 {tool_name} 失败: {e}")
@@ -4535,6 +4403,41 @@ class Main(Star):
             return {"status": "error", "message": f"代码包含禁止的内容: {banned}"}
         import subprocess
         import tempfile
+        # 获取字体路径
+        font_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'fonts', 'NotoSansCJK-Regular.ttc')
+        font_config_code = ''
+        if os.path.exists(font_path):
+            font_config_code = f"""
+# ===== 中文字体自动配置 =====
+import os as _os
+_FONT_PATH = r'{font_path}'
+
+# 配置 matplotlib
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager as _fm
+    _fm.fontManager.addfont(_FONT_PATH)
+    plt.rcParams['font.sans-serif'] = ['Noto Sans CJK SC'] + plt.rcParams.get('font.sans-serif', [])
+    plt.rcParams['axes.unicode_minus'] = False
+except ImportError:
+    pass
+except Exception:
+    pass
+
+# 配置 PIL/Pillow
+try:
+    from PIL import ImageFont, ImageDraw, Image
+    _pil_font_path = _FONT_PATH
+except ImportError:
+    pass
+except Exception:
+    pass
+
+# 配置环境变量供其他库使用 os.environ['FONT_PATH'] = _FONT_PATH
+# ===== 字体配置结束 =====
+"""
         # 创建临时脚本文件，在工作区目录执行
         script_content = f"""
 import os
@@ -4544,6 +4447,7 @@ import sys
 workspace_path = r'{self.workspace_dir}'
 os.chdir(workspace_path)
 
+{font_config_code}
 # 用户代码
 try:
 {textwrap.indent(code, '    ')}
@@ -4632,87 +4536,6 @@ except Exception as e:
             return {"status": "success", "message": f"已删除文件: {filename}"}
         except Exception as e:
             return {"status": "error", "message": f"删除文件失败: {str(e)[:200]}"}
-
-    async def send_file_to_user_tool(self, event: AstrMessageEvent, filename: str, target_id: str = None, chat_type: str = "auto") -> dict:
-        """将工作区中的文件发送给用户"""
-        if not self.workspace_enabled:
-            return {"status": "error", "message": "工作区功能未启用，请在配置中开启"}
-        if not filename or not filename.strip():
-            return {"status": "error", "message": "请提供文件名"}
-        # 防止路径穿越
-        filename = os.path.basename(filename.strip())
-        filepath = os.path.join(self.workspace_dir, filename)
-        if not os.path.exists(filepath):
-            return {"status": "error", "message": f"文件不存在: {filename}"}
-        # 判断文件类型
-        ext = os.path.splitext(filename)[1].lower()
-        image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico'}
-        audio_exts = {'.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.silk'}
-        video_exts = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv'}
-        try:
-            if target_id and target_id.strip():
-                # 发送到指定目标
-                client = await self._get_client(event)
-                if not client:
-                    return {"status": "error", "message": "无法获取QQ客户端"}
-                target_id = target_id.strip()
-                if not target_id.isdigit():
-                    return {"status": "error", "message": "目标ID必须是纯数字"}
-                if chat_type == "auto":
-                    await self._update_contacts_cache(client)
-                    is_group = any(str(g.get('group_id')) == target_id for g in self._groups_cache)
-                    chat_type = "group" if is_group else "private"
-                # 构造消息链
-                if ext in image_exts:
-                    from astrbot.api.message_components import Image
-                    chain = MessageChain().chain
-                    chain.append(Image.fromFileSystem(filepath))
-                elif ext in audio_exts:
-                    from astrbot.api.message_components import Record
-                    chain = MessageChain().chain
-                    chain.append(Record(file=f"file:///{os.path.abspath(filepath)}"))
-                elif ext in video_exts:
-                    from astrbot.api.message_components import Video
-                    chain = MessageChain().chain
-                    chain.append(Video.fromFileSystem(filepath))
-                else:
-                    from astrbot.api.message_components import File
-                    chain = MessageChain().chain
-                    chain.append(File(name=filename, file_=filepath))
-                msg_chain = MessageChain(chain=chain)
-                if chat_type == "group":
-                    await client.call_action('send_group_msg', group_id=int(target_id), message=msg_chain)
-                else:
-                    await client.call_action('send_private_msg', user_id=int(target_id), message=msg_chain)
-                return {"status": "success", "message": f"✅ 已将文件 {filename} 发送给 {target_id}"}
-            else:
-                # 发送到当前对话
-                session = event.unified_msg_origin
-                if not session:
-                    return {"status": "error", "message": "无法获取当前对话信息，请指定 target_id"}
-                if ext in image_exts:
-                    from astrbot.api.message_components import Image
-                    msg_chain = MessageChain().file_image(filepath)
-                elif ext in audio_exts:
-                    from astrbot.api.message_components import Record
-                    mc = MessageChain()
-                    mc.chain.append(Record(file=f"file:///{os.path.abspath(filepath)}"))
-                    msg_chain = mc
-                elif ext in video_exts:
-                    from astrbot.api.message_components import Video
-                    mc = MessageChain()
-                    mc.chain.append(Video.fromFileSystem(filepath))
-                    msg_chain = mc
-                else:
-                    from astrbot.api.message_components import File
-                    mc = MessageChain()
-                    mc.chain.append(File(name=filename, file_=filepath))
-                    msg_chain = mc
-                await self.context.send_message(session, msg_chain)
-                return {"status": "success", "message": f"✅ 已将文件 {filename} 发送到当前对话"}
-        except Exception as e:
-            logger.error(f"[send_file_to_user] 发送文件失败: {e}", exc_info=True)
-            return {"status": "error", "message": f"发送文件失败: {str(e)[:200]}"}
 
     async def fetch_url_tool(self, event: AstrMessageEvent, url: str, max_chars: int = 500) -> dict:
         """获取网页内容"""
