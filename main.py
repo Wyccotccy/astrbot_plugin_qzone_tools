@@ -707,11 +707,7 @@ class Main(Star):
         # 用于在 AstrBot 和 NapCat 容器之间共享文件
         self.flash_transfer_dir = self.config.get("flash_transfer_dir", "/tmp/astrbot_flash")
         
-        # 浏览器自动化管理
-        self._browser = None
-        self._browser_context = None
-        self._playwright = None
-        
+        # 浏览器管理（统一使用 browser_supervisor）
         # 高级浏览器管理（来自 astrbot_plugin_browser）
         self.browser_supervisor = None
         self.fav_mgr = None
@@ -4593,151 +4589,82 @@ except Exception as e:
         except Exception as e:
             return {"status": "error", "message": f"获取网页失败: {str(e)[:200]}"}
 
-    async def _get_browser(self):
-        """获取或启动浏览器"""
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError:
-            return None, "Playwright 未安装，请运行: pip install playwright && playwright install chromium"
-        
-        if self._browser and self._browser.is_connected():
-            return self._browser, None
-        
-        try:
-            if not self._playwright:
-                self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(headless=True)
-            return self._browser, None
-        except Exception as e:
-            return None, f"启动浏览器失败: {str(e)[:200]}"
+
     
     # ==================== 渲染模式路由（简单浏览器路径） ====================
 
-    # 各模式拦截的资源类型
-    _BLOCKED_RESOURCE_TYPES: dict = {
-        "simplified": {"font", "media"},
-        "minimal": {"font", "media", "stylesheet", "image"},
-        "text_only": {"font", "media", "stylesheet", "image", "script"},
-    }
-
-    async def _apply_simple_browser_render_mode(self, page):
-        """给简单浏览器路径的页面绑定渲染模式路由。"""
-        mode = self.config.get("browser_render_mode", "full")
-        blocked = self._BLOCKED_RESOURCE_TYPES.get(mode, set())
-        if not blocked:
-            return
-        try:
-            await page.unroute("**/*")
-        except Exception:
-            pass
-        try:
-            async def _intercept(route):
-                if route.request.resource_type in blocked:
-                    await route.abort()
-                else:
-                    await route.continue_()
-            await page.route("**/*", _intercept)
-        except Exception:
-            pass
-
     async def open_page_tool(self, event: AstrMessageEvent, url: str) -> dict:
         """打开网页"""
-        browser, err = await self._get_browser()
-        if err:
-            return {"status": "error", "message": err}
-        
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
         try:
             if not url.startswith(('http://', 'https://')):
                 url = 'https://' + url
-            
-            if not self._browser_context:
-                self._browser_context = await browser.new_context(
-                    viewport={'width': 1280, 'height': 720},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                )
-            
-            page = await self._browser_context.new_page()
-            await self._apply_simple_browser_render_mode(page)
-            await page.goto(url, timeout=30000, wait_until='domcontentloaded')
-            title = await page.title()
-            return {"status": "success", "message": f"已打开: {title or url}"}
+            result = await self.browser_supervisor.call("search", url=url)
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                return {"status": "success", "message": f"已打开: {url}", "screenshot": screenshot}
+            return {"status": "success", "message": f"已打开: {url}"}
         except Exception as e:
             return {"status": "error", "message": f"打开网页失败: {str(e)[:200]}"}
-    
+
     async def click_element_tool(self, event: AstrMessageEvent, selector: str) -> dict:
-        """点击网页元素"""
-        if not self._browser_context:
-            return {"status": "error", "message": "请先使用 open_page 打开网页"}
-        
+        """点击网页元素（CSS选择器或文字）"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
         try:
-            pages = self._browser_context.pages
-            if not pages:
-                return {"status": "error", "message": "没有打开的页面"}
-            page = pages[-1]
-            
-            # 尝试 CSS 选择器
-            try:
-                await page.click(selector, timeout=5000)
-                return {"status": "success", "message": f"已点击: {selector}"}
-            except:
-                # 尝试按文字点击
-                await page.click(f'text="{selector}"', timeout=5000)
-                return {"status": "success", "message": f"已点击: {selector}"}
+            err = await self.browser_supervisor.call("click_by_selector", selector=selector)
+            if err:
+                return {"status": "error", "message": err}
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                return {"status": "success", "message": f"已点击: {selector}", "screenshot": screenshot}
+            return {"status": "success", "message": f"已点击: {selector}"}
         except Exception as e:
             return {"status": "error", "message": f"点击失败: {str(e)[:200]}"}
-    
+
     async def type_text_tool(self, event: AstrMessageEvent, selector: str, text: str, press_enter: bool = False) -> dict:
         """在输入框中输入文字"""
-        if not self._browser_context:
-            return {"status": "error", "message": "请先使用 open_page 打开网页"}
-        
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
         try:
-            pages = self._browser_context.pages
-            if not pages:
-                return {"status": "error", "message": "没有打开的页面"}
-            page = pages[-1]
-            
-            await page.fill(selector, text, timeout=5000)
+            err = await self.browser_supervisor.call("text_input_by_selector", selector=selector, text=text)
+            if err:
+                return {"status": "error", "message": err}
             if press_enter:
-                await page.press(selector, 'Enter')
-            return {"status": "success", "message": f"已输入: {text[:50]}{'...' if len(text)>50 else ''}"}
+                await self.browser_supervisor.call("text_input", text="", enter=True)
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                return {"status": "success", "message": f"已输入: {text[:50]}", "screenshot": screenshot}
+            return {"status": "success", "message": f"已输入: {text[:50]}"}
         except Exception as e:
             return {"status": "error", "message": f"输入失败: {str(e)[:200]}"}
-    
+
     async def screenshot_page_tool(self, event: AstrMessageEvent, save_path: str = None) -> dict:
         """对当前网页截图"""
-        if not self._browser_context:
-            return {"status": "error", "message": "请先使用 open_page 打开网页"}
-        
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+
         # 纯文本模式
         if self.config.get("llm_screenshot_text_only", False):
             try:
-                pages = self._browser_context.pages
-                if not pages:
-                    return {"status": "error", "message": "没有打开的页面"}
-                text = await self._extract_page_text(pages[-1])
-                return {"status": "success", "message": "页面文本内容（纯文本模式）", "text": text}
+                page = self.browser_supervisor.browser.page
+                if page:
+                    text = await self._extract_page_text(page)
+                    return {"status": "success", "message": "页面文本内容（纯文本模式）", "text": text}
             except Exception as e:
                 return {"status": "error", "message": f"提取文本失败: {str(e)[:200]}"}
-        
+
         try:
-            pages = self._browser_context.pages
-            if not pages:
-                return {"status": "error", "message": "没有打开的页面"}
-            page = pages[-1]
-            
-            fmt = get_format_from_config(self.config)
-            # Playwright 只支持 png / jpeg，先存 PNG 再转换
-            tmp_path = os.path.join(self.workspace_dir, f"screenshot_{int(time.time())}.png")
-            
-            await page.screenshot(path=tmp_path, full_page=False)
-            # 转换为目标格式
-            if save_path:
-                import shutil
-                shutil.move(tmp_path, save_path)
-            else:
-                save_path = self._convert_image(tmp_path)
-            return {"status": "success", "message": f"截图已保存: {save_path}"}
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                # 如果指定了保存路径，复制过去
+                if save_path:
+                    import shutil
+                    shutil.copy2(screenshot, save_path)
+                    return {"status": "success", "message": f"截图已保存: {save_path}"}
+                return {"status": "success", "message": "截图成功", "screenshot": screenshot}
+            return {"status": "error", "message": "截图失败"}
         except Exception as e:
             return {"status": "error", "message": f"截图失败: {str(e)[:200]}"}
     
@@ -5020,119 +4947,14 @@ except Exception as e:
         except Exception as e:
             return {"status": "error", "message": f"安装失败: {str(e)[:200]}"}
 
-    # ==================== 简化版浏览器工具 ====================
-
-    async def open_page_tool(self, event: AstrMessageEvent, url: str) -> dict:
-        """打开网页（简化版）"""
-        browser, err = await self._get_browser()
-        if err:
-            return {"status": "error", "message": err}
-        
-        try:
-            if not url.startswith(('http://', 'https://')):
-                url = 'https://' + url
-            
-            if not self._browser_context:
-                self._browser_context = await browser.new_context(
-                    viewport={'width': 1280, 'height': 720},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                )
-            
-            page = await self._browser_context.new_page()
-            await self._apply_simple_browser_render_mode(page)
-            await page.goto(url, timeout=30000, wait_until='domcontentloaded')
-            title = await page.title()
-            return {"status": "success", "message": f"已打开: {title or url}"}
-        except Exception as e:
-            return {"status": "error", "message": f"打开网页失败: {str(e)[:200]}"}
-
-    async def click_element_tool(self, event: AstrMessageEvent, selector: str) -> dict:
-        """点击网页元素（简化版）"""
-        if not self._browser_context:
-            return {"status": "error", "message": "请先使用 open_page 打开网页"}
-        
-        try:
-            pages = self._browser_context.pages
-            if not pages:
-                return {"status": "error", "message": "没有打开的页面"}
-            page = pages[-1]
-            
-            try:
-                await page.click(selector, timeout=5000)
-                return {"status": "success", "message": f"已点击: {selector}"}
-            except:
-                await page.click(f'text="{selector}"', timeout=5000)
-                return {"status": "success", "message": f"已点击: {selector}"}
-        except Exception as e:
-            return {"status": "error", "message": f"点击失败: {str(e)[:200]}"}
-
-    async def type_text_tool(self, event: AstrMessageEvent, selector: str, text: str, press_enter: bool = False) -> dict:
-        """在输入框中输入文字（简化版）"""
-        if not self._browser_context:
-            return {"status": "error", "message": "请先使用 open_page 打开网页"}
-        
-        try:
-            pages = self._browser_context.pages
-            if not pages:
-                return {"status": "error", "message": "没有打开的页面"}
-            page = pages[-1]
-            
-            await page.fill(selector, text, timeout=5000)
-            if press_enter:
-                await page.press(selector, 'Enter')
-            return {"status": "success", "message": f"已输入: {text[:50]}{'...' if len(text)>50 else ''}"}
-        except Exception as e:
-            return {"status": "error", "message": f"输入失败: {str(e)[:200]}"}
-
-    async def screenshot_page_tool(self, event: AstrMessageEvent, save_path: str = None) -> dict:
-        """对当前网页截图（简化版）"""
-        if not self._browser_context:
-            return {"status": "error", "message": "请先使用 open_page 打开网页"}
-        
-        # 纯文本模式
-        if self.config.get("llm_screenshot_text_only", False):
-            try:
-                pages = self._browser_context.pages
-                if not pages:
-                    return {"status": "error", "message": "没有打开的页面"}
-                text = await self._extract_page_text(pages[-1])
-                return {"status": "success", "message": "页面文本内容（纯文本模式）", "text": text}
-            except Exception as e:
-                return {"status": "error", "message": f"提取文本失败: {str(e)[:200]}"}
-        
-        try:
-            pages = self._browser_context.pages
-            if not pages:
-                return {"status": "error", "message": "没有打开的页面"}
-            page = pages[-1]
-            
-            fmt = get_format_from_config(self.config)
-            # Playwright 只支持 png / jpeg，先存 PNG 再转换
-            tmp_path = os.path.join(self.workspace_dir, f"screenshot_{int(time.time())}.png")
-            
-            await page.screenshot(path=tmp_path, full_page=False)
-            # 转换为目标格式
-            if save_path:
-                import shutil
-                shutil.move(tmp_path, save_path)
-            else:
-                save_path = self._convert_image(tmp_path)
-            return {"status": "success", "message": f"截图已保存: {save_path}"}
-        except Exception as e:
-            return {"status": "error", "message": f"截图失败: {str(e)[:200]}"}
+    # ==================== 简化版浏览器工具（统一走 browser_supervisor） ====================
 
     async def close_page_tool(self, event: AstrMessageEvent) -> dict:
-        """关闭浏览器（简化版）"""
+        """关闭浏览器"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
         try:
-            if self._browser_context:
-                await self._browser_context.close()
-                self._browser_context = None
-            if self._browser:
-                await self._browser.close()
-                self._browser = None
-            if self._playwright:
-                await self._playwright.stop()
-                self._playwright = None
+            await self.browser_supervisor._stop_browser()
             return {"status": "success", "message": "浏览器已关闭"}
         except Exception as e:
             return {"status": "error", "message": f"关闭浏览器失败: {str(e)[:200]}"}

@@ -692,6 +692,21 @@ class BrowserCore:
 
             return "未找到可用的输入框"
 
+    async def click_by_selector(self, selector: str) -> str | None:
+        """通过 CSS 选择器或文字点击元素。"""
+        async with self._op_lock:
+            page = await self._ensure_page()
+            await page.wait_for_load_state("load")
+            try:
+                await page.click(selector, timeout=5000)
+                return None
+            except Exception:
+                try:
+                    await page.click(f'text="{selector}"', timeout=5000)
+                    return None
+                except Exception as e:
+                    return f"点击失败: {str(e)[:200]}"
+
     async def text_input_by_selector(self, selector: str, text: str) -> str | None:
         async with self._op_lock:
             page = await self._ensure_page()
