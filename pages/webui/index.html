@@ -159,6 +159,33 @@
                 </div>
             </div>
             <div class="card" style="margin-top:20px;">
+                <div class="section-title">浏览器 & 图片设置</div>
+                <div class="field">
+                    <label>图片输出格式</label>
+                    <select id="image_output_format">
+                        <option value="webp">WebP（推荐，体积小）</option>
+                        <option value="png">PNG（无损）</option>
+                        <option value="jpg">JPG（通用）</option>
+                    </select>
+                    <p style="font-size:12px;color:#888;margin:4px 0 0">截图/生成的图片发送给AI前统一转换为此格式</p>
+                </div>
+                <div class="field">
+                    <label>浏览器渲染模式</label>
+                    <select id="browser_render_mode">
+                        <option value="full">完全（完整渲染，适合性能好的设备）</option>
+                        <option value="simplified">简略（禁用毛玻璃/滤镜效果）</option>
+                        <option value="minimal">极简（仅保留布局和文字，适合2C2G服务器）</option>
+                        <option value="text_only">纯文本（仅文字，不加载图片，适合超低性能主机）</option>
+                    </select>
+                    <p style="font-size:12px;color:#888;margin:4px 0 0">影响浏览器截图效果和性能占用</p>
+                </div>
+                <div class="checkbox-wrap">
+                    <input type="checkbox" id="llm_screenshot_text_only" />
+                    <label for="llm_screenshot_text_only">LLM截图仅返回纯文本（不返回图片）</label>
+                </div>
+                <p style="font-size:12px;color:#888;margin:-8px 0 12px 28px">适合非多模态模型，开启后截图工具只返回页面文本</p>
+            </div>
+            <div class="card" style="margin-top:20px;">
                 <div class="section-title">工作区设置</div>
                 <div class="checkbox-wrap"><input type="checkbox" id="workspace_enabled" /><label for="workspace_enabled">启用工区功能</label></div>
                 <div class="form-item">
@@ -460,6 +487,9 @@ if (!window.AstrBotPluginPage) {
                 kick_enabled: document.getElementById('kick_enabled').checked,
                 search_enabled: document.getElementById('search_enabled').checked,
                 inject_tool_prompt_enabled: document.getElementById('inject_tool_prompt_enabled').checked,
+                image_output_format: document.getElementById('image_output_format').value,
+                browser_render_mode: document.getElementById('browser_render_mode').value,
+                llm_screenshot_text_only: document.getElementById('llm_screenshot_text_only').checked,
                 workspace_enabled: document.getElementById('workspace_enabled').checked,
                 workspace_banned_patterns: document.getElementById('workspace_banned_patterns').value.split('\n').filter(p => p.trim()),
                 flash_transfer_dir: document.getElementById('flash_transfer_dir').value || '/tmp/astrbot_flash',

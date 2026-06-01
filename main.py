@@ -32,6 +32,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
 from .core.supervisor import BrowserSupervisor
 from .core.favorite import FavoriteManager
 from .core.ticks_overlay import TickOverlay
+from .core.image_utils import convert_image_format, get_format_from_config, get_output_ext
 
 PLUGIN_NAME = "astrbot_plugin_qzone_tools"
 
@@ -2838,7 +2839,7 @@ class Main(Star):
             self.fav_mgr = FavoriteManager(favorite_file)
             
             # 刻度叠加
-            self.overlay = TickOverlay(self.data_dir, Path(__file__).parent / "resource")
+            self.overlay = TickOverlay(self.data_dir, Path(__file__).parent / "resource", self.config)
             
             # 浏览器监控器
             browser_config = {
@@ -2988,6 +2989,27 @@ class Main(Star):
                 self.status_manager.status_end_time
             )
         logger.info("[Main] 插件已卸载")
+
+    # ==================== 图片格式转换 & 文本提取 ====================
+
+    def _convert_image(self, image_path: str) -> str:
+        """将图片转换为配置的输出格式，返回转换后的路径。"""
+        if not image_path or not os.path.exists(image_path):
+            return image_path
+        try:
+            fmt = get_format_from_config(self.config)
+            return convert_image_format(image_path, fmt, quality=80)
+        except Exception as e:
+            logger.warning(f"[ImageConvert] 转换失败，保留原文件: {e}")
+            return image_path
+
+    async def _extract_page_text(self, page) -> str:
+        """从 Playwright Page 中提取纯文本内容。"""
+        try:
+            text = await page.evaluate("document.body.innerText")
+            return text or "(页面无文本内容)"
+        except Exception as e:
+            return f"(提取文本失败: {e})"
 
     # ==================== 核心辅助方法 ====================
     async def _get_client(self, event: AstrMessageEvent = None):
@@ -4657,6 +4679,17 @@ except Exception as e:
         if not self._browser_context:
             return {"status": "error", "message": "请先使用 open_page 打开网页"}
         
+        # 纯文本模式
+        if self.config.get("llm_screenshot_text_only", False):
+            try:
+                pages = self._browser_context.pages
+                if not pages:
+                    return {"status": "error", "message": "没有打开的页面"}
+                text = await self._extract_page_text(pages[-1])
+                return {"status": "success", "message": "页面文本内容（纯文本模式）", "text": text}
+            except Exception as e:
+                return {"status": "error", "message": f"提取文本失败: {str(e)[:200]}"}
+        
         try:
             pages = self._browser_context.pages
             if not pages:
@@ -4664,9 +4697,12 @@ except Exception as e:
             page = pages[-1]
             
             if not save_path:
-                save_path = os.path.join(self.workspace_dir, f"screenshot_{int(time.time())}.png")
+                fmt = get_format_from_config(self.config)
+                ext = get_output_ext(fmt)
+                save_path = os.path.join(self.workspace_dir, f"screenshot_{int(time.time())}{ext}")
             
             await page.screenshot(path=save_path, full_page=False)
+            save_path = self._convert_image(save_path)
             return {"status": "success", "message": f"截图已保存: {save_path}"}
         except Exception as e:
             return {"status": "error", "message": f"截图失败: {str(e)[:200]}"}
@@ -4695,6 +4731,7 @@ except Exception as e:
             await self.browser_supervisor.call("search", url=url)
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
+                screenshot = self._convert_image(screenshot)
                 return {"status": "success", "message": f"已搜索: {keyword}", "screenshot": screenshot}
             return {"status": "success", "message": f"已搜索: {keyword}"}
         except Exception as e:
@@ -4709,6 +4746,7 @@ except Exception as e:
             await self.browser_supervisor.call("search", url=url)
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
+                screenshot = self._convert_image(screenshot)
                 return {"status": "success", "message": f"已访问: {url}", "screenshot": screenshot}
             return {"status": "success", "message": f"已访问: {url}"}
         except Exception as e:
@@ -4723,6 +4761,7 @@ except Exception as e:
             await self.browser_supervisor.call("click_coord", coords=[x, y])
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
+                screenshot = self._convert_image(screenshot)
                 return {"status": "success", "message": f"已点击: ({x}, {y})", "screenshot": screenshot}
             return {"status": "success", "message": f"已点击: ({x}, {y})"}
         except Exception as e:
@@ -4737,6 +4776,7 @@ except Exception as e:
             await self.browser_supervisor.call("text_input", text=text, enter=enter)
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
+                screenshot = self._convert_image(screenshot)
                 return {"status": "success", "message": f"已输入: {text[:50]}", "screenshot": screenshot}
             return {"status": "success", "message": f"已输入: {text[:50]}"}
         except Exception as e:
@@ -4751,6 +4791,7 @@ except Exception as e:
             await self.browser_supervisor.call("scroll_by", distance=distance, direction=direction)
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
+                screenshot = self._convert_image(screenshot)
                 return {"status": "success", "message": f"已向{direction}滚动{distance}px", "screenshot": screenshot}
             return {"status": "success", "message": f"已向{direction}滚动{distance}px"}
         except Exception as e:
@@ -4765,6 +4806,7 @@ except Exception as e:
             await self.browser_supervisor.call("swipe", coords=[start_x, start_y, end_x, end_y])
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
+                screenshot = self._convert_image(screenshot)
                 return {"status": "success", "message": f"已滑动", "screenshot": screenshot}
             return {"status": "success", "message": f"已滑动"}
         except Exception as e:
@@ -4779,6 +4821,7 @@ except Exception as e:
             await self.browser_supervisor.call("zoom_to_scale", scale=scale)
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
+                screenshot = self._convert_image(screenshot)
                 return {"status": "success", "message": f"已缩放到 {scale}x", "screenshot": screenshot}
             return {"status": "success", "message": f"已缩放到 {scale}x"}
         except Exception as e:
@@ -4789,9 +4832,21 @@ except Exception as e:
         if not self.browser_supervisor:
             return {"status": "error", "message": "浏览器管理器未初始化"}
         
+        # 纯文本模式：返回页面文本而非截图
+        if self.config.get("llm_screenshot_text_only", False):
+            try:
+                browser = self.browser_supervisor.browser
+                if browser and browser.page:
+                    text = await self._extract_page_text(browser.page)
+                    return {"status": "success", "message": "页面文本内容（纯文本模式）", "text": text}
+                return {"status": "error", "message": "无可用页面"}
+            except Exception as e:
+                return {"status": "error", "message": f"提取文本失败: {str(e)[:200]}"}
+        
         try:
             screenshot = await self.browser_supervisor.call("screenshot", full_page=full_page, zoom_factor=zoom_factor)
             if screenshot:
+                screenshot = self._convert_image(screenshot)
                 return {"status": "success", "message": "截图成功", "screenshot": screenshot}
             return {"status": "error", "message": "截图失败"}
         except Exception as e:
@@ -4806,6 +4861,7 @@ except Exception as e:
             await self.browser_supervisor.call("go_back")
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
+                screenshot = self._convert_image(screenshot)
                 return {"status": "success", "message": "已返回上一页", "screenshot": screenshot}
             return {"status": "success", "message": "已返回上一页"}
         except Exception as e:
@@ -4820,6 +4876,7 @@ except Exception as e:
             await self.browser_supervisor.call("go_forward")
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
+                screenshot = self._convert_image(screenshot)
                 return {"status": "success", "message": "已前进到下一页", "screenshot": screenshot}
             return {"status": "success", "message": "已前进到下一页"}
         except Exception as e:
@@ -4835,6 +4892,7 @@ except Exception as e:
                 await self.browser_supervisor.call("switch_tab", index=index - 1)
                 screenshot = await self.browser_supervisor.call("screenshot")
                 if screenshot:
+                    screenshot = self._convert_image(screenshot)
                     return {"status": "success", "message": f"已切换到标签页 {index}", "screenshot": screenshot}
                 return {"status": "success", "message": f"已切换到标签页 {index}"}
             else:
@@ -4877,6 +4935,7 @@ except Exception as e:
             await self.browser_supervisor.call("chat_send", text=text)
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
+                screenshot = self._convert_image(screenshot)
                 return {"status": "success", "message": f"已发送: {text[:50]}", "screenshot": screenshot}
             return {"status": "success", "message": f"已发送: {text[:50]}"}
         except Exception as e:
@@ -4995,6 +5054,17 @@ except Exception as e:
         if not self._browser_context:
             return {"status": "error", "message": "请先使用 open_page 打开网页"}
         
+        # 纯文本模式
+        if self.config.get("llm_screenshot_text_only", False):
+            try:
+                pages = self._browser_context.pages
+                if not pages:
+                    return {"status": "error", "message": "没有打开的页面"}
+                text = await self._extract_page_text(pages[-1])
+                return {"status": "success", "message": "页面文本内容（纯文本模式）", "text": text}
+            except Exception as e:
+                return {"status": "error", "message": f"提取文本失败: {str(e)[:200]}"}
+        
         try:
             pages = self._browser_context.pages
             if not pages:
@@ -5002,9 +5072,12 @@ except Exception as e:
             page = pages[-1]
             
             if not save_path:
-                save_path = os.path.join(self.workspace_dir, f"screenshot_{int(time.time())}.png")
+                fmt = get_format_from_config(self.config)
+                ext = get_output_ext(fmt)
+                save_path = os.path.join(self.workspace_dir, f"screenshot_{int(time.time())}{ext}")
             
             await page.screenshot(path=save_path, full_page=False)
+            save_path = self._convert_image(save_path)
             return {"status": "success", "message": f"截图已保存: {save_path}"}
         except Exception as e:
             return {"status": "error", "message": f"截图失败: {str(e)[:200]}"}
