@@ -529,7 +529,7 @@ class BrowserCore:
             # Playwright 只支持 png / jpeg，webp 必须先存 PNG 再转换
             pw_format = "png" if fmt == "webp" else IMG_FORMAT_MAP.get(fmt, "jpeg").lower()
             shot_kwargs: dict[str, Any] = {"full_page": full_page}
-            if pw_format != "PNG":
+            if pw_format != "png":
                 shot_kwargs["quality"] = min(self.config.get("screenshot_quality", 80), 100)
 
             async def _shot():
