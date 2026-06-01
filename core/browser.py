@@ -361,30 +361,64 @@ class BrowserCore:
         """,
     }
 
+    # 各模式拦截的资源类型
+    _BLOCKED_RESOURCE_TYPES: dict[str, set[str]] = {
+        "simplified": {"font", "media"},
+        "minimal": {"font", "media", "stylesheet", "image"},
+        "text_only": {"font", "media", "stylesheet", "image", "script"},
+    }
+
+    # 各模式额外注入的 CSS（隐藏不需要的元素）
+    _RENDER_MODE_CSS: dict[str, str | None] = {
+        "simplified": None,
+        "minimal": "video, audio { display: none !important; }",
+        "text_only": """
+            img, video, audio, canvas, svg, iframe,
+            object, embed, picture, source, figure,
+            .icon, .emoji, [role="img"] {
+                visibility: hidden !important;
+                height: 0 !important;
+                width: 0 !important;
+                overflow: hidden !important;
+                display: none !important;
+            }
+        """,
+    }
+
     async def _apply_render_mode(self, page: Page):
-        """根据渲染模式向页面注入 CSS，截图前调用。"""
+        """根据渲染模式拦截网络请求 + 注入 CSS。截图前调用。"""
         mode = self.config.get("browser_render_mode", "full")
         if mode == "full":
             return
 
-        css = self._RENDER_MODE_CSS.get(mode)
-        if not css:
-            return
+        # 1. 网络层拦截：阻止不需要的资源类型
+        blocked = self._BLOCKED_RESOURCE_TYPES.get(mode, set())
+        if blocked:
+            try:
+                await page.route("**/*", lambda route: (
+                    route.abort() if route.request.resource_type in blocked
+                    else route.continue_()
+                ))
+            except Exception:
+                pass
 
-        try:
-            await page.evaluate("""
-                (cssText) => {
-                    if (!window._renderModeStyle) {
-                        const s = document.createElement('style');
-                        s.id = '__render_mode__';
-                        document.head.appendChild(s);
-                        window._renderModeStyle = s;
+        # 2. CSS 注入：隐藏残余元素
+        css = self._RENDER_MODE_CSS.get(mode)
+        if css:
+            try:
+                await page.evaluate("""
+                    (cssText) => {
+                        if (!window._renderModeStyle) {
+                            const s = document.createElement('style');
+                            s.id = '__render_mode__';
+                            document.head.appendChild(s);
+                            window._renderModeStyle = s;
+                        }
+                        window._renderModeStyle.textContent = cssText;
                     }
-                    window._renderModeStyle.textContent = cssText;
-                }
-            """, css)
-        except Exception:
-            pass
+                """, css)
+            except Exception:
+                pass
 
     # ======================================================
     # 内部保障
