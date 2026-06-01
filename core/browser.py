@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from .image_utils import get_format_from_config, get_output_ext, _FORMAT_MAP as IMG_FORMAT_MAP
+
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext, Cookie, Page, Playwright
 
@@ -83,6 +85,10 @@ class BrowserCore:
 
         self._terminated = False
         self._is_cdp_mode = self.browser_mode == "local_cdp"
+
+        # 图片输出格式 & 渲染模式
+        self.image_format: str = get_format_from_config(self.config)
+        self.render_mode: str = self.config.get("browser_render_mode", "full")
 
         # ===== 核心防护 =====
         self._op_lock = asyncio.Lock()
@@ -322,6 +328,67 @@ class BrowserCore:
             pass
 
     # ======================================================
+    # 渲染模式注入
+    # ======================================================
+
+    _RENDER_MODE_CSS = {
+        "simplified": """
+            *, *::before, *::after {
+                backdrop-filter: none !important;
+                -webkit-backdrop-filter: none !important;
+                filter: none !important;
+            }
+        """,
+        "minimal": """
+            *, *::before, *::after {
+                backdrop-filter: none !important;
+                -webkit-backdrop-filter: none !important;
+                filter: none !important;
+                animation: none !important;
+                transition: none !important;
+            }
+            video, audio { display: none !important; }
+            @font-face { font-family: initial !important; }
+        """,
+        "text_only": """
+            img, video, audio, canvas, svg, iframe,
+            object, embed, picture, source, figure,
+            .icon, .emoji, [role="img"] {
+                visibility: hidden !important;
+                height: 0 !important;
+                width: 0 !important;
+                overflow: hidden !important;
+                display: none !important;
+            }
+        """,
+    }
+
+    async def _apply_render_mode(self, page: Page):
+        """根据渲染模式向页面注入 CSS，截图前调用。"""
+        mode = self.render_mode
+        if mode == "full":
+            return
+
+        css = self._RENDER_MODE_CSS.get(mode)
+        if not css:
+            return
+
+        try:
+            await page.evaluate("""
+                (cssText) => {
+                    if (!window._renderModeStyle) {
+                        const s = document.createElement('style');
+                        s.id = '__render_mode__';
+                        document.head.appendChild(s);
+                        window._renderModeStyle = s;
+                    }
+                    window._renderModeStyle.textContent = cssText;
+                }
+            """, css)
+        except Exception:
+            pass
+
+    # ======================================================
     # 内部保障
     # ======================================================
 
@@ -411,16 +478,22 @@ class BrowserCore:
         async with self._op_lock:
             page = await self._ensure_page()
 
+            # 注入渲染模式 CSS
+            await self._apply_render_mode(page)
+
+            # 确定截图格式
+            fmt = self.image_format  # webp / png / jpg
+            pw_format = IMG_FORMAT_MAP.get(fmt, "JPEG")
+            shot_kwargs: dict[str, Any] = {"full_page": full_page}
+            if fmt != "png":
+                shot_kwargs["quality"] = min(self.config["screenshot_quality"], 100)
+
             async def _shot():
                 if zoom_factor:
                     await page.evaluate(f"document.body.style.zoom = {zoom_factor};")
                     await page.evaluate("window.scrollTo(0, 0);")
 
-                return await page.screenshot(
-                    full_page=full_page,
-                    type="jpeg",
-                    quality=min(self.config["screenshot_quality"], 100),
-                )
+                return await page.screenshot(type=pw_format, **shot_kwargs)
 
             raw: bytes = await _shot()
 
@@ -428,7 +501,8 @@ class BrowserCore:
                 return None
 
             # ========== 落地到缓存文件 ==========
-            file_name = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}.jpg"
+            ext = get_output_ext(fmt)
+            file_name = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}{ext}"
             cache_path = self.cache_dir / file_name
             cache_path.write_bytes(raw)
 

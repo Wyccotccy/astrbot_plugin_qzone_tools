@@ -4,6 +4,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .image_utils import get_format_from_config, get_output_ext, _FORMAT_MAP
+
 
 class TickOverlay:
     # -------------------- 颜色 --------------------
@@ -20,10 +22,14 @@ class TickOverlay:
     # -------------------- 交点半径 --------------------
     DOT_RADIUS: int = 1
 
-    def __init__(self, data_dir: Path, resource_dir: Path):
+    def __init__(self, data_dir: Path, resource_dir: Path, config: dict = None):
         self.cache_dir = data_dir / "overlay_cache"
         self.font_path = resource_dir / "kaiti_GB2312.ttf"
         self.scale_path = resource_dir / "ticks_overlay.png"
+        self.config = config or {}
+
+        # 图片输出格式
+        self.image_format = get_format_from_config(self.config)
 
         # 基础参数
         self.width = 4000
@@ -107,11 +113,12 @@ class TickOverlay:
         # 2. 计算背景图摘要，生成缓存文件名
         background_path = Path(background_path)
         md5 = hashlib.md5(background_path.read_bytes()).hexdigest()
-        cached_png = self.cache_dir / f"{md5}.png"
+        ext = get_output_ext(self.image_format)
+        cached_file = self.cache_dir / f"{md5}{ext}"
 
         # 3. 若缓存已存在，直接返回路径
-        if cached_png.exists():
-            return str(cached_png.resolve())
+        if cached_file.exists():
+            return str(cached_file.resolve())
 
         # 4. 合成
         background = Image.open(background_path).convert("RGBA")
@@ -121,11 +128,18 @@ class TickOverlay:
         combined.paste(background, (0, 0))
         combined.paste(overlay, (0, 0), overlay)
 
-        # 5. 保存到缓存
-        combined.save(cached_png, format="PNG")
+        # 5. 保存到缓存（根据目标格式转换）
+        pw_fmt = _FORMAT_MAP.get(self.image_format, "PNG")
+        if pw_fmt == "JPEG":
+            # JPEG 不支持透明，转 RGB
+            bg = Image.new("RGB", combined.size, (255, 255, 255))
+            bg.paste(combined, mask=combined.split()[3])
+            bg.save(str(cached_file), format=pw_fmt, quality=80)
+        else:
+            combined.save(str(cached_file), format=pw_fmt)
 
         # 6. 返回绝对路径
-        return str(cached_png.resolve())
+        return str(cached_file.resolve())
 
     def clear_cache(self):
         """

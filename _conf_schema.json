@@ -457,5 +457,25 @@
     "type": "string",
     "default": "normal",
     "hint": "隐私模式下LLM只能看到群名字，无法看到群号和QQ号"
+  },
+  "image_output_format": {
+    "description": "图片输出格式（截图/生成的图片发送给AI前统一转换为此格式）",
+    "type": "string",
+    "default": "webp",
+    "enum": ["webp", "png", "jpg"],
+    "hint": "webp体积最小兼容性好，jpg通用，png无损"
+  },
+  "browser_render_mode": {
+    "description": "浏览器渲染模式（影响截图效果和性能占用）",
+    "type": "string",
+    "default": "full",
+    "enum": ["full", "simplified", "minimal", "text_only"],
+    "hint": "完全=完整渲染；简略=禁用毛玻璃/滤镜；极简=仅保留布局和文字；纯文本=仅文字"
+  },
+  "llm_screenshot_text_only": {
+    "description": "LLM截图是否仅返回纯文本（不返回图片），适合非多模态模型",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后browser_screenshot等工具只返回页面文本，不生成截图"
   }
 }
