@@ -2610,8 +2610,8 @@ class Main(Star):
                 return jsonify({"success": False, "error": "格式错误"})
             # 合并配置，而不是替换（保留工具开关等其他字段）
             self.config.update(new_config)
-            if hasattr(self.config, 'save') and callable(self.config.save):
-                self.config.save()
+            if hasattr(self.config, 'save_config') and callable(self.config.save_config):
+                self.config.save_config()
             self.tool_enabled = self._load_tool_enabled_flags()
             return jsonify({"success": True, "message": "配置已保存"})
         except Exception as e:
