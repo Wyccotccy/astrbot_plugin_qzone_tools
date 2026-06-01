@@ -86,9 +86,7 @@ class BrowserCore:
         self._terminated = False
         self._is_cdp_mode = self.browser_mode == "local_cdp"
 
-        # 图片输出格式 & 渲染模式
-        self.image_format: str = get_format_from_config(self.config)
-        self.render_mode: str = self.config.get("browser_render_mode", "full")
+        # 图片输出格式 & 渲染模式（每次截图时从 config 实时读取，避免重载后失效）
 
         # ===== 核心防护 =====
         self._op_lock = asyncio.Lock()
@@ -365,7 +363,7 @@ class BrowserCore:
 
     async def _apply_render_mode(self, page: Page):
         """根据渲染模式向页面注入 CSS，截图前调用。"""
-        mode = self.render_mode
+        mode = self.config.get("browser_render_mode", "full")
         if mode == "full":
             return
 
@@ -482,7 +480,7 @@ class BrowserCore:
             await self._apply_render_mode(page)
 
             # 确定截图格式
-            fmt = self.image_format  # webp / png / jpg
+            fmt = get_format_from_config(self.config)  # webp / png / jpg (实时读取)
             # Playwright 只支持 png / jpeg，webp 必须先存 PNG 再转换
             pw_format = "PNG" if fmt == "webp" else IMG_FORMAT_MAP.get(fmt, "JPEG")
             shot_kwargs: dict[str, Any] = {"full_page": full_page}
