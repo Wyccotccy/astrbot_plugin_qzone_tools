@@ -4611,6 +4611,35 @@ except Exception as e:
         except Exception as e:
             return None, f"启动浏览器失败: {str(e)[:200]}"
     
+    # ==================== 渲染模式路由（简单浏览器路径） ====================
+
+    # 各模式拦截的资源类型
+    _BLOCKED_RESOURCE_TYPES: dict = {
+        "simplified": {"font", "media"},
+        "minimal": {"font", "media", "stylesheet", "image"},
+        "text_only": {"font", "media", "stylesheet", "image", "script"},
+    }
+
+    async def _apply_simple_browser_render_mode(self, page):
+        """给简单浏览器路径的页面绑定渲染模式路由。"""
+        mode = self.config.get("browser_render_mode", "full")
+        blocked = self._BLOCKED_RESOURCE_TYPES.get(mode, set())
+        if not blocked:
+            return
+        try:
+            await page.unroute("**/*")
+        except Exception:
+            pass
+        try:
+            async def _intercept(route):
+                if route.request.resource_type in blocked:
+                    await route.abort()
+                else:
+                    await route.continue_()
+            await page.route("**/*", _intercept)
+        except Exception:
+            pass
+
     async def open_page_tool(self, event: AstrMessageEvent, url: str) -> dict:
         """打开网页"""
         browser, err = await self._get_browser()
@@ -4628,6 +4657,7 @@ except Exception as e:
                 )
             
             page = await self._browser_context.new_page()
+            await self._apply_simple_browser_render_mode(page)
             await page.goto(url, timeout=30000, wait_until='domcontentloaded')
             title = await page.title()
             return {"status": "success", "message": f"已打开: {title or url}"}
@@ -5009,6 +5039,7 @@ except Exception as e:
                 )
             
             page = await self._browser_context.new_page()
+            await self._apply_simple_browser_render_mode(page)
             await page.goto(url, timeout=30000, wait_until='domcontentloaded')
             title = await page.title()
             return {"status": "success", "message": f"已打开: {title or url}"}
