@@ -483,9 +483,10 @@ class BrowserCore:
 
             # 确定截图格式
             fmt = self.image_format  # webp / png / jpg
-            pw_format = IMG_FORMAT_MAP.get(fmt, "JPEG")
+            # Playwright 只支持 png / jpeg，webp 必须先存 PNG 再转换
+            pw_format = "PNG" if fmt == "webp" else IMG_FORMAT_MAP.get(fmt, "JPEG")
             shot_kwargs: dict[str, Any] = {"full_page": full_page}
-            if fmt != "png":
+            if pw_format != "PNG":
                 shot_kwargs["quality"] = min(self.config["screenshot_quality"], 100)
 
             async def _shot():
@@ -501,12 +502,25 @@ class BrowserCore:
                 return None
 
             # ========== 落地到缓存文件 ==========
-            ext = get_output_ext(fmt)
-            file_name = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}{ext}"
-            cache_path = self.cache_dir / file_name
-            cache_path.write_bytes(raw)
+            # 先存为 PNG 临时文件，再用 Pillow 转换为目标格式
+            tmp_name = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}.png"
+            tmp_path = self.cache_dir / tmp_name
+            tmp_path.write_bytes(raw)
 
-            return str(cache_path)
+            if fmt != "png":
+                try:
+                    from .image_utils import convert_image_format
+                    final_path = convert_image_format(
+                        str(tmp_path), output_format=fmt,
+                        quality=self.config["screenshot_quality"],
+                        overwrite=True,
+                    )
+                    return final_path
+                except Exception as e:
+                    logger.warning(f"截图格式转换失败，使用 PNG: {e}")
+                    return str(tmp_path)
+            else:
+                return str(tmp_path)
 
     # ======================================================
     # 页面访问

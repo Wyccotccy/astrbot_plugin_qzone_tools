@@ -4696,13 +4696,17 @@ except Exception as e:
                 return {"status": "error", "message": "没有打开的页面"}
             page = pages[-1]
             
-            if not save_path:
-                fmt = get_format_from_config(self.config)
-                ext = get_output_ext(fmt)
-                save_path = os.path.join(self.workspace_dir, f"screenshot_{int(time.time())}{ext}")
+            fmt = get_format_from_config(self.config)
+            # Playwright 只支持 png / jpeg，先存 PNG 再转换
+            tmp_path = os.path.join(self.workspace_dir, f"screenshot_{int(time.time())}.png")
             
-            await page.screenshot(path=save_path, full_page=False)
-            save_path = self._convert_image(save_path)
+            await page.screenshot(path=tmp_path, full_page=False)
+            # 转换为目标格式
+            if save_path:
+                import shutil
+                shutil.move(tmp_path, save_path)
+            else:
+                save_path = self._convert_image(tmp_path)
             return {"status": "success", "message": f"截图已保存: {save_path}"}
         except Exception as e:
             return {"status": "error", "message": f"截图失败: {str(e)[:200]}"}
@@ -5071,13 +5075,17 @@ except Exception as e:
                 return {"status": "error", "message": "没有打开的页面"}
             page = pages[-1]
             
-            if not save_path:
-                fmt = get_format_from_config(self.config)
-                ext = get_output_ext(fmt)
-                save_path = os.path.join(self.workspace_dir, f"screenshot_{int(time.time())}{ext}")
+            fmt = get_format_from_config(self.config)
+            # Playwright 只支持 png / jpeg，先存 PNG 再转换
+            tmp_path = os.path.join(self.workspace_dir, f"screenshot_{int(time.time())}.png")
             
-            await page.screenshot(path=save_path, full_page=False)
-            save_path = self._convert_image(save_path)
+            await page.screenshot(path=tmp_path, full_page=False)
+            # 转换为目标格式
+            if save_path:
+                import shutil
+                shutil.move(tmp_path, save_path)
+            else:
+                save_path = self._convert_image(tmp_path)
             return {"status": "success", "message": f"截图已保存: {save_path}"}
         except Exception as e:
             return {"status": "error", "message": f"截图失败: {str(e)[:200]}"}
