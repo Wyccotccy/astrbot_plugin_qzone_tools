@@ -527,7 +527,7 @@ class BrowserCore:
             # 确定截图格式
             fmt = get_format_from_config(self.config)  # webp / png / jpg (实时读取)
             # Playwright 只支持 png / jpeg，webp 必须先存 PNG 再转换
-            pw_format = "PNG" if fmt == "webp" else IMG_FORMAT_MAP.get(fmt, "JPEG")
+            pw_format = "png" if fmt == "webp" else IMG_FORMAT_MAP.get(fmt, "jpeg").lower()
             shot_kwargs: dict[str, Any] = {"full_page": full_page}
             if pw_format != "PNG":
                 shot_kwargs["quality"] = min(self.config.get("screenshot_quality", 80), 100)
