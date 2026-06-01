@@ -385,24 +385,34 @@ class BrowserCore:
         """,
     }
 
+    async def _setup_render_mode_route(self, page: Page):
+        """在页面创建时绑定渲染模式路由，之后所有导航自动拦截。"""
+        mode = self.config.get("browser_render_mode", "full")
+        blocked = self._BLOCKED_RESOURCE_TYPES.get(mode, set())
+        if not blocked:
+            return
+        try:
+            # 清除该页面上已有的 **/* 路由
+            await page.unroute("**/*")
+        except Exception:
+            pass
+        try:
+            # 绑定新路由
+            async def _intercept(route):
+                if route.request.resource_type in blocked:
+                    await route.abort()
+                else:
+                    await route.continue_()
+            await page.route("**/*", _intercept)
+        except Exception:
+            pass
+
     async def _apply_render_mode(self, page: Page):
-        """根据渲染模式拦截网络请求 + 注入 CSS。截图前调用。"""
+        """注入渲染模式 CSS（路由已在页面创建时绑定）。"""
         mode = self.config.get("browser_render_mode", "full")
         if mode == "full":
             return
 
-        # 1. 网络层拦截：阻止不需要的资源类型
-        blocked = self._BLOCKED_RESOURCE_TYPES.get(mode, set())
-        if blocked:
-            try:
-                await page.route("**/*", lambda route: (
-                    route.abort() if route.request.resource_type in blocked
-                    else route.continue_()
-                ))
-            except Exception:
-                pass
-
-        # 2. CSS 注入：隐藏残余元素
         css = self._RENDER_MODE_CSS.get(mode)
         if css:
             try:
@@ -437,6 +447,7 @@ class BrowserCore:
         if not self.all_pages:
             # 初始化第一页
             page = await context.new_page()
+            await self._setup_render_mode_route(page)
             await self._safe_await(page.goto(self.config["default_url"]))
             self.all_pages.append(page)
             self.current_index = 0
@@ -570,6 +581,7 @@ class BrowserCore:
                 await self._discard_page(old_page)
 
             page = await self._require_context().new_page()
+            await self._setup_render_mode_route(page)
 
             try:
                 await self._safe_await(
