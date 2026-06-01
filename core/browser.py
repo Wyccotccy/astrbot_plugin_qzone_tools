@@ -368,23 +368,6 @@ class BrowserCore:
         "text_only": {"font", "media", "stylesheet", "image", "script"},
     }
 
-    # 各模式额外注入的 CSS（隐藏不需要的元素）
-    _RENDER_MODE_CSS: dict[str, str | None] = {
-        "simplified": None,
-        "minimal": "video, audio { display: none !important; }",
-        "text_only": """
-            img, video, audio, canvas, svg, iframe,
-            object, embed, picture, source, figure,
-            .icon, .emoji, [role="img"] {
-                visibility: hidden !important;
-                height: 0 !important;
-                width: 0 !important;
-                overflow: hidden !important;
-                display: none !important;
-            }
-        """,
-    }
-
     async def _setup_render_mode_route(self, page: Page):
         """在页面创建时绑定渲染模式路由，之后所有导航自动拦截。"""
         mode = self.config.get("browser_render_mode", "full")
