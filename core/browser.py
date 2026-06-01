@@ -487,7 +487,7 @@ class BrowserCore:
             pw_format = "PNG" if fmt == "webp" else IMG_FORMAT_MAP.get(fmt, "JPEG")
             shot_kwargs: dict[str, Any] = {"full_page": full_page}
             if pw_format != "PNG":
-                shot_kwargs["quality"] = min(self.config["screenshot_quality"], 100)
+                shot_kwargs["quality"] = min(self.config.get("screenshot_quality", 80), 100)
 
             async def _shot():
                 if zoom_factor:
@@ -512,7 +512,7 @@ class BrowserCore:
                     from .image_utils import convert_image_format
                     final_path = convert_image_format(
                         str(tmp_path), output_format=fmt,
-                        quality=self.config["screenshot_quality"],
+                        quality=self.config.get("screenshot_quality", 80),
                         overwrite=True,
                     )
                     return final_path

@@ -184,6 +184,14 @@
                     <label for="llm_screenshot_text_only">LLM截图仅返回纯文本（不返回图片）</label>
                 </div>
                 <p style="font-size:12px;color:#888;margin:-8px 0 12px 28px">适合非多模态模型，开启后截图工具只返回页面文本</p>
+                <div class="field">
+                    <label>截图质量（1-100）</label>
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <input type="range" id="screenshot_quality" min="10" max="100" step="5" value="80" style="flex:1;" oninput="document.getElementById('sq_val').textContent=this.value" />
+                        <span id="sq_val" style="min-width:28px;text-align:center;font-weight:600;">80</span>
+                    </div>
+                    <p style="font-size:12px;color:#888;margin:4px 0 0">仅对 JPG/WEBP 格式生效，PNG 无此参数。数值越高质量越好文件越大</p>
+                </div>
             </div>
             <div class="card" style="margin-top:20px;">
                 <div class="section-title">工作区设置</div>
@@ -490,6 +498,7 @@ if (!window.AstrBotPluginPage) {
                 image_output_format: document.getElementById('image_output_format').value,
                 browser_render_mode: document.getElementById('browser_render_mode').value,
                 llm_screenshot_text_only: document.getElementById('llm_screenshot_text_only').checked,
+                screenshot_quality: parseInt(document.getElementById('screenshot_quality').value),
                 workspace_enabled: document.getElementById('workspace_enabled').checked,
                 workspace_banned_patterns: document.getElementById('workspace_banned_patterns').value.split('\n').filter(p => p.trim()),
                 flash_transfer_dir: document.getElementById('flash_transfer_dir').value || '/tmp/astrbot_flash',

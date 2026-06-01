@@ -477,5 +477,11 @@
     "type": "bool",
     "default": false,
     "hint": "开启后browser_screenshot等工具只返回页面文本，不生成截图"
+  },
+  "screenshot_quality": {
+    "description": "截图质量（1-100），仅对 JPG/WEBP 格式生效，PNG 无此参数",
+    "type": "int",
+    "default": 80,
+    "hint": "数值越高质量越好文件越大，建议 60-90"
   }
 }
