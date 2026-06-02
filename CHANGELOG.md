@@ -49,9 +49,15 @@
 #### WebUI 修复
 - 移除不存在的 `send_file_to_user` 权限配置项
 
+### 🐛 修复
+- **配置持久化修复**：`_conf_schema.json` 缺少所有 v5.0.0 新增的配置 key，导致工作区设置、安全设置、浏览器设置等无法持久化
+  - 根因：AstrBotConfig 通过 schema 决定哪些 key 需要持久化，没有 schema 定义的 key 在 `save_config()` 时被忽略
+  - 修复：`_conf_schema.json` 新增 23 个 key，`CONFIG_SAVE_WHITELIST` 新增 17 个浏览器相关 key
+- **CONFIG_SAVE_WHITELIST 补全**：新增 `browser_type`, `browser_mode`, `cdp_url`, `viewport_size`, `max_pages`, `timeout`, `zoom_factor`, `max_memory_percent`, `idle_timeout`, `monitor_interval` 等浏览器配置项
+
 ### 🔧 改进
 - WebUI 安全设置面板：可视化配置 SSRF 黑名单、图片路径限制、Python 沙箱、Docker 容器名
-- 所有配置变更通过 `self.config.update()` + `self.config.save_config()` 持久化到 `cmd_config.json`
+- 所有配置变更通过 `self.config.update()` + `self.config.save_config()` 持久化到插件配置文件
 
 ---
 
