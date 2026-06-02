@@ -212,6 +212,65 @@
 - `get_ai_characters` - 获取AI语音角色列表
 - `send_ai_voice` - 发送AI语音消息
 
+### 闪传功能
+- `create_flash_task` - 创建闪传任务
+- `get_flash_file_list` - 获取闪传文件列表
+- `get_flash_file_url` - 获取闪传文件下载链接
+- `send_flash_msg` - 发送闪传消息
+- `get_share_link` - 获取文件分享链接
+- `get_fileset_info` - 获取文件集信息
+- `get_fileset_id` - 通过分享码获取文件集ID
+- `download_fileset` - 下载文件集
+
+### 在线文件
+- `get_online_file_msg` - 获取在线文件消息
+- `send_online_file` - 发送在线文件
+- `send_online_folder` - 发送在线文件夹
+- `receive_online_file` - 接收在线文件
+- `refuse_online_file` - 拒绝在线文件
+- `cancel_online_file` - 取消在线文件传输
+
+### 好友管理
+- `delete_friend` - 删除好友
+
+### 工作区
+- `run_python_code` - 在工作区执行Python代码
+- `list_workspace_files` - 列出工作区文件
+- `read_workspace_file` - 读取工作区文件
+- `delete_workspace_file` - 删除工作区文件
+
+### 浏览器（基础）
+- `fetch_url` - 获取网页内容
+- `open_page` - 打开网页
+- `click_element` - 点击网页元素
+- `type_text` - 在输入框输入文字
+- `screenshot_page` - 网页截图
+- `close_page` - 关闭浏览器
+
+### 浏览器（高级）
+- `browser_search` - 搜索网页（百度/必应/谷歌）
+- `browser_visit` - 访问链接
+- `browser_click` - 点击坐标
+- `browser_input` - 输入文字
+- `browser_scroll` - 滚动页面
+- `browser_swipe` - 滑动操作
+- `browser_zoom` - 缩放页面
+- `browser_screenshot` - 截图
+- `browser_back` - 返回上一页
+- `browser_forward` - 下一页
+- `browser_tabs` - 标签页管理
+- `browser_close_tab` - 关闭标签页
+- `browser_close` - 关闭浏览器
+- `browser_chat` - 发送对话
+
+### 收藏夹
+- `browser_favorite_list` - 查看收藏夹
+- `browser_favorite_add` - 添加收藏
+- `browser_favorite_delete` - 删除收藏
+
+### 浏览器安装
+- `browser_install` - 安装浏览器
+
 ## 配置说明
 
 插件支持通过配置文件灵活启用/禁用各个工具，以及调整各项参数。主要配置项包括：
@@ -311,6 +370,10 @@
 | /tool_recall | 引用撤回消息 |
 | /tool_email <收件人> <主题> <内容> | 发送邮件 |
 | /tool_search <关键词> | 搜索联系人 |
+| /tool_list [类型] [limit] | 列出联系人 |
+| /tool_scheduled_list | 列出定时指令 |
+| /tool_scheduled_cancel <ID> | 取消定时指令 |
+| /tool_scheduled_delete <ID> | 删除定时指令 |
 | /ai_characters | 查看AI语音角色 |
 | /ai_voice [角色] <文本> | 发送AI语音 |
 | /ban_user <QQ号> <分钟> | 禁言用户 |
@@ -319,10 +382,34 @@
 | /whole_ban <on/off> | 全体禁言开关 |
 | /set_card <QQ号> <昵称> | 修改群名片 |
 | /send_notice <内容> | 发布群公告 |
+| /del_notice <公告ID> | 删除群公告 |
+| /list_files | 群文件列表 |
+| /delete_group_file <file_id> | 删除群文件 |
+| /group_members | 群成员列表 |
 | /set_admin <QQ号> <on/off> | 设置管理员 |
 | /set_group_name <名称> | 修改群名称 |
+| /list_notices | 公告列表 |
+| /upload_file <路径> [文件名] | 上传群文件 |
+| /create_folder <名称> | 创建文件夹 |
+| /del_folder <ID> | 删除文件夹 |
+| /group_honor [类型] | 群荣誉 |
+| /at_all_remain | @全体剩余次数 |
+| /set_title <QQ号> <头衔> | 专属头衔 |
+| /shut_list | 禁言列表 |
+| /ignore_requests | 忽略列表 |
+| /set_add_option <选项> | 加群验证方式 |
+| /group_sign | 群签到 |
 | /set_qq_avatar [图片] | 设置QQ头像 |
 | /set_profile nickname=xxx personal_note=xxx | 修改个人资料 |
+| /send_like <QQ号> [次数] | 点赞 |
+| /get_group_msg_history [群号] [序号] [数量] | 群历史消息 |
+| /get_friend_msg_history <QQ号> [序号] [数量] | 好友历史消息 |
+| /set_group_portrait [群号] [图片] | 设置群头像 |
+| /fetch_custom_face [数量] | 自定义表情 |
+| /set_input_status <QQ号> <类型> | 输入状态 |
+| /move_group_file <file_id> <目录> <目标> | 移动群文件 |
+| /rename_group_file <file_id> <目录> <名称> | 重命名群文件 |
+| /trans_group_file <file_id> | 传输群文件 |
 | /tool_all_help | 查看完整帮助 |
 
 ## 开发者信息
@@ -393,7 +480,7 @@ MIT License
 Enjoy it! 🎉
 ## ⚠️ 闪传功能配置
 
-使用闪传功能（`create_flash_task`、`download_flash_file` 等）需要配置 **闪传中转目录**。
+使用闪传功能（`create_flash_task`、`download_fileset` 等）需要配置 **闪传中转目录**。
 
 ### 原因
 
@@ -579,4 +666,4 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 
 ### 替代方案
 
-如果闪传功能不可用，你可以使用 `send_message_to_user` 工具直接发送文件给用户。
+如果闪传功能不可用，你可以使用 `send_message` 工具直接发送文件给用户。

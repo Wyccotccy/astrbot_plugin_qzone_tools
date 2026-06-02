@@ -222,6 +222,44 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
                 </div>
                 <div class="field"><label>禁止执行的代码模式（正则表达式，每行一个）</label><textarea id="workspace_banned_patterns" rows="3" placeholder="例如：import os\nsubprocess"></textarea></div>
             </div>
+
+            <!-- 安全设置 -->
+            <div class="card" style="margin-top:20px;">
+                <div class="section-title">🛡️ 安全设置</div>
+                <p style="font-size:0.85rem;color:var(--text-light);margin-bottom:16px;">配置 SSRF 防护、路径限制、代码执行沙箱等安全策略。</p>
+
+                <div style="margin-bottom:20px;">
+                    <strong style="font-size:0.92rem;color:var(--primary);">SSRF 防护</strong>
+                    <p style="font-size:12px;color:#888;margin:4px 0 8px">防止 LLM 通过工具访问内网地址（fetch_url、浏览器访问均受此保护）</p>
+                    <div class="field"><label>自定义阻断 URL（每行一个，支持域名或 IP/CIDR）</label><textarea id="ssrf_custom_blocked_ranges" rows="3" placeholder="例如：\n10.0.0.0/8\ninternal-api.example.com\n192.168.0.0/16"></textarea></div>
+                    <p style="font-size:11px;color:#999;margin:-4px 0 8px">内置黑名单: 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, metadata 等</p>
+                </div>
+
+                <div style="margin-bottom:20px;">
+                    <strong style="font-size:0.92rem;color:var(--primary);">文件路径限制</strong>
+                    <div class="checkbox-wrap">
+                        <input type="checkbox" id="resolve_image_restricted" checked />
+                        <label for="resolve_image_restricted">限制图片读取路径（仅允许工作区目录和 /tmp）</label>
+                    </div>
+                    <p style="font-size:11px;color:#999;margin:-4px 0 0 28px">防止通过图片路径读取系统敏感文件</p>
+                </div>
+
+                <div style="margin-bottom:20px;">
+                    <strong style="font-size:0.92rem;color:var(--primary);">Python 代码执行</strong>
+                    <div class="checkbox-wrap">
+                        <input type="checkbox" id="run_python_sandbox_enabled" />
+                        <label for="run_python_sandbox_enabled">启用增强沙箱（禁止 import 危险模块）</label>
+                    </div>
+                    <p style="font-size:11px;color:#999;margin:-4px 0 0 28px">内置过滤: subprocess, os, sys, shutil, ctypes, __import__, eval, exec</p>
+
+                </div>
+
+                <div style="margin-bottom:20px;">
+                    <strong style="font-size:0.92rem;color:var(--primary);">Docker 配置</strong>
+                    <div class="field"><label>NapCat 容器名称</label><input id="docker_container_name" placeholder="napcat" /></div>
+                    <p style="font-size:11px;color:#999;margin:-4px 0 0">闪传功能中 docker cp 使用的容器名，默认 napcat</p>
+                </div>
+            </div>
             <div class="card" style="margin-top:20px;">
                 <button class="btn" id="saveConfigBtn">保存配置</button>
                 <span id="configLoading" class="loading-text"></span>
@@ -502,6 +540,11 @@ if (!window.AstrBotPluginPage) {
                 workspace_enabled: document.getElementById('workspace_enabled').checked,
                 workspace_banned_patterns: document.getElementById('workspace_banned_patterns').value.split('\n').filter(p => p.trim()),
                 flash_transfer_dir: document.getElementById('flash_transfer_dir').value || '/tmp/astrbot_flash',
+                // 安全
+                ssrf_custom_blocked_ranges: document.getElementById('ssrf_custom_blocked_ranges').value.split('\n').filter(p => p.trim()),
+                resolve_image_restricted: document.getElementById('resolve_image_restricted').checked,
+                run_python_sandbox_enabled: document.getElementById('run_python_sandbox_enabled').checked,
+                docker_container_name: document.getElementById('docker_container_name').value || 'napcat',
             };
         }
 
@@ -515,6 +558,7 @@ if (!window.AstrBotPluginPage) {
                     const el = document.getElementById(key);
                     if (!el) return;
                     if (el.type === 'checkbox') el.checked = val ?? false;
+                    else if (Array.isArray(val)) el.value = val.join('\n');
                     else el.value = val ?? '';
                 });
                 configLoading.textContent = '';
@@ -792,7 +836,7 @@ if (!window.AstrBotPluginPage) {
             '闪传': ['create_flash_task', 'get_flash_file_list', 'get_flash_file_url', 'send_flash_msg', 'get_share_link', 'get_fileset_info', 'get_fileset_id', 'download_fileset'],
             '在线文件': ['get_online_file_msg', 'send_online_file', 'send_online_folder', 'receive_online_file', 'refuse_online_file', 'cancel_online_file'],
             '好友管理': ['delete_friend'],
-            '工作区': ['run_python_code', 'list_workspace_files', 'read_workspace_file', 'delete_workspace_file', 'send_file_to_user'],
+            '工作区': ['run_python_code', 'list_workspace_files', 'read_workspace_file', 'delete_workspace_file'],
             '浏览器': ['fetch_url', 'open_page', 'click_element', 'type_text', 'screenshot_page', 'close_page', 'browser_search', 'browser_visit', 'browser_click', 'browser_input', 'browser_scroll', 'browser_swipe', 'browser_zoom', 'browser_screenshot', 'browser_back', 'browser_forward', 'browser_tabs', 'browser_close_tab', 'browser_close', 'browser_chat', 'browser_favorite_list', 'browser_favorite_add', 'browser_favorite_delete', 'browser_install']
         };
 

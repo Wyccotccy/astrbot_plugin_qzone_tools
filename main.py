@@ -15,9 +15,10 @@ from email.utils import formataddr
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote as url_quote
 
 import aiohttp
+import ipaddress
 from pathlib import Path
 from quart import jsonify, request
 from astrbot.api import logger
@@ -35,6 +36,96 @@ from .core.ticks_overlay import TickOverlay
 from .core.image_utils import convert_image_format, get_format_from_config, get_output_ext
 
 PLUGIN_NAME = "astrbot_plugin_qzone_tools"
+
+
+# ==================== 安全辅助 ====================
+
+# SSRF 黑名单默认值
+DEFAULT_SSRF_BLACKLIST = [
+    "127.0.0.0/8",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10",
+    "0.0.0.0/8",
+    "metadata.google.internal",
+    "169.254.169.254",
+]
+
+# 配置白名单 — 只允许这些字段通过 WebUI 保存
+CONFIG_SAVE_WHITELIST = {
+    "email_sender", "email_authorization_code", "email_smtp_server", "email_smtp_port",
+    "max_memories_per_user", "max_inject_memories", "memory_inject_enabled",
+    "ai_voice_default_character", "ai_voice_max_text_length",
+    "auto_input_status_enabled", "auto_input_status_timeout",
+    "enable_human_typing", "typing_idle_threshold",
+    "typing_initial_delay_min", "typing_initial_delay_max",
+    "enabled", "group_manage_enabled", "kick_enabled", "search_enabled",
+    "inject_tool_prompt_enabled",
+    "image_output_format", "browser_render_mode", "llm_screenshot_text_only",
+    "screenshot_quality",
+    "workspace_enabled", "workspace_banned_patterns", "flash_transfer_dir",
+    "privacy_mode",
+    # 安全
+    "ssrf_blocked_urls", "ssrf_custom_blocked_ranges",
+    "resolve_image_restricted", "run_python_sandbox_enabled",
+    "docker_container_name",
+    "tool_permissions",
+}
+
+
+SENSITIVE_FIELDS = {"email_authorization_code"}
+
+
+def _is_ip_blocked(hostname: str, blocked_ranges: list) -> bool:
+    """检查 hostname 是否命中 SSRF 黑名单。支持 CIDR 和精确域名。"""
+    try:
+        ip = ipaddress.ip_address(hostname)
+        for cidr in blocked_ranges:
+            try:
+                if ip in ipaddress.ip_network(cidr, strict=False):
+                    return True
+            except ValueError:
+                pass
+        return False
+    except ValueError:
+        hn = hostname.lower().strip(".")
+        for entry in blocked_ranges:
+            if "/" in entry:
+                continue
+            if hn == entry.lower():
+                return True
+        return False
+
+
+def _check_ssrf(url: str, blocked_ranges: list) -> Optional[str]:
+    """检查 URL 是否命中 SSRF 黑名单。返回 None=安全，字符串=阻断原因。"""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    if parsed.scheme.lower() not in ("http", "https"):
+        return None
+    hostname = parsed.hostname
+    if not hostname:
+        return None
+    if _is_ip_blocked(hostname, blocked_ranges):
+        return f"URL 被安全策略阻断: {hostname} 命中 SSRF 黑名单"
+    return None
+
+
+def _safe_error_msg(e: Exception) -> str:
+    """返回脱敏的错误信息。"""
+    msg = str(e)
+    msg = re.sub(r"/[/\\w.-]+\.py", "[internal]", msg)
+    msg = re.sub(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", "[redacted]", msg)
+    if len(msg) > 200:
+        msg = msg[:200] + "..."
+    return msg or "操作失败"
 
 
 class MemoryManager:
@@ -364,7 +455,7 @@ class QzoneAPI:
                         return {"success": True, "msg": "发表成功"}
                     return {"success": False, "msg": f"响应: {response_text[:200]}"}
         except Exception as e:
-            return {"success": False, "msg": str(e)}
+            return {"success": False, "msg": _safe_error_msg(e)}
 
 
 class ScheduledTask:
@@ -508,7 +599,7 @@ class QQStatusManager:
                 "end_time": self.status_end_time.strftime("%H:%M:%S")
             }
         except Exception as e:
-            return {"success": False, "msg": f"设置失败: {str(e)}"}
+            return {"success": False, "msg": f"设置失败: {_safe_error_msg(e)}"}
 
     async def _auto_restore_online(self, client, delay_minutes: int):
         try:
@@ -652,7 +743,7 @@ class EmailSender:
         except smtplib.SMTPAuthenticationError:
             return {"success": False, "msg": "登录失败：请检查邮箱地址和授权码"}
         except Exception as e:
-            return {"success": False, "msg": f"发送失败: {str(e)}"}
+            return {"success": False, "msg": f"发送失败: {_safe_error_msg(e)}"}
 
 
 class Main(Star):
@@ -706,6 +797,13 @@ class Main(Star):
         # 闪传中转目录配置
         # 用于在 AstrBot 和 NapCat 容器之间共享文件
         self.flash_transfer_dir = self.config.get("flash_transfer_dir", "/tmp/astrbot_flash")
+        
+        # 安全配置
+        self.ssrf_blocked_urls = self.config.get("ssrf_blocked_urls", [])
+        self.ssrf_custom_blocked_ranges = self.config.get("ssrf_custom_blocked_ranges", [])
+        self.resolve_image_restricted = self.config.get("resolve_image_restricted", True)
+        self.run_python_sandbox_enabled = self.config.get("run_python_sandbox_enabled", False)
+        self.docker_container_name = self.config.get("docker_container_name", "napcat")
         
         # 浏览器管理（统一使用 browser_supervisor）
         # 高级浏览器管理（来自 astrbot_plugin_browser）
@@ -763,10 +861,15 @@ class Main(Star):
     def _get_available_tools(self) -> Dict[str, dict]:
         if not self.config.get("enabled", True):
             return {}
+        tool_perms = self.config.get("tool_permissions", {})
         available = {}
         for name, meta in self._tool_registry.items():
-            if self.tool_enabled.get(name, True):
-                available[name] = meta
+            if not self.tool_enabled.get(name, True):
+                continue
+            perm = tool_perms.get(name, "global")
+            if perm == "disabled":
+                continue
+            available[name] = meta
         return available
 
     def _build_tool_registry(self) -> Dict[str, dict]:
@@ -2572,8 +2675,8 @@ class Main(Star):
             result = await handler(event, **args_dict)
             return result
         except Exception as e:
-            logger.error(f"[run_wyc_tool] 执行工具 {tool_name} 失败: {e}")
-            return {"status": "error", "message": f"工具执行出错: {str(e)}"}
+            logger.error(f"[run_wyc_tool] 执行工具 {tool_name} 失败: {e}", exc_info=True)
+            return {"status": "error", "message": f"工具执行出错: {_safe_error_msg(e)}"}
 
     # ==================== WebUI API ====================
     def _register_page_routes(self):
@@ -2596,7 +2699,14 @@ class Main(Star):
             logger.error(f"[QZoneTools] 注册失败: {e}")
 
     async def handle_get_config(self):
-        return jsonify({"success": True, "config": dict(self.config)})
+        cfg = dict(self.config)
+        safe = {}
+        for k, v in cfg.items():
+            if k in SENSITIVE_FIELDS:
+                safe[k] = "***" if v else ""
+            else:
+                safe[k] = v
+        return jsonify({"success": True, "config": safe})
 
     async def handle_save_config(self):
         try:
@@ -2604,15 +2714,29 @@ class Main(Star):
             new_config = data.get("config", {})
             if not isinstance(new_config, dict):
                 return jsonify({"success": False, "error": "格式错误"})
-            # 合并配置，而不是替换（保留工具开关等其他字段）
-            self.config.update(new_config)
+            # 白名单过滤：只允许保存已知字段
+            safe_config = {}
+            for k, v in new_config.items():
+                if k in CONFIG_SAVE_WHITELIST:
+                    safe_config[k] = v
+                else:
+                    logger.warning(f"[WebUI] 忽略未知配置项: {k}")
+            # 合并配置（保留未传入的字段）
+            self.config.update(safe_config)
             if hasattr(self.config, 'save_config') and callable(self.config.save_config):
                 self.config.save_config()
+            # 重新加载运行时状态
             self.tool_enabled = self._load_tool_enabled_flags()
+            self.workspace_banned_patterns = self.config.get("workspace_banned_patterns", [])
+            self.ssrf_blocked_urls = self.config.get("ssrf_blocked_urls", [])
+            self.ssrf_custom_blocked_ranges = self.config.get("ssrf_custom_blocked_ranges", [])
+            self.resolve_image_restricted = self.config.get("resolve_image_restricted", True)
+            self.run_python_sandbox_enabled = self.config.get("run_python_sandbox_enabled", False)
+            self.docker_container_name = self.config.get("docker_container_name", "napcat")
             return jsonify({"success": True, "message": "配置已保存"})
         except Exception as e:
-            logger.error(f"[WebUI] 保存配置失败: {e}", exc_info=True)
-            return jsonify({"success": False, "error": str(e)})
+            logger.error(f"[WebUI] 保存配置失败: {_safe_error_msg(e)}", exc_info=True)
+            return jsonify({"success": False, "error": "保存失败，请查看日志"})
 
     async def handle_get_memories(self):
         try:
@@ -2622,7 +2746,7 @@ class Main(Star):
             return jsonify({"success": True, "memories": memories})
         except Exception as e:
             logger.error(f"[WebUI] 获取记忆失败: {e}", exc_info=True)
-            return jsonify({"success": False, "error": str(e)})
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_delete_memory(self):
         try:
@@ -2633,7 +2757,7 @@ class Main(Star):
             return jsonify({"success": ok, "message": "已删除" if ok else "未找到记忆"})
         except Exception as e:
             logger.error(f"[WebUI] 删除记忆失败: {e}", exc_info=True)
-            return jsonify({"success": False, "error": str(e)})
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_add_memory(self):
         try:
@@ -2652,7 +2776,7 @@ class Main(Star):
             return jsonify({"success": True, "memory_id": memory_id, "message": "记忆已添加"})
         except Exception as e:
             logger.error(f"[WebUI] 添加记忆失败: {e}", exc_info=True)
-            return jsonify({"success": False, "error": str(e)})
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_update_memory(self):
         try:
@@ -2671,7 +2795,7 @@ class Main(Star):
             return jsonify({"success": ok, "message": "已更新" if ok else "未找到记忆"})
         except Exception as e:
             logger.error(f"[WebUI] 更新记忆失败: {e}", exc_info=True)
-            return jsonify({"success": False, "error": str(e)})
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_get_scheduled_messages(self):
         try:
@@ -2688,7 +2812,7 @@ class Main(Star):
             return jsonify({"success": True, "tasks": result})
         except Exception as e:
             logger.error(f"[WebUI] 获取定时消息失败: {e}", exc_info=True)
-            return jsonify({"success": False, "error": str(e)})
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_add_scheduled_message(self):
         try:
@@ -2723,7 +2847,7 @@ class Main(Star):
             return jsonify({"success": True, "task_id": task_id, "message": "定时消息已创建"})
         except Exception as e:
             logger.error(f"[WebUI] 添加定时消息失败: {e}", exc_info=True)
-            return jsonify({"success": False, "error": str(e)})
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_cancel_scheduled_message(self):
         try:
@@ -2742,7 +2866,7 @@ class Main(Star):
             return jsonify({"success": True, "message": "定时消息已取消"})
         except Exception as e:
             logger.error(f"[WebUI] 取消定时消息失败: {e}", exc_info=True)
-            return jsonify({"success": False, "error": str(e)})
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     # ==================== 工作区文件管理 API ====================
 
@@ -2759,7 +2883,7 @@ class Main(Star):
             return jsonify({"success": True, "files": files})
         except Exception as e:
             logger.error(f"[WebUI] 获取文件列表失败: {e}", exc_info=True)
-            return jsonify({"success": False, "error": str(e)})
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_workspace_file_content(self):
         try:
@@ -2775,7 +2899,7 @@ class Main(Star):
             return jsonify({"success": True, "content": content})
         except Exception as e:
             logger.error(f"[WebUI] 读取文件失败: {e}", exc_info=True)
-            return jsonify({"success": False, "error": str(e)})
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_workspace_delete_file(self):
         try:
@@ -2790,7 +2914,7 @@ class Main(Star):
             return jsonify({"success": True, "message": "已删除"})
         except Exception as e:
             logger.error(f"[WebUI] 删除文件失败: {e}", exc_info=True)
-            return jsonify({"success": False, "error": str(e)})
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_workspace_upload_file(self):
         try:
@@ -2806,7 +2930,7 @@ class Main(Star):
             return jsonify({"success": True, "message": "已上传"})
         except Exception as e:
             logger.error(f"[WebUI] 上传文件失败: {e}", exc_info=True)
-            return jsonify({"success": False, "error": str(e)})
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     # ==================== 初始化与生命周期 ====================
 
@@ -2851,6 +2975,7 @@ class Main(Star):
                 "screenshot_quality": self.config.get("screenshot_quality", 80),
                 "zoom_factor": self.config.get("zoom_factor", 1.0),
                 "enable_overlay": self.config.get("enable_overlay", False),
+                "browser_render_mode": self.config.get("browser_render_mode", "full"),
                 "supervisor": {
                     "max_memory_percent": self.config.get("max_memory_percent", 90),
                     "idle_timeout": self.config.get("idle_timeout", 300),
@@ -3180,12 +3305,23 @@ class Main(Star):
         return None
 
     async def _resolve_image_file(self, file: str) -> Optional[str]:
-        """将图片文件转为 base64:// 格式，用于跨容器传递。"""
+        """将图片文件转为 base64:// 格式，用于跨容器传递。安全限制: 仅允许工作区目录和 /tmp。"""
         if not file:
             return None
         if file.startswith("base64://") or file.startswith("http://") or file.startswith("https://"):
             return file
         if os.path.isfile(file):
+            # 路径安全检查
+            if self.resolve_image_restricted:
+                real_path = os.path.realpath(file)
+                allowed_prefixes = (
+                    os.path.realpath(self.workspace_dir),
+                    os.path.realpath(self.flash_transfer_dir),
+                    "/tmp",
+                )
+                if not any(real_path.startswith(p) for p in allowed_prefixes):
+                    logger.warning(f"[QZoneTools] 路径拒绝 (安全限制): {real_path}")
+                    return None
             try:
                 with open(file, 'rb') as f:
                     data = f.read()
@@ -3194,7 +3330,7 @@ class Main(Star):
                 logger.info(f"[QZoneTools] 已转为base64 (源: {os.path.basename(file)})")
                 return "base64://" + encoded
             except Exception as e:
-                logger.error(f"[QZoneTools] 读取图片文件失败: {e}")
+                logger.error(f"[QZoneTools] 读取图片文件失败: {_safe_error_msg(e)}")
                 return None
         return file
 
@@ -3289,7 +3425,7 @@ class Main(Star):
                 await client.call_action('send_private_msg', user_id=int(target_id), message=message)
             return {"status": "success", "message": f"✅ 已发送消息到 {target_id}"}
         except Exception as e:
-            return {"status": "error", "message": f"发送失败: {str(e)}"}
+            return {"status": "error", "message": f"发送失败: {_safe_error_msg(e)}"}
 
     async def schedule_message(self, event: AstrMessageEvent, target_id: str, message: str, send_time: str, chat_type: str = "group") -> dict:
         if not target_id or target_id.strip() == "" or not message or message.strip() == "" or not send_time or send_time.strip() == "":
@@ -3375,7 +3511,7 @@ class Main(Star):
                 await client.call_action('group_poke', group_id=int(group_id), user_id=int(target_qq))
             return {"status": "success", "message": f"✅ 已戳一戳 {target_qq}"}
         except Exception as e:
-            return {"status": "error", "message": f"发送失败: {str(e)}"}
+            return {"status": "error", "message": f"发送失败: {_safe_error_msg(e)}"}
 
     async def update_qq_status(self, event: AstrMessageEvent, status: str, duration_minutes: int, delay_minutes: int = 0) -> dict:
         if not status or status.strip() == "":
@@ -3472,7 +3608,7 @@ class Main(Star):
                     await event.bot.delete_msg(message_id=int(msg_id))
                 return {"status": "success", "message": f"✅ 撤回成功\n• 消息ID: {msg_id}"}
             except Exception as e:
-                return {"status": "error", "message": f"❌ 撤回失败: {str(e)[:200]}"}
+                return {"status": "error", "message": f"❌ 撤回失败: {_safe_error_msg(e)}"}
         # 回退到引用消息模式
         chain = event.get_messages()
         if not chain or len(chain)==0 or not isinstance(chain[0], Reply):
@@ -3488,7 +3624,7 @@ class Main(Star):
                 await event.bot.delete_msg(message_id=int(msg_id))
             return {"status": "success", "message": f"✅ 撤回成功\n• 消息ID: {msg_id}"}
         except Exception as e:
-            return {"status": "error", "message": f"❌ 撤回失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"❌ 撤回失败: {_safe_error_msg(e)}"}
 
     async def send_qq_email_tool(self, event: AstrMessageEvent, to: str, subject: str, content: str, nickname: str = "") -> dict:
         if not to or to.strip() == "" or not subject or subject.strip() == "" or not content or content.strip() == "":
@@ -3517,7 +3653,7 @@ class Main(Star):
                 msg = f"已将消息 {first_seg.id} 添加到群精华"
                 return {"status": "success", "message": msg}
             except Exception as e:
-                return {"status": "error", "message": f"设置精华失败: {str(e)}"}
+                return {"status": "error", "message": f"设置精华失败: {_safe_error_msg(e)}"}
         else:
             return {"status": "error", "message": "请引用要设置为精华的消息"}
 
@@ -3529,7 +3665,7 @@ class Main(Star):
                 msg = f"已将消息 {first_seg.id} 移出群精华"
                 return {"status": "success", "message": msg}
             except Exception as e:
-                return {"status": "error", "message": f"取消精华失败: {str(e)}"}
+                return {"status": "error", "message": f"取消精华失败: {_safe_error_msg(e)}"}
         else:
             return {"status": "error", "message": "请引用要取消精华的消息"}
 
@@ -3548,7 +3684,7 @@ class Main(Star):
                 msg = f"已禁言用户 {user_id}，时长 {minutes} 分钟"
             return {"status": "success", "message": msg}
         except Exception as e:
-            return {"status": "error", "message": f"禁言操作失败: {str(e)}"}
+            return {"status": "error", "message": f"禁言操作失败: {_safe_error_msg(e)}"}
 
     async def set_group_kick(self, event: AiocqhttpMessageEvent, user_id: str) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3562,7 +3698,7 @@ class Main(Star):
             await event.bot.set_group_kick(group_id=int(group_id), user_id=int(user_id), reject_add_request=False)
             return {"status": "success", "message": f"已踢出用户 {user_id}"}
         except Exception as e:
-            return {"status": "error", "message": f"踢人失败: {str(e)}"}
+            return {"status": "error", "message": f"踢人失败: {_safe_error_msg(e)}"}
 
     async def set_group_whole_ban(self, event: AiocqhttpMessageEvent, enable: bool) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3575,7 +3711,7 @@ class Main(Star):
             action = "开启" if enable else "关闭"
             return {"status": "success", "message": f"已{action}全体禁言"}
         except Exception as e:
-            return {"status": "error", "message": f"全体禁言操作失败: {str(e)}"}
+            return {"status": "error", "message": f"全体禁言操作失败: {_safe_error_msg(e)}"}
 
     async def set_group_card(self, event: AiocqhttpMessageEvent, user_id: str, card: str) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3591,7 +3727,7 @@ class Main(Star):
                 msg = f"已取消用户 {user_id} 的群昵称"
             return {"status": "success", "message": msg}
         except Exception as e:
-            return {"status": "error", "message": f"修改群昵称失败: {str(e)}"}
+            return {"status": "error", "message": f"修改群昵称失败: {_safe_error_msg(e)}"}
 
     async def send_group_notice(self, event: AiocqhttpMessageEvent, content: str) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3603,7 +3739,7 @@ class Main(Star):
             await event.bot._send_group_notice(group_id=int(group_id), content=content)
             return {"status": "success", "message": f"群公告已发布：{content}"}
         except Exception as e:
-            return {"status": "error", "message": f"发布公告失败: {str(e)}"}
+            return {"status": "error", "message": f"发布公告失败: {_safe_error_msg(e)}"}
 
     async def delete_group_notice(self, event: AiocqhttpMessageEvent, notice_id: str) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3615,7 +3751,7 @@ class Main(Star):
             await event.bot._del_group_notice(group_id=int(group_id), notice_id=notice_id)
             return {"status": "success", "message": f"已撤回公告 {notice_id}"}
         except Exception as e:
-            return {"status": "error", "message": f"撤回公告失败: {str(e)}"}
+            return {"status": "error", "message": f"撤回公告失败: {_safe_error_msg(e)}"}
 
     async def list_group_files(self, event: AiocqhttpMessageEvent) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3639,7 +3775,7 @@ class Main(Star):
             msg = "\n".join(lines)
             return {"status": "success", "message": msg}
         except Exception as e:
-            return {"status": "error", "message": f"查询文件失败: {str(e)}"}
+            return {"status": "error", "message": f"查询文件失败: {_safe_error_msg(e)}"}
 
     async def delete_group_file(self, event: AiocqhttpMessageEvent, file_id: str = None) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3653,7 +3789,7 @@ class Main(Star):
             await event.bot.delete_group_file(group_id=int(group_id), file_id=file_id)
             return {"status": "success", "message": f"✅ 已删除群文件 {file_id}"}
         except Exception as e:
-            return {"status": "error", "message": f"删除文件失败: {str(e)}"}
+            return {"status": "error", "message": f"删除文件失败: {_safe_error_msg(e)}"}
 
     async def get_group_members_info(self, event: AiocqhttpMessageEvent) -> dict:
         try:
@@ -3678,7 +3814,7 @@ class Main(Star):
             }, ensure_ascii=False, indent=2)
             return {"status": "success", "message": result_json}
         except Exception as e:
-            return {"status": "error", "message": f"获取成员信息失败: {str(e)}"}
+            return {"status": "error", "message": f"获取成员信息失败: {_safe_error_msg(e)}"}
 
     async def set_group_admin(self, event: AiocqhttpMessageEvent, user_id: str, enable: bool) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3694,7 +3830,7 @@ class Main(Star):
             action = "设置为管理员" if enable else "取消管理员"
             return {"status": "success", "message": f"✅ 已{action}用户 {user_id}"}
         except Exception as e:
-            return {"status": "error", "message": f"操作失败: {str(e)}"}
+            return {"status": "error", "message": f"操作失败: {_safe_error_msg(e)}"}
 
     async def set_group_name(self, event: AiocqhttpMessageEvent, group_name: str) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3709,7 +3845,7 @@ class Main(Star):
             await client.call_action('set_group_name', group_id=int(group_id), group_name=group_name)
             return {"status": "success", "message": f"✅ 群名称已修改为：{group_name}"}
         except Exception as e:
-            return {"status": "error", "message": f"操作失败: {str(e)}"}
+            return {"status": "error", "message": f"操作失败: {_safe_error_msg(e)}"}
 
     async def get_group_notice_list(self, event: AiocqhttpMessageEvent) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3735,7 +3871,7 @@ class Main(Star):
                 lines.append(f"• [{notice_id}] {content}... (发布者:{sender_id}, 时间:{time_str})")
             return {"status": "success", "message": "\n".join(lines)}
         except Exception as e:
-            return {"status": "error", "message": f"获取公告失败: {str(e)}"}
+            return {"status": "error", "message": f"获取公告失败: {_safe_error_msg(e)}"}
 
     async def upload_group_file(self, event: AiocqhttpMessageEvent, file_path: str, file_name: str = "") -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3753,7 +3889,7 @@ class Main(Star):
             result = await client.call_action('upload_group_file', group_id=int(group_id), file=file_path, name=name)
             return {"status": "success", "message": f"✅ 文件上传成功，file_id: {result.get('file_id', '未知')}"}
         except Exception as e:
-            return {"status": "error", "message": f"上传失败: {str(e)}"}
+            return {"status": "error", "message": f"上传失败: {_safe_error_msg(e)}"}
 
     async def create_group_file_folder(self, event: AiocqhttpMessageEvent, folder_name: str) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3768,7 +3904,7 @@ class Main(Star):
             result = await client.call_action('create_group_file_folder', group_id=int(group_id), folder_name=folder_name)
             return {"status": "success", "message": f"✅ 文件夹创建成功，ID: {result.get('folder_id', '未知')}"}
         except Exception as e:
-            return {"status": "error", "message": f"创建失败: {str(e)}"}
+            return {"status": "error", "message": f"创建失败: {_safe_error_msg(e)}"}
 
     async def delete_group_folder(self, event: AiocqhttpMessageEvent, folder_id: str) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3783,7 +3919,7 @@ class Main(Star):
             await client.call_action('delete_group_folder', group_id=int(group_id), folder_id=folder_id)
             return {"status": "success", "message": f"✅ 文件夹 {folder_id} 已删除"}
         except Exception as e:
-            return {"status": "error", "message": f"删除失败: {str(e)}"}
+            return {"status": "error", "message": f"删除失败: {_safe_error_msg(e)}"}
 
     async def get_group_honor_info(self, event: AiocqhttpMessageEvent, honor_type: str = "all") -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3812,7 +3948,7 @@ class Main(Star):
                     lines.append(f"{name}: {', '.join(item_strs)}")
             return {"status": "success", "message": "\n".join(lines)}
         except Exception as e:
-            return {"status": "error", "message": f"获取失败: {str(e)}"}
+            return {"status": "error", "message": f"获取失败: {_safe_error_msg(e)}"}
 
     async def get_group_at_all_remain(self, event: AiocqhttpMessageEvent) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3829,7 +3965,7 @@ class Main(Star):
             remain = result.get('remain_at_all_count', 0)
             return {"status": "success", "message": f"@全体成员: {'可用' if can else '不可用'}，剩余次数: {remain}"}
         except Exception as e:
-            return {"status": "error", "message": f"查询失败: {str(e)}"}
+            return {"status": "error", "message": f"查询失败: {_safe_error_msg(e)}"}
 
     async def set_group_special_title(self, event: AiocqhttpMessageEvent, user_id: str, special_title: str) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3847,7 +3983,7 @@ class Main(Star):
             else:
                 return {"status": "success", "message": f"✅ 已取消用户 {user_id} 的专属头衔"}
         except Exception as e:
-            return {"status": "error", "message": f"操作失败: {str(e)}"}
+            return {"status": "error", "message": f"操作失败: {_safe_error_msg(e)}"}
 
     async def get_group_shut_list(self, event: AiocqhttpMessageEvent) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3874,7 +4010,7 @@ class Main(Star):
                 lines.append(f"• {user_id} (剩余: {remain_str})")
             return {"status": "success", "message": "\n".join(lines)}
         except Exception as e:
-            return {"status": "error", "message": f"获取失败: {str(e)}"}
+            return {"status": "error", "message": f"获取失败: {_safe_error_msg(e)}"}
 
     async def get_group_ignore_add_request(self, event: AiocqhttpMessageEvent) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3898,7 +4034,7 @@ class Main(Star):
                 lines.append(f"• {user_id}({nickname}): {comment[:30]}")
             return {"status": "success", "message": "\n".join(lines)}
         except Exception as e:
-            return {"status": "error", "message": f"获取失败: {str(e)}"}
+            return {"status": "error", "message": f"获取失败: {_safe_error_msg(e)}"}
 
     async def set_group_add_option(self, event: AiocqhttpMessageEvent, option: str) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3917,7 +4053,7 @@ class Main(Star):
             await client.call_action('set_group_add_option', group_id=group_id, add_type=add_type)
             return {"status": "success", "message": f"✅ 加群方式已设置为: {option}"}
         except Exception as e:
-            return {"status": "error", "message": f"设置失败: {str(e)}"}
+            return {"status": "error", "message": f"设置失败: {_safe_error_msg(e)}"}
 
     async def send_group_sign(self, event: AiocqhttpMessageEvent) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3932,7 +4068,7 @@ class Main(Star):
             await client.call_action('send_group_sign', group_id=int(group_id))
             return {"status": "success", "message": "✅ 群打卡成功"}
         except Exception as e:
-            return {"status": "error", "message": f"打卡失败: {str(e)}"}
+            return {"status": "error", "message": f"打卡失败: {_safe_error_msg(e)}"}
 
     async def set_qq_avatar(self, event: AiocqhttpMessageEvent, file: str = "") -> dict:
         client = await self._get_client(event)
@@ -3971,7 +4107,7 @@ class Main(Star):
                 return {"status": "success", "message": "✅ 文件移动成功"}
             return {"status": "error", "message": "移动失败"}
         except Exception as e:
-            return {"status": "error", "message": f"移动失败: {str(e)}"}
+            return {"status": "error", "message": f"移动失败: {_safe_error_msg(e)}"}
 
     async def rename_group_file(self, event: AiocqhttpMessageEvent, file_id: str, current_parent_directory: str, new_name: str) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -3989,7 +4125,7 @@ class Main(Star):
                 return {"status": "success", "message": f"✅ 文件已重命名为：{new_name}"}
             return {"status": "error", "message": "重命名失败"}
         except Exception as e:
-            return {"status": "error", "message": f"重命名失败: {str(e)}"}
+            return {"status": "error", "message": f"重命名失败: {_safe_error_msg(e)}"}
 
     async def trans_group_file(self, event: AiocqhttpMessageEvent, file_id: str) -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -4006,7 +4142,7 @@ class Main(Star):
                 return {"status": "success", "message": "✅ 文件传输请求成功"}
             return {"status": "error", "message": "传输失败"}
         except Exception as e:
-            return {"status": "error", "message": f"传输失败: {str(e)}"}
+            return {"status": "error", "message": f"传输失败: {_safe_error_msg(e)}"}
 
     async def send_like_tool(self, event: AstrMessageEvent, user_id: str, times: int = 1) -> dict:
         if not user_id or not user_id.strip():
@@ -4018,7 +4154,7 @@ class Main(Star):
             await client.call_action('send_like', user_id=user_id, times=min(times, 20))
             return {"status": "success", "message": f"✅ 已给 {user_id} 点赞 {times} 次"}
         except Exception as e:
-            return {"status": "error", "message": f"点赞失败: {str(e)}"}
+            return {"status": "error", "message": f"点赞失败: {_safe_error_msg(e)}"}
 
     @staticmethod
     def _format_message_content(message_data) -> str:
@@ -4165,7 +4301,7 @@ class Main(Star):
                 lines.append(f"• {sender}: {content}")
             return {"status": "success", "message": "\n".join(lines)}
         except Exception as e:
-            return {"status": "error", "message": f"获取失败: {type(e).__name__}: {str(e)[:200]}"}
+            return {"status": "error", "message": f"获取失败: {type(e).__name__}: {_safe_error_msg(e)}"}
 
     async def get_friend_msg_history(self, event: AstrMessageEvent, user_id: str, count: int = 20) -> dict:
         if not user_id:
@@ -4186,7 +4322,7 @@ class Main(Star):
                 lines.append(f"• {sender}: {content}")
             return {"status": "success", "message": "\n".join(lines)}
         except Exception as e:
-            return {"status": "error", "message": f"获取失败: {type(e).__name__}: {str(e)[:200]}"}
+            return {"status": "error", "message": f"获取失败: {type(e).__name__}: {_safe_error_msg(e)}"}
 
     async def set_group_portrait(self, event: AiocqhttpMessageEvent, group_id: str = "", file: str = "") -> dict:
         if not self.config.get("group_manage_enabled", True):
@@ -4226,7 +4362,7 @@ class Main(Star):
                 lines.append(f"{i}. {url}")
             return {"status": "success", "message": "\n".join(lines)}
         except Exception as e:
-            return {"status": "error", "message": f"获取失败: {str(e)}"}
+            return {"status": "error", "message": f"获取失败: {_safe_error_msg(e)}"}
 
     async def set_input_status_tool(self, event: AstrMessageEvent, user_id: str = "", event_type: int = 1) -> dict:
         if not user_id:
@@ -4242,7 +4378,7 @@ class Main(Star):
             status = "输入中" if event_type == 1 else "取消输入"
             return {"status": "success", "message": f"✅ 已设置状态：{status}"}
         except Exception as e:
-            return {"status": "error", "message": f"设置失败: {str(e)}"}
+            return {"status": "error", "message": f"设置失败: {_safe_error_msg(e)}"}
 
     async def get_ai_characters_tool(self, event: AstrMessageEvent) -> dict:
         group_id = event.get_group_id()
@@ -4296,7 +4432,7 @@ class Main(Star):
             return {"status": "success", "message": f"✅ AI 语音已发送（角色ID: {character_id}），内容：{actual_text}"}
         except Exception as e:
             logger.error(f"[AI声聊] 发送失败: {e}")
-            return {"status": "error", "message": f"发送 AI 语音失败: {str(e)}"}
+            return {"status": "error", "message": f"发送 AI 语音失败: {_safe_error_msg(e)}"}
 
     async def search_contacts(self, event: AstrMessageEvent, keyword: str = "", search_type: str = "all") -> dict:
         if not keyword or keyword.strip() == "":
@@ -4390,13 +4526,24 @@ class Main(Star):
                 changes.append(f"签名改为「{personal_note}」")
             return {"status": "success", "message": f"✅ 已修改个人资料：{', '.join(changes)}"}
         except Exception as e:
-            return {"status": "error", "message": f"设置失败: {str(e)}"}
+            return {"status": "error", "message": f"设置失败: {_safe_error_msg(e)}"}
 
     # ==================== 工作区工具处理函数 ====================
 
     def _check_banned_patterns(self, code: str) -> Optional[str]:
-        """检查代码是否包含禁止的模式"""
-        if not self.workspace_banned_patterns:
+        """检查代码是否包含禁止的模式。默认内置危险模块拦截，可追加自定义规则。"""
+        default_banned = [
+            r"\bimport\s+(subprocess|os|sys|shutil|ctypes|multiprocessing|socket|http|ftplib|smtplib)\b",
+            r"\bfrom\s+(subprocess|os|sys|shutil|ctypes|multiprocessing|socket|http|ftplib|smtplib)\s+import\b",
+            r"\b__import__\s*\(",
+            r"\beval\s*\(",
+            r"\bexec\s*\(",
+            r"\bos\.system\s*\(",
+            r"\bos\.popen\s*\(",
+            r"\bcompile\s*\(",
+        ]
+        patterns = default_banned + (self.workspace_banned_patterns or [])
+        if not patterns:
             return None
         import re
         for pattern in self.workspace_banned_patterns:
@@ -4421,14 +4568,16 @@ class Main(Star):
             return {"status": "error", "message": f"代码包含禁止的内容: {banned}"}
         import subprocess
         import tempfile
+        import shlex
         # 获取字体路径
         font_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'fonts', 'NotoSansCJK-Regular.ttc')
         font_config_code = ''
         if os.path.exists(font_path):
+            safe_font_path = shlex.quote(font_path)
             font_config_code = f"""
 # ===== 中文字体自动配置 =====
 import os as _os
-_FONT_PATH = r'{font_path}'
+_FONT_PATH = {safe_font_path}
 
 # 配置 matplotlib
 try:
@@ -4499,7 +4648,7 @@ except Exception as e:
         except subprocess.TimeoutExpired:
             return {"status": "error", "message": "代码执行超时（超过30秒）"}
         except Exception as e:
-            return {"status": "error", "message": f"执行失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"执行失败: {_safe_error_msg(e)}"}
 
     async def list_workspace_files_tool(self, event: AstrMessageEvent) -> dict:
         """列出工作区文件"""
@@ -4520,7 +4669,7 @@ except Exception as e:
                 lines.append(f"📄 {f['name']} ({size_str})")
             return {"status": "success", "message": "\n".join(lines)}
         except Exception as e:
-            return {"status": "error", "message": f"获取文件列表失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"获取文件列表失败: {_safe_error_msg(e)}"}
 
     async def read_workspace_file_tool(self, event: AstrMessageEvent, filename: str) -> dict:
         """读取工作区文件内容"""
@@ -4538,7 +4687,7 @@ except Exception as e:
                 content = content[:3000] + "\n... (内容过长已截断)"
             return {"status": "success", "message": f"文件 {filename} 内容:\n\n{content}"}
         except Exception as e:
-            return {"status": "error", "message": f"读取文件失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"读取文件失败: {_safe_error_msg(e)}"}
 
     async def delete_workspace_file_tool(self, event: AstrMessageEvent, filename: str) -> dict:
         """删除工作区文件"""
@@ -4553,7 +4702,7 @@ except Exception as e:
             os.remove(filepath)
             return {"status": "success", "message": f"已删除文件: {filename}"}
         except Exception as e:
-            return {"status": "error", "message": f"删除文件失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"删除文件失败: {_safe_error_msg(e)}"}
 
     async def fetch_url_tool(self, event: AstrMessageEvent, url: str, max_chars: int = 500) -> dict:
         """获取网页内容"""
@@ -4562,6 +4711,11 @@ except Exception as e:
         try:
             if not url.startswith(('http://', 'https://')):
                 url = 'https://' + url
+            # SSRF 黑名单检查
+            all_blocked = list(DEFAULT_SSRF_BLACKLIST) + list(self.ssrf_blocked_urls) + list(self.ssrf_custom_blocked_ranges)
+            ssrf_reason = _check_ssrf(url, all_blocked)
+            if ssrf_reason:
+                return {"status": "error", "message": f"🚫 {ssrf_reason}"}
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
@@ -4587,7 +4741,7 @@ except Exception as e:
         except asyncio.TimeoutError:
             return {"status": "error", "message": "请求超时"}
         except Exception as e:
-            return {"status": "error", "message": f"获取网页失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"获取网页失败: {_safe_error_msg(e)}"}
 
 
     
@@ -4600,13 +4754,18 @@ except Exception as e:
         try:
             if not url.startswith(('http://', 'https://')):
                 url = 'https://' + url
+            # SSRF 黑名单检查
+            all_blocked = list(DEFAULT_SSRF_BLACKLIST) + list(self.ssrf_blocked_urls) + list(self.ssrf_custom_blocked_ranges)
+            ssrf_reason = _check_ssrf(url, all_blocked)
+            if ssrf_reason:
+                return {"status": "error", "message": f"🚫 {ssrf_reason}"}
             result = await self.browser_supervisor.call("search", url=url)
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
                 return {"status": "success", "message": f"已打开: {url}", "screenshot": screenshot}
             return {"status": "success", "message": f"已打开: {url}"}
         except Exception as e:
-            return {"status": "error", "message": f"打开网页失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"打开网页失败: {_safe_error_msg(e)}"}
 
     async def click_element_tool(self, event: AstrMessageEvent, selector: str) -> dict:
         """点击网页元素（CSS选择器或文字）"""
@@ -4621,7 +4780,7 @@ except Exception as e:
                 return {"status": "success", "message": f"已点击: {selector}", "screenshot": screenshot}
             return {"status": "success", "message": f"已点击: {selector}"}
         except Exception as e:
-            return {"status": "error", "message": f"点击失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"点击失败: {_safe_error_msg(e)}"}
 
     async def type_text_tool(self, event: AstrMessageEvent, selector: str, text: str, press_enter: bool = False) -> dict:
         """在输入框中输入文字"""
@@ -4638,7 +4797,7 @@ except Exception as e:
                 return {"status": "success", "message": f"已输入: {text[:50]}", "screenshot": screenshot}
             return {"status": "success", "message": f"已输入: {text[:50]}"}
         except Exception as e:
-            return {"status": "error", "message": f"输入失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"输入失败: {_safe_error_msg(e)}"}
 
     async def screenshot_page_tool(self, event: AstrMessageEvent, save_path: str = None) -> dict:
         """对当前网页截图"""
@@ -4653,7 +4812,7 @@ except Exception as e:
                     text = await self._extract_page_text(page)
                     return {"status": "success", "message": "页面文本内容（纯文本模式）", "text": text}
             except Exception as e:
-                return {"status": "error", "message": f"提取文本失败: {str(e)[:200]}"}
+                return {"status": "error", "message": f"提取文本失败: {_safe_error_msg(e)}"}
 
         try:
             screenshot = await self.browser_supervisor.call("screenshot")
@@ -4661,12 +4820,17 @@ except Exception as e:
                 # 如果指定了保存路径，复制过去
                 if save_path:
                     import shutil
+                    import os.path as _osp
+                    real_save = _osp.realpath(save_path)
+                    real_ws = _osp.realpath(self.workspace_dir)
+                    if not real_save.startswith(real_ws):
+                        return {"status": "error", "message": "保存路径必须在工作区目录内"}
                     shutil.copy2(screenshot, save_path)
                     return {"status": "success", "message": f"截图已保存: {save_path}"}
                 return {"status": "success", "message": "截图成功", "screenshot": screenshot}
             return {"status": "error", "message": "截图失败"}
         except Exception as e:
-            return {"status": "error", "message": f"截图失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"截图失败: {_safe_error_msg(e)}"}
     
 
 
@@ -4686,7 +4850,7 @@ except Exception as e:
             "谷歌": "https://www.google.com/search?q={keyword}",
         }
         url_template = engine_urls.get(engine, engine_urls["百度"])
-        url = url_template.format(keyword=keyword)
+        url = url_template.format(keyword=url_quote(keyword))
         
         try:
             await self.browser_supervisor.call("search", url=url)
@@ -4696,13 +4860,17 @@ except Exception as e:
                 return {"status": "success", "message": f"已搜索: {keyword}", "screenshot": screenshot}
             return {"status": "success", "message": f"已搜索: {keyword}"}
         except Exception as e:
-            return {"status": "error", "message": f"搜索失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"搜索失败: {_safe_error_msg(e)}"}
 
     async def browser_visit_tool(self, event: AstrMessageEvent, url: str) -> dict:
         """访问指定链接"""
         if not self.browser_supervisor:
             return {"status": "error", "message": "浏览器管理器未初始化"}
-        
+        # SSRF 黑名单检查
+        all_blocked = list(DEFAULT_SSRF_BLACKLIST) + list(self.ssrf_blocked_urls) + list(self.ssrf_custom_blocked_ranges)
+        ssrf_reason = _check_ssrf(url, all_blocked)
+        if ssrf_reason:
+            return {"status": "error", "message": f"🚫 {ssrf_reason}"}
         try:
             await self.browser_supervisor.call("search", url=url)
             screenshot = await self.browser_supervisor.call("screenshot")
@@ -4711,7 +4879,7 @@ except Exception as e:
                 return {"status": "success", "message": f"已访问: {url}", "screenshot": screenshot}
             return {"status": "success", "message": f"已访问: {url}"}
         except Exception as e:
-            return {"status": "error", "message": f"访问失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"访问失败: {_safe_error_msg(e)}"}
 
     async def browser_click_tool(self, event: AstrMessageEvent, x: int, y: int) -> dict:
         """点击页面坐标"""
@@ -4726,7 +4894,7 @@ except Exception as e:
                 return {"status": "success", "message": f"已点击: ({x}, {y})", "screenshot": screenshot}
             return {"status": "success", "message": f"已点击: ({x}, {y})"}
         except Exception as e:
-            return {"status": "error", "message": f"点击失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"点击失败: {_safe_error_msg(e)}"}
 
     async def browser_input_tool(self, event: AstrMessageEvent, text: str, enter: bool = True) -> dict:
         """输入文字"""
@@ -4741,7 +4909,7 @@ except Exception as e:
                 return {"status": "success", "message": f"已输入: {text[:50]}", "screenshot": screenshot}
             return {"status": "success", "message": f"已输入: {text[:50]}"}
         except Exception as e:
-            return {"status": "error", "message": f"输入失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"输入失败: {_safe_error_msg(e)}"}
 
     async def browser_scroll_tool(self, event: AstrMessageEvent, direction: str = "下", distance: int = 1300) -> dict:
         """滚动页面"""
@@ -4756,7 +4924,7 @@ except Exception as e:
                 return {"status": "success", "message": f"已向{direction}滚动{distance}px", "screenshot": screenshot}
             return {"status": "success", "message": f"已向{direction}滚动{distance}px"}
         except Exception as e:
-            return {"status": "error", "message": f"滚动失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"滚动失败: {_safe_error_msg(e)}"}
 
     async def browser_swipe_tool(self, event: AstrMessageEvent, start_x: int, start_y: int, end_x: int, end_y: int) -> dict:
         """滑动操作"""
@@ -4771,7 +4939,7 @@ except Exception as e:
                 return {"status": "success", "message": f"已滑动", "screenshot": screenshot}
             return {"status": "success", "message": f"已滑动"}
         except Exception as e:
-            return {"status": "error", "message": f"滑动失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"滑动失败: {_safe_error_msg(e)}"}
 
     async def browser_zoom_tool(self, event: AstrMessageEvent, scale: float = 1.5) -> dict:
         """缩放页面"""
@@ -4786,7 +4954,7 @@ except Exception as e:
                 return {"status": "success", "message": f"已缩放到 {scale}x", "screenshot": screenshot}
             return {"status": "success", "message": f"已缩放到 {scale}x"}
         except Exception as e:
-            return {"status": "error", "message": f"缩放失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"缩放失败: {_safe_error_msg(e)}"}
 
     async def browser_screenshot_tool(self, event: AstrMessageEvent, full_page: bool = False, zoom_factor: float = None) -> dict:
         """截图"""
@@ -4802,7 +4970,7 @@ except Exception as e:
                     return {"status": "success", "message": "页面文本内容（纯文本模式）", "text": text}
                 return {"status": "error", "message": "无可用页面"}
             except Exception as e:
-                return {"status": "error", "message": f"提取文本失败: {str(e)[:200]}"}
+                return {"status": "error", "message": f"提取文本失败: {_safe_error_msg(e)}"}
         
         try:
             screenshot = await self.browser_supervisor.call("screenshot", full_page=full_page, zoom_factor=zoom_factor)
@@ -4811,7 +4979,7 @@ except Exception as e:
                 return {"status": "success", "message": "截图成功", "screenshot": screenshot}
             return {"status": "error", "message": "截图失败"}
         except Exception as e:
-            return {"status": "error", "message": f"截图失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"截图失败: {_safe_error_msg(e)}"}
 
     async def browser_back_tool(self, event: AstrMessageEvent) -> dict:
         """返回上一页"""
@@ -4826,7 +4994,7 @@ except Exception as e:
                 return {"status": "success", "message": "已返回上一页", "screenshot": screenshot}
             return {"status": "success", "message": "已返回上一页"}
         except Exception as e:
-            return {"status": "error", "message": f"返回失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"返回失败: {_safe_error_msg(e)}"}
 
     async def browser_forward_tool(self, event: AstrMessageEvent) -> dict:
         """前进到下一页"""
@@ -4841,7 +5009,7 @@ except Exception as e:
                 return {"status": "success", "message": "已前进到下一页", "screenshot": screenshot}
             return {"status": "success", "message": "已前进到下一页"}
         except Exception as e:
-            return {"status": "error", "message": f"前进失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"前进失败: {_safe_error_msg(e)}"}
 
     async def browser_tabs_tool(self, event: AstrMessageEvent, index: int = None) -> dict:
         """查看标签页或切换标签页"""
@@ -4863,7 +5031,7 @@ except Exception as e:
                 text = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
                 return {"status": "success", "message": f"标签页列表:\n{text}"}
         except Exception as e:
-            return {"status": "error", "message": f"标签页操作失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"标签页操作失败: {_safe_error_msg(e)}"}
 
     async def browser_close_tab_tool(self, event: AstrMessageEvent, index: int) -> dict:
         """关闭标签页"""
@@ -4874,7 +5042,7 @@ except Exception as e:
             result = await self.browser_supervisor.call("close_tab", index=index - 1)
             return {"status": "success", "message": result or f"已关闭标签页 {index}"}
         except Exception as e:
-            return {"status": "error", "message": f"关闭标签页失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"关闭标签页失败: {_safe_error_msg(e)}"}
 
     async def browser_close_tool(self, event: AstrMessageEvent) -> dict:
         """关闭浏览器"""
@@ -4885,7 +5053,7 @@ except Exception as e:
             await self.browser_supervisor._stop_browser()
             return {"status": "success", "message": "浏览器已关闭"}
         except Exception as e:
-            return {"status": "error", "message": f"关闭浏览器失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"关闭浏览器失败: {_safe_error_msg(e)}"}
 
     async def browser_chat_tool(self, event: AstrMessageEvent, text: str) -> dict:
         """向当前页面发送对话"""
@@ -4900,7 +5068,7 @@ except Exception as e:
                 return {"status": "success", "message": f"已发送: {text[:50]}", "screenshot": screenshot}
             return {"status": "success", "message": f"已发送: {text[:50]}"}
         except Exception as e:
-            return {"status": "error", "message": f"发送失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"发送失败: {_safe_error_msg(e)}"}
 
     async def browser_favorite_list_tool(self, event: AstrMessageEvent) -> dict:
         """查看收藏夹"""
@@ -4945,7 +5113,7 @@ except Exception as e:
                 return {"status": "success", "message": f"{browser_type} 浏览器安装成功"}
             return {"status": "error", "message": f"安装失败: {stderr.decode()[:200]}"}
         except Exception as e:
-            return {"status": "error", "message": f"安装失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"安装失败: {_safe_error_msg(e)}"}
 
     # ==================== 简化版浏览器工具（统一走 browser_supervisor） ====================
 
@@ -4957,27 +5125,32 @@ except Exception as e:
             await self.browser_supervisor._stop_browser()
             return {"status": "success", "message": "浏览器已关闭"}
         except Exception as e:
-            return {"status": "error", "message": f"关闭浏览器失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"关闭浏览器失败: {_safe_error_msg(e)}"}
 
     # ==================== 闪传工具 ====================
 
     async def _copy_file_to_napcat(self, file_path: str) -> str:
         import subprocess
+        import shlex
+        import tempfile as _tmpfile
         filename = os.path.basename(file_path)
+        # 清理文件名，防止路径注入
+        filename = re.sub(r'[^a-zA-Z0-9._\-]', '_', filename)
         # NapCat 容器内的临时目录
         napcat_dest = f"/tmp/{filename}"
+        container_name = self.docker_container_name
         
         try:
             # 使用 docker cp 将文件复制到 napcat 容器
-            cmd = ["docker", "cp", file_path, f"napcat:{napcat_dest}"]
+            cmd = ["docker", "cp", file_path, f"{container_name}:{napcat_dest}"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if result.returncode != 0:
                 logger.error(f"[create_flash_task] docker cp 失败: {result.stderr}")
                 return file_path  # 失败时返回原路径
-            logger.info(f"[create_flash_task] 文件已复制到 napcat 容器: {napcat_dest}")
+            logger.info(f"[create_flash_task] 文件已复制到 {container_name} 容器: {napcat_dest}")
             return napcat_dest
         except Exception as e:
-            logger.error(f"[create_flash_task] docker cp 异常: {e}")
+            logger.error(f"[create_flash_task] docker cp 异常: {_safe_error_msg(e)}")
             return file_path
     
     async def create_flash_task_tool(self, event: AstrMessageEvent, files: str, name: str = None, thumb_path: str = None) -> dict:
@@ -5112,7 +5285,7 @@ except Exception as e:
             return {"status": "success", "message": "\n".join(lines)}
         except Exception as e:
             logger.error(f"[create_flash_task] 失败: {e}", exc_info=True)
-            return {"status": "error", "message": f"创建闪传任务失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"创建闪传任务失败: {_safe_error_msg(e)}"}
 
     async def get_flash_file_list_tool(self, event: AstrMessageEvent, fileset_id: str) -> dict:
         """获取闪传文件列表"""
@@ -5133,7 +5306,7 @@ except Exception as e:
                 return {"status": "success", "message": "\n".join(lines)}
             return {"status": "success", "message": "该闪传任务没有文件"}
         except Exception as e:
-            return {"status": "error", "message": f"获取闪传文件列表失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"获取闪传文件列表失败: {_safe_error_msg(e)}"}
 
     async def get_flash_file_url_tool(self, event: AstrMessageEvent, fileset_id: str, file_name: str = None, file_index: int = None) -> dict:
         """获取闪传文件下载链接"""
@@ -5152,7 +5325,7 @@ except Exception as e:
                 return {"status": "success", "message": f"下载链接: {url}"}
             return {"status": "error", "message": "未获取到下载链接"}
         except Exception as e:
-            return {"status": "error", "message": f"获取闪传链接失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"获取闪传链接失败: {_safe_error_msg(e)}"}
 
     async def send_flash_msg_tool(self, event: AstrMessageEvent, fileset_id: str, user_id: str = None, group_id: str = None) -> dict:
         """发送闪传消息"""
@@ -5169,7 +5342,7 @@ except Exception as e:
             msg_id = result.get('message_id', '') if result else ''
             return {"status": "success", "message": f"✅ 闪传消息已发送\n消息ID: {msg_id}"}
         except Exception as e:
-            return {"status": "error", "message": f"发送闪传消息失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"发送闪传消息失败: {_safe_error_msg(e)}"}
 
     async def get_share_link_tool(self, event: AstrMessageEvent, fileset_id: str) -> dict:
         """获取文件分享链接"""
@@ -5183,7 +5356,7 @@ except Exception as e:
                 return {"status": "success", "message": f"分享链接: {link}"}
             return {"status": "error", "message": "未获取到分享链接"}
         except Exception as e:
-            return {"status": "error", "message": f"获取分享链接失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"获取分享链接失败: {_safe_error_msg(e)}"}
 
     async def get_fileset_info_tool(self, event: AstrMessageEvent, fileset_id: str) -> dict:
         """获取文件集信息"""
@@ -5200,7 +5373,7 @@ except Exception as e:
                 return {"status": "success", "message": "\n".join(lines)}
             return {"status": "success", "message": f"文件集ID: {fileset_id}"}
         except Exception as e:
-            return {"status": "error", "message": f"获取文件集信息失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"获取文件集信息失败: {_safe_error_msg(e)}"}
 
     async def get_fileset_id_tool(self, event: AstrMessageEvent, share_code: str) -> dict:
         """通过分享码获取文件集ID"""
@@ -5214,7 +5387,7 @@ except Exception as e:
                 return {"status": "success", "message": f"文件集ID: {fileset_id}"}
             return {"status": "error", "message": "未找到对应的文件集"}
         except Exception as e:
-            return {"status": "error", "message": f"获取文件集ID失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"获取文件集ID失败: {_safe_error_msg(e)}"}
 
     async def download_fileset_tool(self, event: AstrMessageEvent, fileset_id: str) -> dict:
         """下载文件集并保存到工作区"""
@@ -5248,7 +5421,7 @@ except Exception as e:
             await client.call_action('download_fileset', fileset_id=fileset_id)
             return {"status": "success", "message": f"✅ 文件集下载请求已发送"}
         except Exception as e:
-            return {"status": "error", "message": f"下载文件集失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"下载文件集失败: {_safe_error_msg(e)}"}
 
     async def get_online_file_msg_tool(self, event: AstrMessageEvent, user_id: str) -> dict:
         """获取在线文件消息"""
@@ -5259,7 +5432,7 @@ except Exception as e:
             result = await client.call_action('get_online_file_msg', user_id=user_id)
             return {"status": "success", "message": f"已获取在线文件消息"}
         except Exception as e:
-            return {"status": "error", "message": f"获取在线文件消息失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"获取在线文件消息失败: {_safe_error_msg(e)}"}
 
     async def send_online_file_tool(self, event: AstrMessageEvent, user_id: str, file_path: str, file_name: str = None) -> dict:
         """发送在线文件"""
@@ -5273,7 +5446,7 @@ except Exception as e:
             result = await client.call_action('send_online_file', **params)
             return {"status": "success", "message": f"✅ 文件发送请求已发送"}
         except Exception as e:
-            return {"status": "error", "message": f"发送文件失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"发送文件失败: {_safe_error_msg(e)}"}
 
     async def send_online_folder_tool(self, event: AstrMessageEvent, user_id: str, folder_path: str, folder_name: str = None) -> dict:
         """发送在线文件夹"""
@@ -5287,7 +5460,7 @@ except Exception as e:
             result = await client.call_action('send_online_folder', **params)
             return {"status": "success", "message": f"✅ 文件夹发送请求已发送"}
         except Exception as e:
-            return {"status": "error", "message": f"发送文件夹失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"发送文件夹失败: {_safe_error_msg(e)}"}
 
     async def receive_online_file_tool(self, event: AstrMessageEvent, user_id: str, msg_id: str, element_id: str) -> dict:
         """接收在线文件并保存到工作区"""
@@ -5312,7 +5485,7 @@ except Exception as e:
                 logger.warning(f"[receive_online_file] 下载文件到工作区失败: {inner_e}")
             return {"status": "success", "message": f"✅ 文件接收请求已发送"}
         except Exception as e:
-            return {"status": "error", "message": f"接收文件失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"接收文件失败: {_safe_error_msg(e)}"}
 
     async def refuse_online_file_tool(self, event: AstrMessageEvent, user_id: str, msg_id: str, element_id: str) -> dict:
         """拒绝在线文件"""
@@ -5323,7 +5496,7 @@ except Exception as e:
             result = await client.call_action('refuse_online_file', user_id=user_id, msg_id=msg_id, element_id=element_id)
             return {"status": "success", "message": f"✅ 已拒绝接收文件"}
         except Exception as e:
-            return {"status": "error", "message": f"拒绝文件失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"拒绝文件失败: {_safe_error_msg(e)}"}
 
     async def cancel_online_file_tool(self, event: AstrMessageEvent, user_id: str, msg_id: str) -> dict:
         """取消在线文件传输"""
@@ -5334,7 +5507,7 @@ except Exception as e:
             result = await client.call_action('cancel_online_file', user_id=user_id, msg_id=msg_id)
             return {"status": "success", "message": f"✅ 已取消文件传输"}
         except Exception as e:
-            return {"status": "error", "message": f"取消传输失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"取消传输失败: {_safe_error_msg(e)}"}
 
     async def delete_friend_tool(self, event: AstrMessageEvent, user_id: str, temp_block: bool = False, temp_both_del: bool = False) -> dict:
         """删除好友"""
@@ -5351,13 +5524,15 @@ except Exception as e:
                 msg += "（双向删除）"
             return {"status": "success", "message": msg}
         except Exception as e:
-            return {"status": "error", "message": f"删除好友失败: {str(e)[:200]}"}
+            return {"status": "error", "message": f"删除好友失败: {_safe_error_msg(e)}"}
 
     # ==================== 管理员指令 ====================
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tool_all_help")
     async def admin_all_help(self, event: AstrMessageEvent):
         help_text = """【AstrBot 插件管理命令总览】
+
+═══ 基础命令 ═══
 
 /tool_memory - 记忆管理
   子命令: list [user_id], add <内容> [标签] [重要度], delete <ID>, update <ID> [新内容] [新标签] [重要度], get <ID>
@@ -5401,11 +5576,13 @@ except Exception as e:
 /tool_list [类型] [limit]  类型: all/friend/group
   列出联系人
 
---- AI 声聊命令 ---
+═══ AI 声聊 ═══
+
 /ai_characters  查看可用 AI 语音角色列表
 /ai_voice <角色ID/名称> <文本>  发送 AI 语音消息（仅群聊，角色可选）
 
---- 群管理命令（需 group_manage_enabled=true） ---
+═══ 群管理（需 group_manage_enabled=true）═══
+
 /ban_user <QQ号> <禁言分钟>
 /unban_user <QQ号>
 /kick <QQ号>   (需 kick_enabled=true)
@@ -5416,8 +5593,6 @@ except Exception as e:
 /list_files
 /group_members
 /delete_group_file <file_id>
-
---- 新增群管理指令 ---
 /set_admin <QQ号> <on/off>
 /set_group_name <新群名>
 /list_notices
@@ -5432,52 +5607,57 @@ except Exception as e:
 /set_add_option <allow/need_verify/not_allow>
 /group_sign
 
---- 本次新增功能指令 ---
+═══ 资料与互动 ═══
+
 /set_qq_avatar [图片]  设置QQ头像（引用图片）
-/move_group_file <file_id> <当前目录> <目标目录>  移动群文件
-/rename_group_file <file_id> <当前目录> <新名称>  重命名群文件
-/trans_group_file <file_id>  传输群文件（获取链接）
+/set_profile <nickname=新昵称> [personal_note=新签名]  修改机器人个人资料
 /send_like <QQ号> [次数]  给用户点赞
 /get_group_msg_history [群号] [起始序号] [数量]  获取群历史消息
 /get_friend_msg_history <QQ号> [起始序号] [数量]  获取好友历史消息
 /set_group_portrait [群号] [图片]  设置群头像（引用图片）
 /fetch_custom_face [数量]  获取自定义表情列表
 /set_input_status <QQ号> <类型>  设置输入状态（1=正在输入，2=取消）
-/set_profile <nickname=新昵称> [personal_note=新签名]  修改机器人个人资料
 
---- 新增功能指令（本次更新）---
-/recall [message_id]  撤回消息（支持传入消息ID撤回任意消息，或引用撤回）
+═══ 群文件 ═══
 
-/create_flash_task <文件路径> [任务名]  创建闪传任务
-/get_flash_file_list <文件集ID>  获取闪传文件列表
-/get_flash_file_url <文件集ID> [文件名] [索引]  获取闪传文件下载链接
-/send_flash_msg <文件集ID> [用户QQ] [群号]  发送闪传消息
-/get_share_link <文件集ID>  获取文件分享链接
-/get_fileset_info <文件集ID>  获取文件集信息
-/get_fileset_id <分享码>  通过分享码获取文件集ID
-/download_fileset <文件集ID>  下载文件集
-/get_online_file_msg <用户QQ>  获取在线文件消息
-/send_online_file <用户QQ> <文件路径> [文件名]  发送在线文件
-/send_online_folder <用户QQ> <文件夹路径> [文件夹名]  发送在线文件夹
-/receive_online_file <用户QQ> <消息ID> <元素ID>  接收在线文件
-/refuse_online_file <用户QQ> <消息ID> <元素ID>  拒绝在线文件
-/cancel_online_file <用户QQ> <消息ID>  取消在线文件传输
-/delete_friend <用户QQ> [加入黑名单] [双向删除]  删除好友
+/move_group_file <file_id> <当前目录> <目标目录>  移动群文件
+/rename_group_file <file_id> <当前目录> <新名称>  重命名群文件
+/trans_group_file <file_id>  传输群文件（获取链接）
 
---- 工作区命令 ---
-/run_python_code <代码>  在工作区执行Python代码
-/list_workspace_files  列出工作区文件
-/read_workspace_file <文件名>  读取工作区文件
-/delete_workspace_file <文件名>  删除工作区文件
-/fetch_url <URL> [最大字数]  获取网页内容，默认500字
-/open_page <URL>  打开网页
-/click_element <选择器或文字>  点击网页元素
-/type_text <选择器> <文字> [是否回车]  在输入框输入文字
-/screenshot_page [保存路径]  网页截图
-/close_page  关闭浏览器
+═══ 以下功能仅限 LLM 工具调用（通过 run_wyc_tool）═══
 
-/tool_all_help
-  显示本帮助
+记忆: add_memory, search_memories, update_memory, delete_memory, get_memory_detail
+消息: send_message, schedule_message, cancel_scheduled_message, list_scheduled_messages
+定时指令: create_scheduled_command, list_scheduled_commands, cancel_scheduled_command, delete_scheduled_command
+QQ空间: publish_qzone
+戳一戳/状态: send_poke, update_qq_status, get_qq_status, get_fun_status_list
+消息操作: recall_by_reply
+邮件: send_qq_email
+联系人: search_contacts, list_contacts
+群管理: get_user_group_role, set_essence_msg, delete_essence_msg, set_group_ban,
+       set_group_kick, set_group_whole_ban, set_group_card, send_group_notice,
+       delete_group_notice, get_group_notice_list, list_group_files, delete_group_file,
+       upload_group_file, create_group_file_folder, delete_group_folder, get_group_members_info,
+       set_group_admin, set_group_name, get_group_honor_info, get_group_at_all_remain,
+       set_group_special_title, get_group_shut_list, get_group_ignore_add_request,
+       set_group_add_option, send_group_sign
+资料: set_qq_avatar, set_qq_profile, send_like, get_group_msg_history, get_friend_msg_history,
+      fetch_custom_face, set_input_status, set_group_portrait
+AI语音: get_ai_characters, send_ai_voice
+闪传: create_flash_task, get_flash_file_list, get_flash_file_url, send_flash_msg,
+      get_share_link, get_fileset_info, get_fileset_id, download_fileset
+在线文件: get_online_file_msg, send_online_file, send_online_folder,
+         receive_online_file, refuse_online_file, cancel_online_file
+好友: delete_friend
+工作区: run_python_code, list_workspace_files, read_workspace_file, delete_workspace_file
+浏览器基础: fetch_url, open_page, click_element, type_text, screenshot_page, close_page
+浏览器高级: browser_search, browser_visit, browser_click, browser_input, browser_scroll,
+           browser_swipe, browser_zoom, browser_screenshot, browser_back, browser_forward,
+           browser_tabs, browser_close_tab, browser_close, browser_chat, browser_install
+收藏夹: browser_favorite_list, browser_favorite_add, browser_favorite_delete
+
+═══════════════════════════════════════════
+/tool_all_help  显示本帮助
 """
         await event.send(MessageChain().message(help_text))
 

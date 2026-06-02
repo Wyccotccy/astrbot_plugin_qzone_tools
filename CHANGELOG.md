@@ -1,3 +1,60 @@
+## [5.0.0] - 2026-06-02
+
+### 🔒 安全修复（重大更新）
+
+#### SSRF 防护
+- **新增 `_check_ssrf()`**：所有 HTTP 请求（`fetch_url`、`browser_visit`、`open_page`）自动检查目标地址
+- **内置黑名单**：默认阻止 127.0.0.0/8、10.0.0.0/8、172.16.0.0/12、192.168.0.0/16、169.254.0.0/16、metadata.google.internal 等内网/元数据地址
+- **WebUI 可配置**：支持自定义阻止 IP/URL 和额外 CIDR 范围
+
+#### 图片路径安全
+- **新增 `_resolve_image_file()` 路径限制**：仅允许工作区目录、/tmp、闪传中转目录
+- **WebUI 开关**：`resolve_image_restricted` 可关闭限制
+
+#### Python 沙箱
+- **新增 `run_python_sandbox_enabled`**：可一键禁用 Python 代码执行工具
+- **默认危险模式拦截**：内置 8 个危险代码模式（subprocess、os、sys、shutil、ctypes、__import__、eval、exec），即使用户清空配置也生效
+- **字体路径注入修复**：`shlex.quote()` 防止命令注入
+
+#### 异常信息泄露修复
+- **全局 `_safe_error_msg()`**：替换全部 85+ 处用户可见的 `str(e)`，自动剥离文件路径、IP 地址，截断到 200 字符
+
+#### 截图路径校验
+- `screenshot_page_tool` 新增 `save_path` 校验，仅允许保存到工作区目录
+
+#### Docker 容器名可配置
+- 新增 `docker_container_name` 配置项（默认 `napcat`），不再硬编码
+
+#### 浏览器搜索安全
+- `browser_search_tool` 使用 `url_quote()` 编码关键词，防止 URL 注入
+
+#### 配置端点安全
+- `handle_get_config` 脱敏处理 `email_authorization_code` 字段
+- `handle_save_config` 白名单校验，拒绝未知配置键，防止覆盖敏感数据
+
+#### 工具权限硬拦截
+- `_get_available_tools()` 在 Python 代码层面强制执行权限检查，LLM 无法绕过
+
+### 📝 文档修复
+
+#### tool_all_help 命令帮助重构
+- **移除 26 个幻影斜杠命令**：闪传、在线文件、工作区、浏览器工具是 LLM 工具而非斜杠命令，已改为明确标注
+- **补全全部 103 个 LLM 工具列表**：按功能分类列出所有可用工具
+
+#### README 更新
+- **新增 52 个工具文档**：闪传（8 个）、在线文件（6 个）、好友管理（1 个）、工作区（4 个）、浏览器基础（6 个）、浏览器高级（14 个）、收藏夹（3 个）、浏览器安装（1 个）
+- **管理员命令表**：从 23 行扩展到 51 行，与代码完全对齐
+- **修复幻影引用**：`download_flash_file` → `download_fileset`，`send_message_to_user` → `send_message`
+
+#### WebUI 修复
+- 移除不存在的 `send_file_to_user` 权限配置项
+
+### 🔧 改进
+- WebUI 安全设置面板：可视化配置 SSRF 黑名单、图片路径限制、Python 沙箱、Docker 容器名
+- 所有配置变更通过 `self.config.update()` + `self.config.save_config()` 持久化到 `cmd_config.json`
+
+---
+
 ## [4.6.0] - 2026-06-01
 
 ### ✨ 新增功能

@@ -349,14 +349,62 @@ class BrowserCore:
             @font-face { font-family: initial !important; }
         """,
         "text_only": """
+            /* 1. 杀掉所有布局，回归 inline 流 */
+            * {
+                display: block !important;
+                float: none !important;
+                position: static !important;
+                flex: none !important;
+                grid: none !important;
+                flex-direction: column !important;
+                order: 0 !important;
+            }
+            /* 2. 清除所有视觉装饰 */
+            *, *::before, *::after {
+                backdrop-filter: none !important;
+                -webkit-backdrop-filter: none !important;
+                filter: none !important;
+                animation: none !important;
+                transition: none !important;
+                text-shadow: none !important;
+                box-shadow: none !important;
+                border: none !important;
+                outline: none !important;
+                background: transparent !important;
+                background-image: none !important;
+                background-color: transparent !important;
+                border-radius: 0 !important;
+                color: #000 !important;
+            }
+            /* 3. 清除间距 */
+            * {
+                margin: 0 !important;
+                padding: 0 !important;
+                gap: 0 !important;
+                min-width: 0 !important;
+                min-height: 0 !important;
+                max-width: none !important;
+                max-height: none !important;
+                width: auto !important;
+                height: auto !important;
+            }
+            /* 4. 隐藏所有非文本、非交互元素 */
             img, video, audio, canvas, svg, iframe,
             object, embed, picture, source, figure,
-            .icon, .emoji, [role="img"] {
-                visibility: hidden !important;
-                height: 0 !important;
-                width: 0 !important;
-                overflow: hidden !important;
+            nav, header, footer, aside, section, article,
+            .icon, .emoji, [role="img"],
+            [style*="background-image"],
+            [style*="background: url"] {
                 display: none !important;
+            }
+            /* 5. 保留输入框和按钮的基本可用性 */
+            input, textarea, button, select, a {
+                display: inline !important;
+                padding: 2px 4px !important;
+                border: 1px solid #999 !important;
+                background: #fff !important;
+                width: auto !important;
+                height: auto !important;
             }
         """,
     }
