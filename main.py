@@ -59,21 +59,28 @@ DEFAULT_SSRF_BLACKLIST = [
 CONFIG_SAVE_WHITELIST = {
     "email_sender", "email_authorization_code", "email_smtp_server", "email_smtp_port",
     "max_memories_per_user", "max_inject_memories", "memory_inject_enabled",
+    "max_output_chars", "search_max_chars",
     "ai_voice_default_character", "ai_voice_max_text_length",
     "auto_input_status_enabled", "auto_input_status_timeout",
     "enable_human_typing", "typing_idle_threshold",
     "typing_initial_delay_min", "typing_initial_delay_max",
     "enabled", "group_manage_enabled", "kick_enabled", "search_enabled",
-    "inject_tool_prompt_enabled",
+    "inject_tool_prompt_enabled", "inject_group_role_enabled",
     "image_output_format", "browser_render_mode", "llm_screenshot_text_only",
     "screenshot_quality",
-    "workspace_enabled", "workspace_banned_patterns", "flash_transfer_dir",
     "privacy_mode",
+    # 工作区
+    "workspace_enabled", "workspace_banned_patterns", "flash_transfer_dir",
     # 安全
     "ssrf_blocked_urls", "ssrf_custom_blocked_ranges",
     "resolve_image_restricted", "run_python_sandbox_enabled",
-    "docker_container_name",
+    "docker_container_name", "napcat_container_name",
     "tool_permissions",
+    # 浏览器
+    "browser_type", "browser_mode", "cdp_url", "verify_browser",
+    "default_url", "proxy", "viewport_size", "max_pages",
+    "timeout", "zoom_factor", "max_memory_percent",
+    "idle_timeout", "monitor_interval",
 }
 
 

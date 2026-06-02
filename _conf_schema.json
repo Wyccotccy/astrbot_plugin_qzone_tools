@@ -1,487 +1,638 @@
 {
-  "enabled": {
-    "description": "是否启用插件功能",
-    "type": "bool",
-    "default": true,
-    "hint": "关闭后插件所有功能将不可用"
-  },
-  "memories": {
-    "description": "持久化记忆存储列表（用户可通过WebUI查看和编辑）",
-    "type": "list",
-    "default": [],
-    "items": {
-      "type": "object",
-      "properties": {
-        "id": { "type": "string", "default": "" },
-        "user_id": { "type": "string", "default": "" },
-        "content": { "type": "string", "default": "" },
-        "tags": { "type": "list", "items": { "type": "string" }, "default": [] },
-        "importance": { "type": "int", "default": 5 },
-        "created_at": { "type": "string", "default": "" },
-        "updated_at": { "type": "string", "default": "" }
-      }
+    "enabled": {
+        "description": "是否启用插件功能",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后插件所有功能将不可用"
+    },
+    "memories": {
+        "description": "持久化记忆存储列表（用户可通过WebUI查看和编辑）",
+        "type": "list",
+        "default": [],
+        "items": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "default": ""
+                },
+                "user_id": {
+                    "type": "string",
+                    "default": ""
+                },
+                "content": {
+                    "type": "string",
+                    "default": ""
+                },
+                "tags": {
+                    "type": "list",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": []
+                },
+                "importance": {
+                    "type": "int",
+                    "default": 5
+                },
+                "created_at": {
+                    "type": "string",
+                    "default": ""
+                },
+                "updated_at": {
+                    "type": "string",
+                    "default": ""
+                }
+            }
+        }
+    },
+    "max_memories_per_user": {
+        "description": "每个用户最大记忆数量（超出自动删除最旧的）",
+        "type": "int",
+        "default": 100,
+        "hint": "建议50-200，设为0表示不限制"
+    },
+    "max_inject_memories": {
+        "description": "聊天时自动注入上下文的最大记忆数量",
+        "type": "int",
+        "default": 5,
+        "hint": "建议3-5条，过多会占用LLM上下文长度"
+    },
+    "memory_inject_enabled": {
+        "description": "是否启用记忆自动注入",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，每次对话会自动注入该用户最新的记忆到系统提示词"
+    },
+    "inject_group_role_enabled": {
+        "description": "是否在群聊中自动注入用户身份（成员/管理员/群主）到系统提示词",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，LLM可以知道当前用户在群内的身份"
+    },
+    "group_manage_enabled": {
+        "description": "是否启用群管理功能（禁言、公告、精华、查文件、处理申请、删除文件）",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后所有群管理相关工具和指令将不可用"
+    },
+    "kick_enabled": {
+        "description": "是否允许踢人操作（受 group_manage_enabled 总开关影响）",
+        "type": "bool",
+        "default": true,
+        "hint": "单独控制踢人功能，避免误操作"
+    },
+    "max_output_chars": {
+        "description": "限制工具返回内容的最大字符数，避免超出模型上下文限制",
+        "type": "int",
+        "default": 2000,
+        "hint": "建议1500-3000，设为0表示不限制"
+    },
+    "email_sender": {
+        "description": "发件人QQ邮箱地址",
+        "type": "string",
+        "default": "",
+        "hint": "例如：123456789@qq.com"
+    },
+    "email_authorization_code": {
+        "description": "QQ邮箱授权码（不是登录密码）",
+        "type": "string",
+        "default": "",
+        "hint": "请在QQ邮箱设置-账户中获取16位授权码",
+        "obvious_hint": true
+    },
+    "email_smtp_server": {
+        "description": "SMTP服务器（一般无需修改）",
+        "type": "string",
+        "default": "smtp.qq.com"
+    },
+    "email_smtp_port": {
+        "description": "SMTP端口（SSL）",
+        "type": "int",
+        "default": 465
+    },
+    "search_max_chars": {
+        "description": "搜索联系人返回的最大字符数，避免token消耗过多",
+        "type": "int",
+        "default": 800,
+        "hint": "建议500-1000"
+    },
+    "search_enabled": {
+        "description": "是否启用联系人搜索功能",
+        "type": "bool",
+        "default": true
+    },
+    "ai_voice_default_character": {
+        "description": "AI语音默认角色ID（例如 luoli、yujie）。留空则每次需手动指定或自动选择第一个可用角色",
+        "type": "string",
+        "default": "",
+        "hint": "可通过指令 /ai_characters 查看可用角色ID"
+    },
+    "ai_voice_max_text_length": {
+        "description": "AI语音文本最大长度（腾讯限制约500字符，超出将自动截断）",
+        "type": "int",
+        "default": 500,
+        "hint": "建议不超过500"
+    },
+    "auto_input_status_enabled": {
+        "description": "是否在私聊中自动显示'正在输入'状态",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，机器人被唤醒时会显示'正在输入'，回复完成后取消"
+    },
+    "auto_input_status_timeout": {
+        "description": "自动输入状态超时时间（秒）",
+        "type": "int",
+        "default": 10,
+        "hint": "若未收到回复，多久后自动取消输入状态"
+    },
+    "enable_human_typing": {
+        "description": "是否启用拟人化输入延迟与闪烁（仅私聊生效）",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，机器人会在长时间未对话时随机延迟回复，并模拟真人打字停顿"
+    },
+    "typing_idle_threshold": {
+        "description": "拟人化空闲阈值（秒），距离上次对话超过此时间将触发延迟",
+        "type": "int",
+        "default": 900,
+        "hint": "默认900秒即15分钟"
+    },
+    "typing_initial_delay_min": {
+        "description": "拟人化初始延迟最小值（秒）",
+        "type": "int",
+        "default": 5,
+        "hint": "随机延迟的下限"
+    },
+    "typing_initial_delay_max": {
+        "description": "拟人化初始延迟最大值（秒）",
+        "type": "int",
+        "default": 15,
+        "hint": "随机延迟的上限"
+    },
+    "enable_add_memory": {
+        "description": "启用工具: add_memory (添加记忆)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_search_memories": {
+        "description": "启用工具: search_memories (搜索记忆)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_update_memory": {
+        "description": "启用工具: update_memory (更新记忆)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_delete_memory": {
+        "description": "启用工具: delete_memory (删除记忆)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_get_memory_detail": {
+        "description": "启用工具: get_memory_detail (获取记忆详情)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_send_message": {
+        "description": "启用工具: send_message (发送消息)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_schedule_message": {
+        "description": "启用工具: schedule_message (定时消息)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_cancel_scheduled_message": {
+        "description": "启用工具: cancel_scheduled_message (取消定时消息)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_list_scheduled_messages": {
+        "description": "启用工具: list_scheduled_messages (列出定时消息)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_publish_qzone": {
+        "description": "启用工具: publish_qzone (发QQ空间说说)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_send_poke": {
+        "description": "启用工具: send_poke (戳一戳)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_update_qq_status": {
+        "description": "启用工具: update_qq_status (设置QQ状态)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_get_qq_status": {
+        "description": "启用工具: get_qq_status (获取QQ状态)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_get_fun_status_list": {
+        "description": "启用工具: get_fun_status_list (获取娱乐状态列表)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_create_scheduled_command": {
+        "description": "启用工具: create_scheduled_command (创建高级定时指令)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_list_scheduled_commands": {
+        "description": "启用工具: list_scheduled_commands (列出高级定时指令)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_cancel_scheduled_command": {
+        "description": "启用工具: cancel_scheduled_command (取消高级定时指令)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_delete_scheduled_command": {
+        "description": "启用工具: delete_scheduled_command (删除高级定时指令)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_recall_by_reply": {
+        "description": "启用工具: recall_by_reply (撤回消息)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_send_qq_email": {
+        "description": "启用工具: send_qq_email (发送QQ邮件)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_get_user_group_role": {
+        "description": "启用工具: get_user_group_role (查询群成员身份)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_set_essence_msg": {
+        "description": "启用工具: set_essence_msg (设置精华消息)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_delete_essence_msg": {
+        "description": "启用工具: delete_essence_msg (取消精华消息)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_set_group_ban": {
+        "description": "启用工具: set_group_ban (禁言/解禁)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_set_group_kick": {
+        "description": "启用工具: set_group_kick (踢人)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_set_group_whole_ban": {
+        "description": "启用工具: set_group_whole_ban (全体禁言)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_set_group_card": {
+        "description": "启用工具: set_group_card (修改群名片)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_send_group_notice": {
+        "description": "启用工具: send_group_notice (发布群公告)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_delete_group_notice": {
+        "description": "启用工具: delete_group_notice (删除群公告)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_list_group_files": {
+        "description": "启用工具: list_group_files (查看群文件)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_delete_group_file": {
+        "description": "启用工具: delete_group_file (删除群文件)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_get_group_members_info": {
+        "description": "启用工具: get_group_members_info (获取群成员列表)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_set_group_admin": {
+        "description": "启用工具: set_group_admin (设置/取消管理员)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_set_group_name": {
+        "description": "启用工具: set_group_name (修改群名称)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_get_group_notice_list": {
+        "description": "启用工具: get_group_notice_list (查看群公告列表)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_upload_group_file": {
+        "description": "启用工具: upload_group_file (上传群文件)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_create_group_file_folder": {
+        "description": "启用工具: create_group_file_folder (创建群文件夹)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_delete_group_folder": {
+        "description": "启用工具: delete_group_folder (删除群文件夹)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_get_group_honor_info": {
+        "description": "启用工具: get_group_honor_info (获取群荣誉)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_get_group_at_all_remain": {
+        "description": "启用工具: get_group_at_all_remain (查询@全体剩余次数)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_set_group_special_title": {
+        "description": "启用工具: set_group_special_title (设置专属头衔)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_get_group_shut_list": {
+        "description": "启用工具: get_group_shut_list (获取禁言列表)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_get_group_ignore_add_request": {
+        "description": "启用工具: get_group_ignore_add_request (获取忽略加群请求)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_set_group_add_option": {
+        "description": "启用工具: set_group_add_option (设置加群方式)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_send_group_sign": {
+        "description": "启用工具: send_group_sign (群打卡)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_set_qq_avatar": {
+        "description": "启用工具: set_qq_avatar (设置QQ头像)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_move_group_file": {
+        "description": "启用工具: move_group_file (移动群文件)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_rename_group_file": {
+        "description": "启用工具: rename_group_file (重命名群文件)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_trans_group_file": {
+        "description": "启用工具: trans_group_file (传输群文件)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_send_like": {
+        "description": "启用工具: send_like (点赞)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_get_group_msg_history": {
+        "description": "启用工具: get_group_msg_history (获取群历史消息)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_get_friend_msg_history": {
+        "description": "启用工具: get_friend_msg_history (获取好友历史消息)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_set_group_portrait": {
+        "description": "启用工具: set_group_portrait (设置群头像)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_fetch_custom_face": {
+        "description": "启用工具: fetch_custom_face (获取自定义表情)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_set_input_status": {
+        "description": "启用工具: set_input_status (设置输入状态)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_get_ai_characters": {
+        "description": "启用工具: get_ai_characters (获取AI语音角色)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_send_ai_voice": {
+        "description": "启用工具: send_ai_voice (发送AI语音)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_search_contacts": {
+        "description": "启用工具: search_contacts (搜索联系人)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_list_contacts": {
+        "description": "启用工具: list_contacts (列出联系人)",
+        "type": "bool",
+        "default": true
+    },
+    "enable_set_qq_profile": {
+        "description": "启用工具: set_qq_profile (修改个人资料)",
+        "type": "bool",
+        "default": true
+    },
+    "inject_tool_prompt_enabled": {
+        "description": "是否在每次对话时向LLM自动注入插件工具使用说明（约800-1000 token），建议优先通过人格设定少量注入。启用后每次对话将额外消耗约500 token。",
+        "type": "bool",
+        "default": false,
+        "hint": "启用后每次LLM对话都会额外注入约800-1000字符的工具说明到系统提示词中，建议优先在人格设定中写入必要的工具用法"
+    },
+    "privacy_mode": {
+        "description": "隐私模式（normal=普通模式LLM可看到所有ID, privacy=隐私模式隐藏群号/QQ号等敏感信息）",
+        "type": "string",
+        "default": "normal",
+        "hint": "隐私模式下LLM只能看到群名字，无法看到群号和QQ号"
+    },
+    "image_output_format": {
+        "description": "图片输出格式（截图/生成的图片发送给AI前统一转换为此格式）",
+        "type": "string",
+        "default": "webp",
+        "enum": [
+            "webp",
+            "png",
+            "jpg"
+        ],
+        "hint": "webp体积最小兼容性好，jpg通用，png无损"
+    },
+    "browser_render_mode": {
+        "description": "浏览器渲染模式（影响截图效果和性能占用）",
+        "type": "string",
+        "default": "full",
+        "enum": [
+            "full",
+            "simplified",
+            "minimal",
+            "text_only"
+        ],
+        "hint": "完全=完整渲染；简略=禁用毛玻璃/滤镜；极简=仅保留布局和文字；纯文本=仅文字"
+    },
+    "llm_screenshot_text_only": {
+        "description": "LLM截图是否仅返回纯文本（不返回图片），适合非多模态模型",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后browser_screenshot等工具只返回页面文本，不生成截图"
+    },
+    "screenshot_quality": {
+        "description": "截图质量（1-100），仅对 JPG/WEBP 格式生效，PNG 无此参数",
+        "type": "int",
+        "default": 80,
+        "hint": "数值越高质量越好文件越大，建议 60-90"
+    },
+    "workspace_enabled": {
+        "description": "启用工区功能",
+        "type": "bool",
+        "default": true
+    },
+    "workspace_banned_patterns": {
+        "description": "工作区禁止执行的代码模式（正则表达式列表）",
+        "type": "list",
+        "default": []
+    },
+    "flash_transfer_dir": {
+        "description": "闪传中转目录（Docker环境AstrBot与NapCat共享目录）",
+        "type": "string",
+        "default": "/tmp/astrbot_flash"
+    },
+    "ssrf_blocked_urls": {
+        "description": "SSRF 自定义阻断 URL/IP 列表（域名或IP/CIDR）",
+        "type": "list",
+        "default": []
+    },
+    "ssrf_custom_blocked_ranges": {
+        "description": "SSRF 自定义阻断范围（IP/CIDR格式）",
+        "type": "list",
+        "default": []
+    },
+    "resolve_image_restricted": {
+        "description": "限制图片读取路径（仅允许工作区目录和/tmp）",
+        "type": "bool",
+        "default": true
+    },
+    "run_python_sandbox_enabled": {
+        "description": "启用 Python 增强沙箱（禁止 import 危险模块）",
+        "type": "bool",
+        "default": false
+    },
+    "docker_container_name": {
+        "description": "NapCat Docker 容器名称（闪传功能使用）",
+        "type": "string",
+        "default": "napcat"
+    },
+    "tool_permissions": {
+        "description": "工具权限控制（格式：{\"工具名\": \"global/admin/disabled\"}）",
+        "type": "dict",
+        "default": {}
+    },
+    "browser_type": {
+        "description": "浏览器类型（chromium/firefox/webkit）",
+        "type": "string",
+        "default": "chromium"
+    },
+    "browser_mode": {
+        "description": "浏览器模式（embedded/external）",
+        "type": "string",
+        "default": "embedded"
+    },
+    "cdp_url": {
+        "description": "CDP 远程调试地址（external模式使用）",
+        "type": "string",
+        "default": "http://127.0.0.1:9222"
+    },
+    "verify_browser": {
+        "description": "启动时验证浏览器是否可用",
+        "type": "bool",
+        "default": true
+    },
+    "default_url": {
+        "description": "浏览器默认打开的URL",
+        "type": "string",
+        "default": "https://www.baidu.com"
+    },
+    "proxy": {
+        "description": "浏览器代理地址（留空不使用代理）",
+        "type": "string",
+        "default": ""
+    },
+    "viewport_size": {
+        "description": "浏览器视口大小",
+        "type": "dict",
+        "default": {
+            "width": 1280,
+            "height": 720
+        }
+    },
+    "max_pages": {
+        "description": "浏览器最大标签页数量",
+        "type": "int",
+        "default": 10
+    },
+    "timeout": {
+        "description": "页面加载超时时间（秒）",
+        "type": "int",
+        "default": 30
+    },
+    "zoom_factor": {
+        "description": "页面缩放比例",
+        "type": "float",
+        "default": 1.0
+    },
+    "max_memory_percent": {
+        "description": "浏览器内存使用上限（百分比）",
+        "type": "int",
+        "default": 90
+    },
+    "idle_timeout": {
+        "description": "浏览器空闲超时（秒），超时自动关闭",
+        "type": "int",
+        "default": 300
+    },
+    "monitor_interval": {
+        "description": "浏览器资源监控间隔（秒）",
+        "type": "int",
+        "default": 10
+    },
+    "napcat_container_name": {
+        "description": "NapCat Docker 容器名称（旧配置键，优先使用 docker_container_name）",
+        "type": "string",
+        "default": "napcat"
     }
-  },
-  "max_memories_per_user": {
-    "description": "每个用户最大记忆数量（超出自动删除最旧的）",
-    "type": "int",
-    "default": 100,
-    "hint": "建议50-200，设为0表示不限制"
-  },
-  "max_inject_memories": {
-    "description": "聊天时自动注入上下文的最大记忆数量",
-    "type": "int",
-    "default": 5,
-    "hint": "建议3-5条，过多会占用LLM上下文长度"
-  },
-  "memory_inject_enabled": {
-    "description": "是否启用记忆自动注入",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，每次对话会自动注入该用户最新的记忆到系统提示词"
-  },
-  "inject_group_role_enabled": {
-    "description": "是否在群聊中自动注入用户身份（成员/管理员/群主）到系统提示词",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，LLM可以知道当前用户在群内的身份"
-  },
-  "group_manage_enabled": {
-    "description": "是否启用群管理功能（禁言、公告、精华、查文件、处理申请、删除文件）",
-    "type": "bool",
-    "default": true,
-    "hint": "关闭后所有群管理相关工具和指令将不可用"
-  },
-  "kick_enabled": {
-    "description": "是否允许踢人操作（受 group_manage_enabled 总开关影响）",
-    "type": "bool",
-    "default": true,
-    "hint": "单独控制踢人功能，避免误操作"
-  },
-  "max_output_chars": {
-    "description": "限制工具返回内容的最大字符数，避免超出模型上下文限制",
-    "type": "int",
-    "default": 2000,
-    "hint": "建议1500-3000，设为0表示不限制"
-  },
-  "email_sender": {
-    "description": "发件人QQ邮箱地址",
-    "type": "string",
-    "default": "",
-    "hint": "例如：123456789@qq.com"
-  },
-  "email_authorization_code": {
-    "description": "QQ邮箱授权码（不是登录密码）",
-    "type": "string",
-    "default": "",
-    "hint": "请在QQ邮箱设置-账户中获取16位授权码",
-    "obvious_hint": true
-  },
-  "email_smtp_server": {
-    "description": "SMTP服务器（一般无需修改）",
-    "type": "string",
-    "default": "smtp.qq.com"
-  },
-  "email_smtp_port": {
-    "description": "SMTP端口（SSL）",
-    "type": "int",
-    "default": 465
-  },
-  "search_max_chars": {
-    "description": "搜索联系人返回的最大字符数，避免token消耗过多",
-    "type": "int",
-    "default": 800,
-    "hint": "建议500-1000"
-  },
-  "search_enabled": {
-    "description": "是否启用联系人搜索功能",
-    "type": "bool",
-    "default": true
-  },
-  "ai_voice_default_character": {
-    "description": "AI语音默认角色ID（例如 luoli、yujie）。留空则每次需手动指定或自动选择第一个可用角色",
-    "type": "string",
-    "default": "",
-    "hint": "可通过指令 /ai_characters 查看可用角色ID"
-  },
-  "ai_voice_max_text_length": {
-    "description": "AI语音文本最大长度（腾讯限制约500字符，超出将自动截断）",
-    "type": "int",
-    "default": 500,
-    "hint": "建议不超过500"
-  },
-  "auto_input_status_enabled": {
-    "description": "是否在私聊中自动显示'正在输入'状态",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后，机器人被唤醒时会显示'正在输入'，回复完成后取消"
-  },
-  "auto_input_status_timeout": {
-    "description": "自动输入状态超时时间（秒）",
-    "type": "int",
-    "default": 10,
-    "hint": "若未收到回复，多久后自动取消输入状态"
-  },
-  "enable_human_typing": {
-    "description": "是否启用拟人化输入延迟与闪烁（仅私聊生效）",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后，机器人会在长时间未对话时随机延迟回复，并模拟真人打字停顿"
-  },
-  "typing_idle_threshold": {
-    "description": "拟人化空闲阈值（秒），距离上次对话超过此时间将触发延迟",
-    "type": "int",
-    "default": 900,
-    "hint": "默认900秒即15分钟"
-  },
-  "typing_initial_delay_min": {
-    "description": "拟人化初始延迟最小值（秒）",
-    "type": "int",
-    "default": 5,
-    "hint": "随机延迟的下限"
-  },
-  "typing_initial_delay_max": {
-    "description": "拟人化初始延迟最大值（秒）",
-    "type": "int",
-    "default": 15,
-    "hint": "随机延迟的上限"
-  },
-  "enable_add_memory": {
-    "description": "启用工具: add_memory (添加记忆)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_search_memories": {
-    "description": "启用工具: search_memories (搜索记忆)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_update_memory": {
-    "description": "启用工具: update_memory (更新记忆)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_delete_memory": {
-    "description": "启用工具: delete_memory (删除记忆)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_get_memory_detail": {
-    "description": "启用工具: get_memory_detail (获取记忆详情)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_send_message": {
-    "description": "启用工具: send_message (发送消息)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_schedule_message": {
-    "description": "启用工具: schedule_message (定时消息)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_cancel_scheduled_message": {
-    "description": "启用工具: cancel_scheduled_message (取消定时消息)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_list_scheduled_messages": {
-    "description": "启用工具: list_scheduled_messages (列出定时消息)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_publish_qzone": {
-    "description": "启用工具: publish_qzone (发QQ空间说说)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_send_poke": {
-    "description": "启用工具: send_poke (戳一戳)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_update_qq_status": {
-    "description": "启用工具: update_qq_status (设置QQ状态)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_get_qq_status": {
-    "description": "启用工具: get_qq_status (获取QQ状态)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_get_fun_status_list": {
-    "description": "启用工具: get_fun_status_list (获取娱乐状态列表)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_create_scheduled_command": {
-    "description": "启用工具: create_scheduled_command (创建高级定时指令)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_list_scheduled_commands": {
-    "description": "启用工具: list_scheduled_commands (列出高级定时指令)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_cancel_scheduled_command": {
-    "description": "启用工具: cancel_scheduled_command (取消高级定时指令)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_delete_scheduled_command": {
-    "description": "启用工具: delete_scheduled_command (删除高级定时指令)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_recall_by_reply": {
-    "description": "启用工具: recall_by_reply (撤回消息)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_send_qq_email": {
-    "description": "启用工具: send_qq_email (发送QQ邮件)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_get_user_group_role": {
-    "description": "启用工具: get_user_group_role (查询群成员身份)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_set_essence_msg": {
-    "description": "启用工具: set_essence_msg (设置精华消息)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_delete_essence_msg": {
-    "description": "启用工具: delete_essence_msg (取消精华消息)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_set_group_ban": {
-    "description": "启用工具: set_group_ban (禁言/解禁)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_set_group_kick": {
-    "description": "启用工具: set_group_kick (踢人)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_set_group_whole_ban": {
-    "description": "启用工具: set_group_whole_ban (全体禁言)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_set_group_card": {
-    "description": "启用工具: set_group_card (修改群名片)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_send_group_notice": {
-    "description": "启用工具: send_group_notice (发布群公告)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_delete_group_notice": {
-    "description": "启用工具: delete_group_notice (删除群公告)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_list_group_files": {
-    "description": "启用工具: list_group_files (查看群文件)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_delete_group_file": {
-    "description": "启用工具: delete_group_file (删除群文件)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_get_group_members_info": {
-    "description": "启用工具: get_group_members_info (获取群成员列表)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_set_group_admin": {
-    "description": "启用工具: set_group_admin (设置/取消管理员)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_set_group_name": {
-    "description": "启用工具: set_group_name (修改群名称)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_get_group_notice_list": {
-    "description": "启用工具: get_group_notice_list (查看群公告列表)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_upload_group_file": {
-    "description": "启用工具: upload_group_file (上传群文件)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_create_group_file_folder": {
-    "description": "启用工具: create_group_file_folder (创建群文件夹)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_delete_group_folder": {
-    "description": "启用工具: delete_group_folder (删除群文件夹)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_get_group_honor_info": {
-    "description": "启用工具: get_group_honor_info (获取群荣誉)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_get_group_at_all_remain": {
-    "description": "启用工具: get_group_at_all_remain (查询@全体剩余次数)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_set_group_special_title": {
-    "description": "启用工具: set_group_special_title (设置专属头衔)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_get_group_shut_list": {
-    "description": "启用工具: get_group_shut_list (获取禁言列表)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_get_group_ignore_add_request": {
-    "description": "启用工具: get_group_ignore_add_request (获取忽略加群请求)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_set_group_add_option": {
-    "description": "启用工具: set_group_add_option (设置加群方式)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_send_group_sign": {
-    "description": "启用工具: send_group_sign (群打卡)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_set_qq_avatar": {
-    "description": "启用工具: set_qq_avatar (设置QQ头像)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_move_group_file": {
-    "description": "启用工具: move_group_file (移动群文件)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_rename_group_file": {
-    "description": "启用工具: rename_group_file (重命名群文件)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_trans_group_file": {
-    "description": "启用工具: trans_group_file (传输群文件)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_send_like": {
-    "description": "启用工具: send_like (点赞)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_get_group_msg_history": {
-    "description": "启用工具: get_group_msg_history (获取群历史消息)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_get_friend_msg_history": {
-    "description": "启用工具: get_friend_msg_history (获取好友历史消息)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_set_group_portrait": {
-    "description": "启用工具: set_group_portrait (设置群头像)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_fetch_custom_face": {
-    "description": "启用工具: fetch_custom_face (获取自定义表情)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_set_input_status": {
-    "description": "启用工具: set_input_status (设置输入状态)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_get_ai_characters": {
-    "description": "启用工具: get_ai_characters (获取AI语音角色)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_send_ai_voice": {
-    "description": "启用工具: send_ai_voice (发送AI语音)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_search_contacts": {
-    "description": "启用工具: search_contacts (搜索联系人)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_list_contacts": {
-    "description": "启用工具: list_contacts (列出联系人)",
-    "type": "bool",
-    "default": true
-  },
-  "enable_set_qq_profile": {
-    "description": "启用工具: set_qq_profile (修改个人资料)",
-    "type": "bool",
-    "default": true
-  },
-  "inject_tool_prompt_enabled": {
-    "description": "是否在每次对话时向LLM自动注入插件工具使用说明（约800-1000 token），建议优先通过人格设定少量注入。启用后每次对话将额外消耗约500 token。",
-    "type": "bool",
-    "default": false,
-    "hint": "启用后每次LLM对话都会额外注入约800-1000字符的工具说明到系统提示词中，建议优先在人格设定中写入必要的工具用法"
-  },
-  "privacy_mode": {
-    "description": "隐私模式（normal=普通模式LLM可看到所有ID, privacy=隐私模式隐藏群号/QQ号等敏感信息）",
-    "type": "string",
-    "default": "normal",
-    "hint": "隐私模式下LLM只能看到群名字，无法看到群号和QQ号"
-  },
-  "image_output_format": {
-    "description": "图片输出格式（截图/生成的图片发送给AI前统一转换为此格式）",
-    "type": "string",
-    "default": "webp",
-    "enum": ["webp", "png", "jpg"],
-    "hint": "webp体积最小兼容性好，jpg通用，png无损"
-  },
-  "browser_render_mode": {
-    "description": "浏览器渲染模式（影响截图效果和性能占用）",
-    "type": "string",
-    "default": "full",
-    "enum": ["full", "simplified", "minimal", "text_only"],
-    "hint": "完全=完整渲染；简略=禁用毛玻璃/滤镜；极简=仅保留布局和文字；纯文本=仅文字"
-  },
-  "llm_screenshot_text_only": {
-    "description": "LLM截图是否仅返回纯文本（不返回图片），适合非多模态模型",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后browser_screenshot等工具只返回页面文本，不生成截图"
-  },
-  "screenshot_quality": {
-    "description": "截图质量（1-100），仅对 JPG/WEBP 格式生效，PNG 无此参数",
-    "type": "int",
-    "default": 80,
-    "hint": "数值越高质量越好文件越大，建议 60-90"
-  }
 }
