@@ -58,6 +58,8 @@
 - **CONFIG_SAVE_WHITELIST 补全**：新增 `browser_type`, `browser_mode`, `cdp_url`, `viewport_size`, `max_pages`, `timeout`, `zoom_factor`, `max_memory_percent`, `idle_timeout`, `monitor_interval` 等浏览器配置项
 
 ### 🔧 改进
+- **WebUI 浏览器引擎设置面板**：新增可视化配置浏览器类型、模式、CDP 地址、代理、视口大小、缩放、标签页数、超时等
+- **WebUI 浏览器性能设置面板**：内存使用上限、空闲超时、监控间隔，带滑块和直观说明
 - WebUI 安全设置面板：可视化配置 SSRF 黑名单、图片路径限制、Python 沙箱、Docker 容器名
 - 所有配置变更通过 `self.config.update()` + `self.config.save_config()` 持久化到插件配置文件
 

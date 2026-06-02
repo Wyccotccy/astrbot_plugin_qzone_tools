@@ -194,6 +194,98 @@
                 </div>
             </div>
             <div class="card" style="margin-top:20px;">
+                <div class="section-title">🌐 浏览器引擎设置</div>
+                <p style="font-size:0.85rem;color:var(--text-light);margin-bottom:16px;">配置浏览器内核、连接方式、性能参数等。修改后重启插件生效。</p>
+                <div class="two-col">
+                    <div class="field">
+                        <label>浏览器类型</label>
+                        <select id="browser_type">
+                            <option value="chromium">Chromium（推荐）</option>
+                            <option value="firefox">Firefox</option>
+                            <option value="webkit">WebKit (Safari)</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label>浏览器模式</label>
+                        <select id="browser_mode">
+                            <option value="embedded">内嵌（自动管理，推荐）</option>
+                            <option value="external">外部（连接已有浏览器）</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="field">
+                    <label>CDP 远程调试地址</label>
+                    <input type="text" id="cdp_url" placeholder="http://127.0.0.1:9222" />
+                    <p style="font-size:11px;color:#999;margin:4px 0 0">外部模式下填入浏览器的 CDP 地址，内嵌模式无需填写</p>
+                </div>
+                <div class="field">
+                    <label>默认打开的网址</label>
+                    <input type="text" id="default_url" placeholder="https://www.baidu.com" />
+                </div>
+                <div class="field">
+                    <label>代理地址</label>
+                    <input type="text" id="proxy" placeholder="留空不使用代理" />
+                    <p style="font-size:11px;color:#999;margin:4px 0 0">支持 http/socks5，如 http://127.0.0.1:7890</p>
+                </div>
+                <div class="two-col">
+                    <div class="field">
+                        <label>视口宽度</label>
+                        <input type="number" id="viewport_width" value="1280" min="320" max="3840" />
+                    </div>
+                    <div class="field">
+                        <label>视口高度</label>
+                        <input type="number" id="viewport_height" value="720" min="240" max="2160" />
+                    </div>
+                </div>
+                <p style="font-size:11px;color:#999;margin:-8px 0 12px">浏览器窗口大小，影响截图和页面渲染</p>
+                <div class="two-col">
+                    <div class="field">
+                        <label>最大标签页数</label>
+                        <input type="number" id="max_pages" value="10" min="1" max="50" />
+                    </div>
+                    <div class="field">
+                        <label>页面加载超时（秒）</label>
+                        <input type="number" id="timeout" value="30" min="5" max="120" />
+                    </div>
+                </div>
+                <div class="field">
+                    <label>页面缩放比例</label>
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <input type="range" id="zoom_factor" min="0.5" max="2.0" step="0.1" value="1.0" style="flex:1;" oninput="document.getElementById('zf_val').textContent=this.value" />
+                        <span id="zf_val" style="min-width:32px;text-align:center;font-weight:600;">1.0</span>
+                    </div>
+                    <p style="font-size:11px;color:#999;margin:4px 0 0">1.0=原始大小，0.5=缩小一半，2.0=放大一倍</p>
+                </div>
+                <div class="checkbox-wrap">
+                    <input type="checkbox" id="verify_browser" checked />
+                    <label for="verify_browser">启动时验证浏览器是否可用</label>
+                </div>
+            </div>
+            <div class="card" style="margin-top:20px;">
+                <div class="section-title">⚙️ 浏览器性能设置</div>
+                <p style="font-size:0.85rem;color:var(--text-light);margin-bottom:16px;">控制浏览器内存占用和自动回收策略。</p>
+                <div class="field">
+                    <label>内存使用上限（%）</label>
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <input type="range" id="max_memory_percent" min="30" max="95" step="5" value="90" style="flex:1;" oninput="document.getElementById('mmp_val').textContent=this.value+'%'" />
+                        <span id="mmp_val" style="min-width:40px;text-align:center;font-weight:600;">90%</span>
+                    </div>
+                    <p style="font-size:11px;color:#999;margin:4px 0 0">浏览器内存超过此比例时自动关闭空闲标签页</p>
+                </div>
+                <div class="two-col">
+                    <div class="field">
+                        <label>空闲超时（秒）</label>
+                        <input type="number" id="idle_timeout" value="300" min="60" max="3600" step="30" />
+                        <p style="font-size:11px;color:#999;margin:4px 0 0">无操作后自动关闭浏览器</p>
+                    </div>
+                    <div class="field">
+                        <label>监控间隔（秒）</label>
+                        <input type="number" id="monitor_interval" value="10" min="3" max="60" />
+                        <p style="font-size:11px;color:#999;margin:4px 0 0">检查浏览器资源的频率</p>
+                    </div>
+                </div>
+            </div>
+            <div class="card" style="margin-top:20px;">
                 <div class="section-title">工作区设置</div>
                 <div class="checkbox-wrap"><input type="checkbox" id="workspace_enabled" /><label for="workspace_enabled">启用工区功能</label></div>
                 <div class="form-item">
@@ -545,6 +637,24 @@ if (!window.AstrBotPluginPage) {
                 resolve_image_restricted: document.getElementById('resolve_image_restricted').checked,
                 run_python_sandbox_enabled: document.getElementById('run_python_sandbox_enabled').checked,
                 docker_container_name: document.getElementById('docker_container_name').value || 'napcat',
+                // 浏览器引擎
+                browser_type: document.getElementById('browser_type').value,
+                browser_mode: document.getElementById('browser_mode').value,
+                cdp_url: document.getElementById('cdp_url').value,
+                default_url: document.getElementById('default_url').value,
+                proxy: document.getElementById('proxy').value,
+                viewport_size: {
+                    width: parseInt(document.getElementById('viewport_width').value) || 1280,
+                    height: parseInt(document.getElementById('viewport_height').value) || 720
+                },
+                max_pages: parseInt(document.getElementById('max_pages').value) || 10,
+                timeout: parseInt(document.getElementById('timeout').value) || 30,
+                zoom_factor: parseFloat(document.getElementById('zoom_factor').value) || 1.0,
+                verify_browser: document.getElementById('verify_browser').checked,
+                // 浏览器性能
+                max_memory_percent: parseInt(document.getElementById('max_memory_percent').value) || 90,
+                idle_timeout: parseInt(document.getElementById('idle_timeout').value) || 300,
+                monitor_interval: parseInt(document.getElementById('monitor_interval').value) || 10,
             };
         }
 
@@ -555,6 +665,14 @@ if (!window.AstrBotPluginPage) {
                 if (!res.success) throw new Error(res.error || '加载失败');
                 const cfg = res.config;
                 Object.entries(cfg).forEach(([key, val]) => {
+                    // viewport_size 拆分为 width/height 两个输入框
+                    if (key === 'viewport_size' && val && typeof val === 'object') {
+                        const w = document.getElementById('viewport_width');
+                        const h = document.getElementById('viewport_height');
+                        if (w) w.value = val.width || 1280;
+                        if (h) h.value = val.height || 720;
+                        return;
+                    }
                     const el = document.getElementById(key);
                     if (!el) return;
                     if (el.type === 'checkbox') el.checked = val ?? false;
