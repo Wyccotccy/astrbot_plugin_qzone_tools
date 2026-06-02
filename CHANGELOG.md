@@ -50,6 +50,8 @@
 - 移除不存在的 `send_file_to_user` 权限配置项
 
 ### 🐛 修复
+- **插件载入崩溃修复**：`_conf_schema.json` 中 `viewport_size` 和 `tool_permissions` 的 type 从 `dict` 改为 `object`（AstrBotConfig 不支持 dict 类型）
+- **授权码脱敏修复**：移除 `email_authorization_code` 的 `***` 脱敏，本地 WebUI 用户需要看到真实值
 - **配置持久化修复**：`_conf_schema.json` 缺少所有 v5.0.0 新增的配置 key，导致工作区设置、安全设置、浏览器设置等无法持久化
   - 根因：AstrBotConfig 通过 schema 决定哪些 key 需要持久化，没有 schema 定义的 key 在 `save_config()` 时被忽略
   - 修复：`_conf_schema.json` 新增 23 个 key，`CONFIG_SAVE_WHITELIST` 新增 17 个浏览器相关 key
