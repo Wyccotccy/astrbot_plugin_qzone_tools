@@ -84,7 +84,7 @@ CONFIG_SAVE_WHITELIST = {
 }
 
 
-SENSITIVE_FIELDS = {"email_authorization_code"}
+SENSITIVE_FIELDS = set()  # 本地 WebUI 无需脱敏，用户需要看到真实值
 
 
 def _is_ip_blocked(hostname: str, blocked_ranges: list) -> bool:

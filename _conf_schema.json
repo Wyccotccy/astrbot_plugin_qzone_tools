@@ -559,7 +559,8 @@
     },
     "tool_permissions": {
         "description": "工具权限控制（格式：{\"工具名\": \"global/admin/disabled\"}）",
-        "type": "dict",
+        "type": "object",
+        "items": {},
         "default": {}
     },
     "browser_type": {
@@ -594,7 +595,17 @@
     },
     "viewport_size": {
         "description": "浏览器视口大小",
-        "type": "dict",
+        "type": "object",
+        "items": {
+            "width": {
+                "type": "int",
+                "default": 1280
+            },
+            "height": {
+                "type": "int",
+                "default": 720
+            }
+        },
         "default": {
             "width": 1280,
             "height": 720
