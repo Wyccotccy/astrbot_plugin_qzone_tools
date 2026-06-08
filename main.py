@@ -4576,8 +4576,19 @@ class Main(Star):
         import subprocess
         import tempfile
         import shlex
-        # 获取字体路径
-        font_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'fonts', 'NotoSansCJK-Regular.ttc')
+        # 获取字体路径（不存在则自动下载）
+        font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
+        font_path = os.path.join(font_dir, 'NotoSansCJK-Regular.ttc')
+        if not os.path.exists(font_path):
+            try:
+                os.makedirs(font_dir, exist_ok=True)
+                import urllib.request
+                font_url = 'https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf'
+                print(f'[qzone_tools] 字体不存在，正在下载...')
+                urllib.request.urlretrieve(font_url, font_path)
+                print(f'[qzone_tools] 字体下载完成: {font_path}')
+            except Exception as e:
+                print(f'[qzone_tools] 字体下载失败: {e}')
         font_config_code = ''
         if os.path.exists(font_path):
             safe_font_path = shlex.quote(font_path)
