@@ -4817,23 +4817,43 @@ except Exception as e:
             is_group = any(str(g.get('group_id')) == target_id for g in self._groups_cache)
             chat_type = "group" if is_group else "private"
         try:
+            import base64 as _b64
             ext = os.path.splitext(filename)[1].lower()
             image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
             if as_image and ext in image_exts:
-                # 以图片消息发送
-                msg = f'[CQ:image,file={filepath}]'
+                # 图片转 base64 发送（NapCat CQ 码不支持本地绝对路径）
+                with open(filepath, 'rb') as f:
+                    img_b64 = _b64.b64encode(f.read()).decode('utf-8')
+                msg = f'[CQ:image,file=base64://{img_b64}]'
                 if chat_type == "group":
                     await client.call_action('send_group_msg', group_id=int(target_id), message=msg)
                 else:
                     await client.call_action('send_private_msg', user_id=int(target_id), message=msg)
                 return {"status": "success", "message": f"✅ 已发送图片 {filename} 到 {target_id}"}
             else:
-                # 以文件形式发送（upload_group_file 或 send_online_file）
-                if chat_type == "group":
-                    await client.call_action('upload_group_file', group_id=int(target_id), file=filepath, name=filename)
-                else:
-                    await client.call_action('send_online_file', user_id=int(target_id), file_path=filepath, file_name=filename)
-                return {"status": "success", "message": f"✅ 已发送文件 {filename} 到 {target_id}"}
+                # 非图片或非 as_image：以文件形式发送
+                # 先尝试 upload_group_file/send_online_file（NapCat 原生文件发送）
+                try:
+                    if chat_type == "group":
+                        await client.call_action('upload_group_file', group_id=int(target_id), file=filepath, name=filename)
+                    else:
+                        await client.call_action('send_online_file', user_id=int(target_id), file_path=filepath, file_name=filename)
+                    return {"status": "success", "message": f"✅ 已发送文件 {filename} 到 {target_id}"}
+                except Exception:
+                    # 如果原生文件发送失败（如路径不可达），尝试 base64 方式
+                    with open(filepath, 'rb') as f:
+                        file_b64 = _b64.b64encode(f.read()).decode('utf-8')
+                    file_ext = ext.lstrip('.')
+                    mime_map = {'pdf': 'application/pdf', 'zip': 'application/zip',
+                                'txt': 'text/plain', 'json': 'application/json',
+                                'csv': 'text/csv', 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
+                    mime = mime_map.get(file_ext, 'application/octet-stream')
+                    msg = f'[CQ:file,file=base64://{file_b64},file_name={filename}]'
+                    if chat_type == "group":
+                        await client.call_action('send_group_msg', group_id=int(target_id), message=msg)
+                    else:
+                        await client.call_action('send_private_msg', user_id=int(target_id), message=msg)
+                    return {"status": "success", "message": f"✅ 已发送文件 {filename} 到 {target_id}"}
         except Exception as e:
             return {"status": "error", "message": f"发送失败: {_safe_error_msg(e)}"}
 
