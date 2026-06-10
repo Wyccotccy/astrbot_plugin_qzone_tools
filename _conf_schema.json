@@ -645,5 +645,11 @@
         "description": "NapCat Docker 容器名称（旧配置键，优先使用 docker_container_name）",
         "type": "string",
         "default": "napcat"
+    },
+    "python_run_auto_image_enabled": {
+        "description": "Python代码执行后自动检测生成的图片",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后run_python_code执行完毕会自动检测新生成的图片文件，提示LLM使用read_image查看"
     }
 }

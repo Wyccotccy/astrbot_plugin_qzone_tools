@@ -73,6 +73,7 @@ CONFIG_SAVE_WHITELIST = {
     "workspace_enabled", "workspace_banned_patterns", "flash_transfer_dir",
     # 安全
     "ssrf_blocked_urls", "ssrf_custom_blocked_ranges",
+    "python_run_auto_image_enabled",
     "resolve_image_restricted", "run_python_sandbox_enabled",
     "docker_container_name", "napcat_container_name",
     "tool_permissions",
@@ -847,6 +848,7 @@ class Main(Star):
             "delete_friend": True,
             "run_python_code": True, "list_workspace_files": True,
             "read_workspace_file": True, "delete_workspace_file": True,
+            "read_image": True, "send_file": True,
             "fetch_url": True,
             "open_page": True, "click_element": True, "type_text": True,
             "screenshot_page": True, "close_page": True,
@@ -2246,6 +2248,46 @@ class Main(Star):
                 "读文件", "看文件"
             ],
             "handler": self.read_workspace_file_tool
+        }
+
+        registry["read_image"] = {
+            "name": "read_image",
+            "description": "读取工作区中的图片文件，返回base64编码的图片内容。用于查看Python代码生成的图表、截图等。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "图片文件名，必填"}
+                },
+                "required": ["filename"]
+            },
+            "keywords": [
+                "查看图片", "读取图片", "看图片", "read image", "view image", "图片内容",
+                "看看图", "打开图片", "查看图表", "看图表", "看看生成的图", "看截图",
+                "view chart", "show image", "open image", "check image", "inspect image"
+            ],
+            "handler": self.read_image_tool
+        }
+
+        registry["send_file"] = {
+            "name": "send_file",
+            "description": "将工作区中的文件发送到QQ群或私聊。默认以QQ文件形式发送。图片会以图片消息形式发送。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "工作区文件名，必填"},
+                    "target_id": {"type": "string", "description": "目标群号或QQ号，必填"},
+                    "chat_type": {"type": "string", "description": "聊天类型：group(群聊)/private(私聊)/auto(自动识别)，默认auto"},
+                    "as_image": {"type": "boolean", "description": "是否以图片形式发送（仅支持图片文件），默认false"}
+                },
+                "required": ["filename", "target_id"]
+            },
+            "keywords": [
+                "发送文件", "send file", "发文件", "传文件", "发送图片", "send image",
+                "把文件发", "把图发", "文件发给", "图片发给", "发送到群", "发送到私聊",
+                "deliver file", "share file", "transfer file", "推送文件", "投递文件",
+                "发个工作区文件", "把生成的图发出去", "发过去", "file delivery"
+            ],
+            "handler": self.send_file_tool
         }
 
         registry["delete_workspace_file"] = {
@@ -4658,6 +4700,21 @@ except Exception as e:
                 output += f"\n[stderr]\n{result.stderr}"
             if not output.strip():
                 output = "代码执行完成（无输出）"
+            # 自动检测生成的图片文件
+            auto_image = self.config.get("python_run_auto_image_enabled", True)
+            if auto_image:
+                image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+                new_images = []
+                try:
+                    for f in os.listdir(self.workspace_dir):
+                        fpath = os.path.join(self.workspace_dir, f)
+                        if os.path.isfile(fpath) and os.path.splitext(f)[1].lower() in image_exts:
+                            if os.path.getmtime(fpath) > (time.time() - 35):
+                                new_images.append(f)
+                except Exception:
+                    pass
+                if new_images:
+                    output += f"\n\n🖼️ 检测到生成的图片文件: {', '.join(new_images)}\n💡 使用 read_image 工具查看图片内容。"
             # 限制输出长度
             if len(output) > 2000:
                 output = output[:2000] + "\n... (输出过长已截断)"
@@ -4705,6 +4762,80 @@ except Exception as e:
             return {"status": "success", "message": f"文件 {filename} 内容:\n\n{content}"}
         except Exception as e:
             return {"status": "error", "message": f"读取文件失败: {_safe_error_msg(e)}"}
+
+    async def read_image_tool(self, event: AstrMessageEvent, filename: str) -> dict:
+        """读取工作区图片，返回base64"""
+        import base64
+        if not filename:
+            return {"status": "error", "message": "请提供文件名"}
+        filename = os.path.basename(filename)
+        filepath = os.path.join(self.workspace_dir, filename)
+        if not os.path.exists(filepath):
+            return {"status": "error", "message": f"文件不存在: {filename}"}
+        # 检查是否是图片文件
+        ext = os.path.splitext(filename)[1].lower()
+        image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
+        if ext not in image_exts:
+            return {"status": "error", "message": f"不支持的图片格式: {ext}，支持: {', '.join(sorted(image_exts))}"}
+        try:
+            with open(filepath, 'rb') as f:
+                img_data = f.read()
+            b64 = base64.b64encode(img_data).decode('utf-8')
+            mime = {
+                '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+                '.svg': 'image/svg+xml'
+            }.get(ext, 'image/png')
+            # Truncate if too large (over 1MB)
+            if len(b64) > 1_400_000:
+                return {"status": "error", "message": f"图片过大（{len(img_data)/1024:.0f}KB），无法返回base64"}
+            return {
+                "status": "success",
+                "message": f"图片 {filename} ({len(img_data)/1024:.1f}KB)",
+                "image": f"data:{mime};base64,{b64}"
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"读取图片失败: {_safe_error_msg(e)}"}
+
+    async def send_file_tool(self, event: AstrMessageEvent, filename: str, target_id: str,
+                         chat_type: str = "auto", as_image: bool = False) -> dict:
+        """发送工作区文件到QQ"""
+        if not filename:
+            return {"status": "error", "message": "请提供文件名"}
+        if not target_id:
+            return {"status": "error", "message": "请提供目标群号或QQ号"}
+        filename = os.path.basename(filename)
+        filepath = os.path.join(self.workspace_dir, filename)
+        if not os.path.exists(filepath):
+            return {"status": "error", "message": f"文件不存在: {filename}"}
+        client = await self._get_client(event)
+        if not client:
+            return {"status": "error", "message": "无法获取客户端"}
+        # 自动判断聊天类型
+        if chat_type == "auto":
+            await self._update_contacts_cache(client)
+            is_group = any(str(g.get('group_id')) == target_id for g in self._groups_cache)
+            chat_type = "group" if is_group else "private"
+        try:
+            ext = os.path.splitext(filename)[1].lower()
+            image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+            if as_image and ext in image_exts:
+                # 以图片消息发送
+                msg = f'[CQ:image,file={filepath}]'
+                if chat_type == "group":
+                    await client.call_action('send_group_msg', group_id=int(target_id), message=msg)
+                else:
+                    await client.call_action('send_private_msg', user_id=int(target_id), message=msg)
+                return {"status": "success", "message": f"✅ 已发送图片 {filename} 到 {target_id}"}
+            else:
+                # 以文件形式发送（upload_group_file 或 send_online_file）
+                if chat_type == "group":
+                    await client.call_action('upload_group_file', group_id=int(target_id), file=filepath, name=filename)
+                else:
+                    await client.call_action('send_online_file', user_id=int(target_id), file_path=filepath, file_name=filename)
+                return {"status": "success", "message": f"✅ 已发送文件 {filename} 到 {target_id}"}
+        except Exception as e:
+            return {"status": "error", "message": f"发送失败: {_safe_error_msg(e)}"}
 
     async def delete_workspace_file_tool(self, event: AstrMessageEvent, filename: str) -> dict:
         """删除工作区文件"""
@@ -5666,7 +5797,7 @@ AI语音: get_ai_characters, send_ai_voice
 在线文件: get_online_file_msg, send_online_file, send_online_folder,
          receive_online_file, refuse_online_file, cancel_online_file
 好友: delete_friend
-工作区: run_python_code, list_workspace_files, read_workspace_file, delete_workspace_file
+工作区: run_python_code, list_workspace_files, read_workspace_file, delete_workspace_file, read_image, send_file
 浏览器基础: fetch_url, open_page, click_element, type_text, screenshot_page, close_page
 浏览器高级: browser_search, browser_visit, browser_click, browser_input, browser_scroll,
            browser_swipe, browser_zoom, browser_screenshot, browser_back, browser_forward,
