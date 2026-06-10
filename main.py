@@ -4591,11 +4591,10 @@ class Main(Star):
                 print(f'[qzone_tools] 字体下载失败: {e}')
         font_config_code = ''
         if os.path.exists(font_path):
-            safe_font_path = shlex.quote(font_path)
             font_config_code = f"""
 # ===== 中文字体自动配置 =====
 import os as _os
-_FONT_PATH = {safe_font_path}
+_FONT_PATH = r'{font_path}'
 
 # 配置 matplotlib
 try:
