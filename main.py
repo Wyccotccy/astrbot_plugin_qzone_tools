@@ -2207,7 +2207,7 @@ class Main(Star):
         # ---------- 工作区 ----------
         registry["run_python_code"] = {
             "name": "run_python_code",
-            "description": "在工作区执行Python代码。代码中可以使用workspace_path变量访问工作区目录。",
+            "description": "在工作区执行Python代码。代码中可以使用workspace_path变量访问工作区目录。重要：文件会自动保存到工作区，不要硬编码路径，使用workspace_path变量。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2720,6 +2720,17 @@ class Main(Star):
         except json.JSONDecodeError:
             return {"status": "error", "message": "参数格式错误，必须是有效的 JSON 字符串。"}
         handler = available_tools[tool_name]["handler"]
+        # 校验必填参数
+        tool_params = available_tools[tool_name].get("parameters", {})
+        required = tool_params.get("required", [])
+        missing = [p for p in required if p not in args_dict]
+        if missing:
+            param_desc = []
+            props = tool_params.get("properties", {})
+            for p in missing:
+                desc = props.get(p, {}).get("description", p)
+                param_desc.append(f"{p}({desc})")
+            return {"status": "error", "message": f"缺少必填参数: {', '.join(param_desc)}。请参考工具定义传入正确参数。"}
         try:
             result = await handler(event, **args_dict)
             return result
@@ -4748,12 +4759,12 @@ except Exception as e:
     async def read_workspace_file_tool(self, event: AstrMessageEvent, filename: str) -> dict:
         """读取工作区文件内容"""
         if not filename:
-            return {"status": "error", "message": "请提供文件名"}
+            return {"status": "error", "message": f"请提供文件名。文件需放在工作区: {self.workspace_dir}"}
         # 防止路径穿越
         filename = os.path.basename(filename)
         filepath = os.path.join(self.workspace_dir, filename)
         if not os.path.exists(filepath):
-            return {"status": "error", "message": f"文件不存在: {filename}"}
+            return {"status": "error", "message": f"文件不存在: {filename}（工作区: {self.workspace_dir}）"}
         try:
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
@@ -4763,15 +4774,16 @@ except Exception as e:
         except Exception as e:
             return {"status": "error", "message": f"读取文件失败: {_safe_error_msg(e)}"}
 
-    async def read_image_tool(self, event: AstrMessageEvent, filename: str) -> dict:
+    async def read_image_tool(self, event: AstrMessageEvent, filename: str = None, **kwargs) -> dict:
         """读取工作区图片，返回base64"""
-        import base64
         if not filename:
-            return {"status": "error", "message": "请提供文件名"}
+            filename = kwargs.get('filename') or kwargs.get('file') or kwargs.get('name')
+        if not filename:
+            return {"status": "error", "message": f"请提供文件名参数。图片需放在工作区: {self.workspace_dir}"}
         filename = os.path.basename(filename)
         filepath = os.path.join(self.workspace_dir, filename)
         if not os.path.exists(filepath):
-            return {"status": "error", "message": f"文件不存在: {filename}"}
+            return {"status": "error", "message": f"文件不存在: {filename}（工作区: {self.workspace_dir}）"}
         # 检查是否是图片文件
         ext = os.path.splitext(filename)[1].lower()
         image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
@@ -4797,17 +4809,21 @@ except Exception as e:
         except Exception as e:
             return {"status": "error", "message": f"读取图片失败: {_safe_error_msg(e)}"}
 
-    async def send_file_tool(self, event: AstrMessageEvent, filename: str, target_id: str,
-                         chat_type: str = "auto", as_image: bool = False) -> dict:
+    async def send_file_tool(self, event: AstrMessageEvent, filename: str = None, target_id: str = None,
+                         chat_type: str = "auto", as_image: bool = False, **kwargs) -> dict:
         """发送工作区文件到QQ"""
         if not filename:
-            return {"status": "error", "message": "请提供文件名"}
+            filename = kwargs.get('filename') or kwargs.get('file') or kwargs.get('name')
+        if not target_id:
+            target_id = kwargs.get('target_id') or kwargs.get('target') or kwargs.get('chat_id')
+        if not filename:
+            return {"status": "error", "message": f"请提供文件名。文件需放在工作区: {self.workspace_dir}"}
         if not target_id:
             return {"status": "error", "message": "请提供目标群号或QQ号"}
         filename = os.path.basename(filename)
         filepath = os.path.join(self.workspace_dir, filename)
         if not os.path.exists(filepath):
-            return {"status": "error", "message": f"文件不存在: {filename}"}
+            return {"status": "error", "message": f"文件不存在: {filename}（工作区: {self.workspace_dir}）"}
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
@@ -4860,12 +4876,12 @@ except Exception as e:
     async def delete_workspace_file_tool(self, event: AstrMessageEvent, filename: str) -> dict:
         """删除工作区文件"""
         if not filename:
-            return {"status": "error", "message": "请提供文件名"}
+            return {"status": "error", "message": f"请提供文件名。文件需放在工作区: {self.workspace_dir}"}
         # 防止路径穿越
         filename = os.path.basename(filename)
         filepath = os.path.join(self.workspace_dir, filename)
         if not os.path.exists(filepath):
-            return {"status": "error", "message": f"文件不存在: {filename}"}
+            return {"status": "error", "message": f"文件不存在: {filename}（工作区: {self.workspace_dir}）"}
         try:
             os.remove(filepath)
             return {"status": "success", "message": f"已删除文件: {filename}"}
