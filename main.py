@@ -4606,7 +4606,7 @@ class Main(Star):
         if not patterns:
             return None
         import re
-        for pattern in self.workspace_banned_patterns:
+        for pattern in patterns:
             try:
                 if re.search(pattern, code):
                     return pattern
