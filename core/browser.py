@@ -95,11 +95,10 @@ class BrowserCore:
     # 通用兜底工具
     # ======================================================
 
-    async def _safe_await(self, coro: Coroutine[Any, Any, T], retries: int = 2) -> T:  # type: ignore
+    async def _safe_await(self, coro_factory, retries: int = 2) -> T:  # type: ignore
         """
         Playwright 操作超时重试机制
-        :param coro: 协程
-        :param timeout: 单次操作超时时间
+        :param coro_factory: 无参 callable，每次调用返回一个新的协程（因为协程对象是一次性的）
         :param retries: 重试次数
         """
         timeout_raw = self.config.get("timeout", 30)
@@ -108,14 +107,15 @@ class BrowserCore:
         except (TypeError, ValueError):
             timeout = 30.0
 
+        last_exc = None
         for attempt in range(retries + 1):
             try:
-                return await asyncio.wait_for(coro, timeout)
+                return await asyncio.wait_for(coro_factory(), timeout)
             except asyncio.TimeoutError as e:
+                last_exc = e
                 if attempt < retries:
                     await asyncio.sleep(0.5)  # 等待再重试
-                else:
-                    raise RuntimeError("Playwright 操作超时") from e
+        raise RuntimeError("Playwright 操作超时") from last_exc
 
     async def _safe_page_op(self, page: Page, coro: Coroutine[Any, Any, T]) -> T:
         """
@@ -479,7 +479,7 @@ class BrowserCore:
             # 初始化第一页
             page = await context.new_page()
             await self._setup_render_mode_route(page)
-            await self._safe_await(page.goto(self.config["default_url"]))
+            await self._safe_await(lambda: page.goto(self.config["default_url"]))
             self.all_pages.append(page)
             self.current_index = 0
             self.page = page
@@ -616,7 +616,7 @@ class BrowserCore:
 
             try:
                 await self._safe_await(
-                    page.goto(url, wait_until="domcontentloaded"),
+                    lambda: page.goto(url, wait_until="domcontentloaded"),
                 )
                 await page.evaluate(
                     f"document.body.style.zoom = {self.config['zoom_factor']};"
@@ -659,7 +659,7 @@ class BrowserCore:
             try:
                 await self._safe_page_op(
                     page,
-                    self._safe_await(page.mouse.click(x, y, delay=100)),
+                    self._safe_await(lambda: page.mouse.click(x, y, delay=100)),
                 )
                 await asyncio.sleep(2)
 
