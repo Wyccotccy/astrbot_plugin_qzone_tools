@@ -485,13 +485,13 @@
     "image_output_format": {
         "description": "图片输出格式（截图/生成的图片发送给AI前统一转换为此格式）",
         "type": "string",
-        "default": "webp",
+        "default": "png",
         "enum": [
-            "webp",
             "png",
-            "jpg"
+            "jpg",
+            "webp"
         ],
-        "hint": "webp体积最小兼容性好，jpg通用，png无损"
+        "hint": "png无损兼容性最好（推荐），jpg体积小通用，webp体积最小但部分LLM不支持"
     },
     "browser_render_mode": {
         "description": "浏览器渲染模式（影响截图效果和性能占用）",

@@ -14,7 +14,7 @@ from pathlib import Path
 from PIL import Image
 
 # 支持的输出格式
-SUPPORTED_FORMATS = {"webp", "png", "jpg"}
+SUPPORTED_FORMATS = {"png", "jpg", "webp"}
 
 # Pillow 格式名映射
 _FORMAT_MAP = {
@@ -33,7 +33,7 @@ _EXT_MAP = {
 
 def convert_image_format(
     input_path: str | Path,
-    output_format: str = "webp",
+    output_format: str = "png",
     quality: int = 80,
     *,
     overwrite: bool = True,
@@ -91,12 +91,12 @@ def convert_image_format(
 
 def get_format_from_config(config: dict) -> str:
     """从插件配置中读取图片输出格式，带默认值和校验。"""
-    fmt = config.get("image_output_format", "webp").lower().strip()
+    fmt = config.get("image_output_format", "png").lower().strip()
     if fmt not in SUPPORTED_FORMATS:
-        fmt = "webp"
+        fmt = "png"
     return fmt
 
 
 def get_output_ext(fmt: str) -> str:
     """格式名 → 文件扩展名。"""
-    return _EXT_MAP.get(fmt, ".webp")
+    return _EXT_MAP.get(fmt, ".png")

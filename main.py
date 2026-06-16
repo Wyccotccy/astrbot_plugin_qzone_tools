@@ -35,6 +35,8 @@ from .core.favorite import FavoriteManager
 from .core.ticks_overlay import TickOverlay
 from .core.image_utils import convert_image_format, get_format_from_config, get_output_ext
 
+import mcp
+
 PLUGIN_NAME = "astrbot_plugin_qzone_tools"
 
 
@@ -2252,11 +2254,11 @@ class Main(Star):
 
         registry["read_image"] = {
             "name": "read_image",
-            "description": "读取工作区中的图片文件，返回base64编码的图片内容。用于查看Python代码生成的图表、截图等。",
+            "description": "读取图片文件并返回base64编码内容。支持工作区文件名、绝对路径、或截图路径（screenshot_cache中的文件）。用于查看Python代码生成的图表、截图等。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "filename": {"type": "string", "description": "图片文件名，必填"}
+                    "filename": {"type": "string", "description": "图片文件名、绝对路径或截图路径，必填"}
                 },
                 "required": ["filename"]
             },
@@ -2270,11 +2272,11 @@ class Main(Star):
 
         registry["send_file"] = {
             "name": "send_file",
-            "description": "将工作区中的文件发送到QQ群或私聊。默认以QQ文件形式发送。图片会以图片消息形式发送。",
+            "description": "发送文件到QQ群或私聊。支持工作区文件名、绝对路径、或截图路径（screenshot_cache中的文件）。图片以图片消息形式发送，其他以文件形式发送。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "filename": {"type": "string", "description": "工作区文件名，必填"},
+                    "filename": {"type": "string", "description": "文件名、绝对路径或截图路径（screenshot_cache中的文件），必填"},
                     "target_id": {"type": "string", "description": "目标群号或QQ号，必填"},
                     "chat_type": {"type": "string", "description": "聊天类型：group(群聊)/private(私聊)/auto(自动识别)，默认auto"},
                     "as_image": {"type": "boolean", "description": "是否以图片形式发送（仅支持图片文件），默认false"}
@@ -2733,6 +2735,29 @@ class Main(Star):
             return {"status": "error", "message": f"缺少必填参数: {', '.join(param_desc)}。请参考工具定义传入正确参数。"}
         try:
             result = await handler(event, **args_dict)
+            # 如果结果包含截图路径，自动读取图片并返回 ImageContent
+            # 这样 LLM 可以直接看到截图，无需再调 read_image
+            if isinstance(result, dict) and "screenshot" in result:
+                screenshot_path = result["screenshot"]
+                if screenshot_path and os.path.isfile(screenshot_path):
+                    try:
+                        import base64 as _b64
+                        with open(screenshot_path, "rb") as f:
+                            img_data = f.read()
+                        ext = os.path.splitext(screenshot_path)[1].lower()
+                        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                                    ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}
+                        mime_type = mime_map.get(ext, "image/png")
+                        img_b64 = _b64.b64encode(img_data).decode("utf-8")
+                        msg_text = result.get("message", "截图完成")
+                        return mcp.types.CallToolResult(
+                            content=[
+                                mcp.types.TextContent(type="text", text=msg_text),
+                                mcp.types.ImageContent(type="image", data=img_b64, mimeType=mime_type),
+                            ]
+                        )
+                    except Exception as e:
+                        logger.warning(f"[run_wyc_tool] 读取截图失败，回退到文本: {e}")
             return result
         except Exception as e:
             logger.error(f"[run_wyc_tool] 执行工具 {tool_name} 失败: {e}", exc_info=True)
@@ -4780,10 +4805,20 @@ except Exception as e:
             filename = kwargs.get('filename') or kwargs.get('file') or kwargs.get('name')
         if not filename:
             return {"status": "error", "message": f"请提供文件名参数。图片需放在工作区: {self.workspace_dir}"}
-        filename = os.path.basename(filename)
-        filepath = os.path.join(self.workspace_dir, filename)
+        # 支持绝对路径
+        if os.path.isabs(filename) and os.path.isfile(filename):
+            filepath = filename
+            filename = os.path.basename(filename)
+        else:
+            filename = os.path.basename(filename)
+            filepath = os.path.join(self.workspace_dir, filename)
+            if not os.path.exists(filepath):
+                screenshot_dir = os.path.join(self.data_dir, "screenshot_cache")
+                alt_path = os.path.join(screenshot_dir, filename)
+                if os.path.isfile(alt_path):
+                    filepath = alt_path
         if not os.path.exists(filepath):
-            return {"status": "error", "message": f"文件不存在: {filename}（工作区: {self.workspace_dir}）"}
+            return {"status": "error", "message": f"文件不存在: {filename}（工作区: {self.workspace_dir}，screenshot_cache: {os.path.join(self.data_dir, 'screenshot_cache')}）"}
         # 检查是否是图片文件
         ext = os.path.splitext(filename)[1].lower()
         image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
@@ -4820,10 +4855,21 @@ except Exception as e:
             return {"status": "error", "message": f"请提供文件名。文件需放在工作区: {self.workspace_dir}"}
         if not target_id:
             return {"status": "error", "message": "请提供目标群号或QQ号"}
-        filename = os.path.basename(filename)
-        filepath = os.path.join(self.workspace_dir, filename)
+        # 支持绝对路径：如果传入的是绝对路径且文件存在，直接使用
+        if os.path.isabs(filename) and os.path.isfile(filename):
+            filepath = filename
+            filename = os.path.basename(filename)
+        else:
+            filename = os.path.basename(filename)
+            filepath = os.path.join(self.workspace_dir, filename)
+            # 工作区找不到时，尝试 screenshot_cache 目录
+            if not os.path.exists(filepath):
+                screenshot_dir = os.path.join(self.data_dir, "screenshot_cache")
+                alt_path = os.path.join(screenshot_dir, filename)
+                if os.path.isfile(alt_path):
+                    filepath = alt_path
         if not os.path.exists(filepath):
-            return {"status": "error", "message": f"文件不存在: {filename}（工作区: {self.workspace_dir}）"}
+            return {"status": "error", "message": f"文件不存在: {filename}（工作区: {self.workspace_dir}，screenshot_cache: {os.path.join(self.data_dir, 'screenshot_cache')}）"}
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
@@ -4946,7 +4992,7 @@ except Exception as e:
             result = await self.browser_supervisor.call("search", url=url)
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
-                return {"status": "success", "message": f"已打开: {url}", "screenshot": screenshot}
+                return {"status": "success", "message": f"已打开: {url}\n\n💡 截图已自动展示给你。如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
             return {"status": "success", "message": f"已打开: {url}"}
         except Exception as e:
             return {"status": "error", "message": f"打开网页失败: {_safe_error_msg(e)}"}
@@ -4961,7 +5007,7 @@ except Exception as e:
                 return {"status": "error", "message": err}
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
-                return {"status": "success", "message": f"已点击: {selector}", "screenshot": screenshot}
+                return {"status": "success", "message": f"已点击: {selector}\n\n💡 截图已自动展示给你。如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
             return {"status": "success", "message": f"已点击: {selector}"}
         except Exception as e:
             return {"status": "error", "message": f"点击失败: {_safe_error_msg(e)}"}
@@ -4978,7 +5024,7 @@ except Exception as e:
                 await self.browser_supervisor.call("text_input", text="", enter=True)
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
-                return {"status": "success", "message": f"已输入: {text[:50]}", "screenshot": screenshot}
+                return {"status": "success", "message": f"已输入: {text[:50]}\n\n💡 截图已自动展示给你。如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
             return {"status": "success", "message": f"已输入: {text[:50]}"}
         except Exception as e:
             return {"status": "error", "message": f"输入失败: {_safe_error_msg(e)}"}
@@ -5011,7 +5057,7 @@ except Exception as e:
                         return {"status": "error", "message": "保存路径必须在工作区目录内"}
                     shutil.copy2(screenshot, save_path)
                     return {"status": "success", "message": f"截图已保存: {save_path}"}
-                return {"status": "success", "message": "截图成功", "screenshot": screenshot}
+                return {"status": "success", "message": "截图成功\n\n💡 截图已自动展示给你。如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
             return {"status": "error", "message": "截图失败"}
         except Exception as e:
             return {"status": "error", "message": f"截图失败: {_safe_error_msg(e)}"}
@@ -5041,7 +5087,7 @@ except Exception as e:
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
                 screenshot = self._convert_image(screenshot)
-                return {"status": "success", "message": f"已搜索: {keyword}", "screenshot": screenshot}
+                return {"status": "success", "message": f"已搜索: {keyword}\n\n💡 截图已自动展示给你。如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
             return {"status": "success", "message": f"已搜索: {keyword}"}
         except Exception as e:
             return {"status": "error", "message": f"搜索失败: {_safe_error_msg(e)}"}
@@ -5060,7 +5106,7 @@ except Exception as e:
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
                 screenshot = self._convert_image(screenshot)
-                return {"status": "success", "message": f"已访问: {url}", "screenshot": screenshot}
+                return {"status": "success", "message": f"已访问: {url}\n\n💡 截图已自动展示给你。如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
             return {"status": "success", "message": f"已访问: {url}"}
         except Exception as e:
             return {"status": "error", "message": f"访问失败: {_safe_error_msg(e)}"}
@@ -5075,7 +5121,7 @@ except Exception as e:
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
                 screenshot = self._convert_image(screenshot)
-                return {"status": "success", "message": f"已点击: ({x}, {y})", "screenshot": screenshot}
+                return {"status": "success", "message": f"已点击: ({x}, {y})\n\n💡 截图已自动展示给你。如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
             return {"status": "success", "message": f"已点击: ({x}, {y})"}
         except Exception as e:
             return {"status": "error", "message": f"点击失败: {_safe_error_msg(e)}"}
@@ -5090,7 +5136,7 @@ except Exception as e:
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
                 screenshot = self._convert_image(screenshot)
-                return {"status": "success", "message": f"已输入: {text[:50]}", "screenshot": screenshot}
+                return {"status": "success", "message": f"已输入: {text[:50]}\n\n💡 截图已自动展示给你。如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
             return {"status": "success", "message": f"已输入: {text[:50]}"}
         except Exception as e:
             return {"status": "error", "message": f"输入失败: {_safe_error_msg(e)}"}
@@ -5160,7 +5206,7 @@ except Exception as e:
             screenshot = await self.browser_supervisor.call("screenshot", full_page=full_page, zoom_factor=zoom_factor)
             if screenshot:
                 screenshot = self._convert_image(screenshot)
-                return {"status": "success", "message": "截图成功", "screenshot": screenshot}
+                return {"status": "success", "message": "截图成功\n\n💡 截图已自动展示给你。如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
             return {"status": "error", "message": "截图失败"}
         except Exception as e:
             return {"status": "error", "message": f"截图失败: {_safe_error_msg(e)}"}
@@ -5175,7 +5221,7 @@ except Exception as e:
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
                 screenshot = self._convert_image(screenshot)
-                return {"status": "success", "message": "已返回上一页", "screenshot": screenshot}
+                return {"status": "success", "message": "已返回上一页\n\n💡 截图已自动展示给你。如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
             return {"status": "success", "message": "已返回上一页"}
         except Exception as e:
             return {"status": "error", "message": f"返回失败: {_safe_error_msg(e)}"}
