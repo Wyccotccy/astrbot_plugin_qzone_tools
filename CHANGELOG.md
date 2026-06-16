@@ -7,6 +7,7 @@
 
 ### 🐛 修复
 - **图片发送路径错位修复**：截图保存在 `screenshot_cache/` 但 `send_file` 在 `workspace/` 查找，现已支持跨目录查找
+- **`_safe_await` 协程重试 bug**：重试机制复用已耗尽的协程对象导致 `cannot reuse already awaited coroutine`，改为协程工厂（callable）模式，每次重试创建新协程
 
 ### 🔧 变更
 - **图片默认输出格式 webp → png**：`image_output_format` 默认值从 `webp` 改为 `png`，解决部分 LLM（如 mimo-v2.5）不支持 webp 格式的问题
