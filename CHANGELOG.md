@@ -1,3 +1,19 @@
+## [5.0.6] - 2026-06-16
+
+### ✨ 改进
+- **截图自动展示给 LLM**：`run_wyc_tool` 检测到截图时自动返回 `ImageContent`，LLM 无需再调用 `read_image` 即可直接看到截图内容
+- **`send_file` / `read_image` 支持绝对路径**：传入绝对路径时直接使用，不再截断为文件名；工作区找不到时自动回退到 `screenshot_cache` 目录查找
+- **工具描述更新**：`send_file` 和 `read_image` 的参数描述明确支持绝对路径和截图路径
+
+### 🐛 修复
+- **图片发送路径错位修复**：截图保存在 `screenshot_cache/` 但 `send_file` 在 `workspace/` 查找，现已支持跨目录查找
+
+### 🔧 变更
+- **图片默认输出格式 webp → png**：`image_output_format` 默认值从 `webp` 改为 `png`，解决部分 LLM（如 mimo-v2.5）不支持 webp 格式的问题
+- **截图工具提示词更新**：提示 LLM 截图已自动展示，如需发送给用户请用 `send_file`
+
+---
+
 ## [5.0.4] - 2026-06-10
 
 ### 🐛 修复
