@@ -1,669 +1,469 @@
-# QzoneTools - AstrBot QQ空间与消息工具插件
-
-为 AstrBot 提供完整的 QQ 空间操作、消息管理、群管理、记忆管理与QQ状态控制功能。
-
-## 功能特性
-
-| 功能 | 描述 | 状态 |
-|------|------|------|
-| 📝 **发表说说** | 自动发表QQ空间动态 | ✅ 可用 |
-| 👆 **戳一戳** | 发送窗口抖动/双击头像 | ✅ 可用 |
-| 🔍 **搜索联系人** | 搜索群聊或好友（支持名字/QQ号模糊匹配） | ✅ 可用 |
-| 💬 **主动发消息** | 向指定目标发送消息 | ✅ 可用 |
-| ⏰ **定时消息** | 创建定时提醒任务（内存存储） | ✅ 可用 |
-| 🕐 **定时指令** | 高级定时任务（支持发空间、改状态、LLM提醒，持久化存储） | ✅ 可用 |
-| 🌐 **QQ状态管理** | 设置在线状态（在线/Q我吧/离开/忙碌/隐身/听歌中/睡觉中等） | ✅ 可用 |
-| ↩️ **消息撤回** | 群聊中通过引用消息撤回（仅支持群聊） | ✅ 可用 |
-| 📧 **发送邮件** | 通过QQ邮箱发送邮件 | ✅ 可用 |
-| ㊙️ **群内身份获取** | 可以选择默认注入群身份，也可以LLM自动使用工具获取xx群xx人的身份 | ✅ 可用 |
-| 👍🏻 **超多超棒的群管功能** | AI自主管群，支持禁言、踢人、全体禁言、改名片、群公告、群文件管理、设置管理员、群名称修改、群荣誉查看、加群方式设置等 | ✅ 可用 |
-| 🎉 **AI声聊**（免费tts） | 使用QQ官方的tts | ✅ 可用 |
-| 😍 **输入状态同步** | Bot被唤醒时会议设置当前输入状态为对方正在输入中，更拟人 | 自己去配置文件启用功能 |
-| 🧠 **记忆管理** | 自动提取并保存用户重要信息，支持搜索、更新、删除 | ✅ 可用 |
-| 🎨 **个人资料管理** | 修改机器人昵称、个性签名、QQ头像 | ✅ 可用 |
-| 🛡️ **工具权限控制** | 每个工具独立设置权限：全局/超管/禁用，WebUI可视化配置 | ✅ 可用 |
-| 🔒 **隐私模式** | 隐藏群号、QQ号等敏感信息，LLM只能看到群名字和昵称 | ✅ 可用 |
-| 🖼️ **图片格式转换** | 截图/生成的图片自动转换为 png/jpg/webp 格式（默认 png，兼容更多模型） | ✅ 可用 |
-| 🎨 **浏览器渲染模式** | 完全/简略/极简/纯文本四种模式，适配不同性能设备 | ✅ 可用 |
-| 📝 **LLM纯文本模式** | 截图工具仅返回页面文本，适合非多模态模型 | ✅ 可用 |
-
-## 安装方法
-
-### 方式一：通过AstrBot插件市场（推荐）
-直接在WebUI搜索 `qzone_tools` 安装
-
-### 方式二：手动安装
-1. 下载本插件压缩包
-2. 在 AstrBot WebUI → 插件 → 安装插件 → 上传插件文件
-3. 重启或重载插件
-
-### 方式三：Git安装
-
-    # 在AstrBot插件目录执行
-    cd /AstrBot/data/plugins
-    git clone https://github.com/Wyccotccy/astrbot_plugin_qzone_tools.git
-
-
-## 使用方法
-
-⚠️ **重要提示**：插件采用特殊的三步工具调用机制，LLM **必须**遵循以下流程调用任何功能：
-
-### 工具调用机制（LLM必读）
-
-1. **第一步**：使用 `search_wyc_tools` 工具，传入简短关键词（如"邮箱"、"禁言"、"发说说"、"记忆"），搜索匹配的工具。**禁止使用完整问句！**
-2. **第二步**：如果 `search_wyc_tools` 未找到，再使用 `call_wyc_tools` 查看全部可用工具列表。
-3. **第三步**：确定工具名称后，使用 `run_wyc_tool` 并传入工具名称和 JSON 格式的参数执行。
-
-### 推荐系统提示词
-
-在你的 AstrBot 配置中，添加以下提示词到 系统提示词 或 人格设定：
-
-    你拥有通过工具调用实现的以下能力，在适当场景下请主动使用：
-
-    **调用任何功能前，必须先使用 search_wyc_tools 搜索工具名称（使用简短关键词），再通过 run_wyc_tool 执行。禁止直接猜测或编造工具名称！**
-
-    可用功能领域包括：
-    - QQ空间操作（发说说）
-    - 戳一戳提醒
-    - 联系人搜索（好友/群聊模糊搜索）
-    - 主动发消息（群聊/私聊）
-    - 定时消息与高级定时指令（支持发空间、改状态、LLM提醒，高级指令持久化存储）
-    - QQ状态管理（在线/离开/忙碌/隐身/听歌中/睡觉中等）
-    - 群聊消息撤回（需引用消息）
-    - QQ邮件发送
-    - 记忆管理（添加/搜索/更新/删除用户记忆）
-    - 群管理（禁言/踢人/全体禁言/改名片/群公告/群文件/设置管理员/群荣誉等）
-    - AI语音消息（TTS）
-    - 个人资料修改（昵称/签名/头像）
-
-    注意：
-    - 发表说说和主动发消息需要确保 NapCat 已登录且状态正常
-    - 高级定时指令（create_scheduled_command）支持持久化存储，重启后保留
-    - 撤回消息仅支持群聊，需引用消息且2分钟内
-    - 发送邮件需在插件配置中填写发件人邮箱和授权码
-
-## 使用示例
-
-### 1. 发表QQ空间说说
-- 用户："帮我发条空间说说，今天天气真好"
-- LLM：`search_wyc_tools("发说说")` → `run_wyc_tool("publish_qzone", {"content": "今天天气真好"})`
-
-### 2. 戳一戳提醒
-- 用户："戳一下刚才说话的那个人"
-- LLM：`search_wyc_tools("戳")` → `run_wyc_tool("send_poke", {"target_qq": "123456"})`
-
-### 3. 搜索联系人
-- 用户："找一下通知群"
-- LLM：`search_wyc_tools("搜索")` → `run_wyc_tool("search_contacts", {"keyword": "通知"})`
-
-### 4. 主动发消息
-- 用户："给刚才那个群发个通知，说会议取消了"
-- LLM：`search_wyc_tools("发消息")` → `run_wyc_tool("send_message", {"target_id": "群号", "message": "会议取消了"})`
-
-### 5. 记忆管理
-- 用户："记住我喜欢喝咖啡"
-- LLM：`search_wyc_tools("记忆")` → `run_wyc_tool("add_memory", {"content": "用户喜欢喝咖啡", "tags": "偏好,饮食"})`
-- 用户："我之前说过我喜欢什么？"
-- LLM：`search_wyc_tools("记忆")` → `run_wyc_tool("search_memories", {"keyword": "喜欢"})`
-
-### 6. QQ状态管理
-- 用户："我要隐身玩游戏"
-- LLM：`search_wyc_tools("状态")` → `run_wyc_tool("update_qq_status", {"status": "invisible", "duration_minutes": 60})`
-
-### 7. 群聊消息撤回
-- 用户：[引用一条消息] "撤回这条"
-- LLM：`search_wyc_tools("撤回")` → `run_wyc_tool("recall_by_reply", {})`
-
-### 8. 发送邮件
-- 用户："给 friend@qq.com 发邮件，主题测试，内容你好"
-- LLM：`search_wyc_tools("邮件")` → `run_wyc_tool("send_qq_email", {"to": "friend@qq.com", "subject": "测试", "content": "你好"})`
-
-### 9. AI语音消息
-- 用户："用语音说大家好"
-- LLM：`search_wyc_tools("语音")` → `run_wyc_tool("send_ai_voice", {"text": "大家好"})`
-
-### 10. 个人资料修改
-- 用户："把机器人昵称改成小助手"
-- LLM：`search_wyc_tools("资料")` → `run_wyc_tool("set_qq_profile", {"nickname": "小助手"})`
-
-## 完整工具列表
-
-插件提供以下LLM可调用工具（按功能分类）：
-
-### 记忆管理
-- `add_memory` - 添加用户记忆
-- `search_memories` - 搜索记忆
-- `update_memory` - 更新记忆
-- `delete_memory` - 删除记忆
-- `get_memory_detail` - 获取记忆详情
-
-### 消息与定时
-- `send_message` - 发送消息
-- `schedule_message` - 创建定时消息（内存存储，重启丢失）
-- `cancel_scheduled_message` - 取消定时消息
-- `list_scheduled_messages` - 列出定时消息
-
-### QQ空间
-- `publish_qzone` - 发表QQ空间说说
-
-### 戳一戳
-- `send_poke` - 发送戳一戳
-
-### QQ状态
-- `update_qq_status` - 设置QQ在线状态
-- `get_qq_status` - 查看当前状态
-- `get_fun_status_list` - 获取娱乐状态列表
-
-### 高级定时指令（持久化）
-- `create_scheduled_command` - 创建定时指令
-- `list_scheduled_commands` - 列出定时指令
-- `cancel_scheduled_command` - 取消定时指令
-- `delete_scheduled_command` - 删除定时指令
-
-### 消息操作
-- `recall_by_reply` - 引用撤回消息
-
-### 邮件
-- `send_qq_email` - 发送QQ邮件
-
-### 联系人
-- `search_contacts` - 搜索联系人
-- `list_contacts` - 列出联系人
-
-### 群管理
-- `get_user_group_role` - 查询群成员身份
-- `set_essence_msg` - 设置群精华
-- `delete_essence_msg` - 取消群精华
-- `set_group_ban` - 禁言/解禁用户
-- `set_group_kick` - 踢出群成员
-- `set_group_whole_ban` - 全体禁言
-- `set_group_card` - 修改群名片
-- `send_group_notice` - 发布群公告
-- `delete_group_notice` - 删除群公告
-- `get_group_notice_list` - 获取公告列表
-- `list_group_files` - 查看群文件
-- `delete_group_file` - 删除群文件
-- `upload_group_file` - 上传群文件
-- `create_group_file_folder` - 创建群文件夹
-- `delete_group_folder` - 删除群文件夹
-- `move_group_file` - 移动群文件
-- `rename_group_file` - 重命名群文件
-- `trans_group_file` - 传输群文件
-- `get_group_members_info` - 获取群成员列表
-- `set_group_admin` - 设置/取消管理员
-- `set_group_name` - 修改群名称
-- `get_group_honor_info` - 获取群荣誉信息
-- `get_group_at_all_remain` - 查看@全体成员剩余次数
-- `set_group_special_title` - 设置专属头衔
-- `get_group_shut_list` - 获取禁言列表
-- `get_group_ignore_add_request` - 获取被忽略的加群请求
-- `set_group_add_option` - 设置加群方式
-- `send_group_sign` - 群打卡
-
-### 其他
-- `set_qq_avatar` - 设置QQ头像
-- `set_qq_profile` - 修改个人资料（昵称/签名）
-- `send_like` - 点赞
-- `get_group_msg_history` - 获取群历史消息
-- `get_friend_msg_history` - 获取好友历史消息
-- `set_group_portrait` - 设置群头像
-- `fetch_custom_face` - 获取自定义表情列表
-- `set_input_status` - 设置输入状态
-- `get_ai_characters` - 获取AI语音角色列表
-- `send_ai_voice` - 发送AI语音消息
-
-### 闪传功能
-- `create_flash_task` - 创建闪传任务
-- `get_flash_file_list` - 获取闪传文件列表
-- `get_flash_file_url` - 获取闪传文件下载链接
-- `send_flash_msg` - 发送闪传消息
-- `get_share_link` - 获取文件分享链接
-- `get_fileset_info` - 获取文件集信息
-- `get_fileset_id` - 通过分享码获取文件集ID
-- `download_fileset` - 下载文件集
-
-### 在线文件
-- `get_online_file_msg` - 获取在线文件消息
-- `send_online_file` - 发送在线文件
-- `send_online_folder` - 发送在线文件夹
-- `receive_online_file` - 接收在线文件
-- `refuse_online_file` - 拒绝在线文件
-- `cancel_online_file` - 取消在线文件传输
-
-### 好友管理
-- `delete_friend` - 删除好友
-
-### 工作区
-- `run_python_code` - 在工作区执行Python代码
-- `list_workspace_files` - 列出工作区文件
-- `read_workspace_file` - 读取工作区文件
-- `delete_workspace_file` - 删除工作区文件
-
-### 浏览器（基础）
-- `fetch_url` - 获取网页内容
-- `open_page` - 打开网页
-- `click_element` - 点击网页元素
-- `type_text` - 在输入框输入文字
-- `screenshot_page` - 网页截图
-- `close_page` - 关闭浏览器
-
-### 浏览器（高级）
-- `browser_search` - 搜索网页（百度/必应/谷歌）
-- `browser_visit` - 访问链接
-- `browser_click` - 点击坐标
-- `browser_input` - 输入文字
-- `browser_scroll` - 滚动页面
-- `browser_swipe` - 滑动操作
-- `browser_zoom` - 缩放页面
-- `browser_screenshot` - 截图
-- `browser_back` - 返回上一页
-- `browser_forward` - 下一页
-- `browser_tabs` - 标签页管理
-- `browser_close_tab` - 关闭标签页
-- `browser_close` - 关闭浏览器
-- `browser_chat` - 发送对话
-
-### 收藏夹
-- `browser_favorite_list` - 查看收藏夹
-- `browser_favorite_add` - 添加收藏
-- `browser_favorite_delete` - 删除收藏
-
-### 浏览器安装
-- `browser_install` - 安装浏览器
-
-## 配置说明
-
-插件支持通过配置文件灵活启用/禁用各个工具，以及调整各项参数。主要配置项包括：
-
-- `enabled` - 插件总开关
-- `enable_<工具名>` - 单独控制每个工具的启用状态（如 `enable_add_memory: true`）
-- `group_manage_enabled` - 群管理功能总开关
-- `kick_enabled` - 踢人功能开关
-- `email_sender` / `email_authorization_code` - 邮件发送配置
-- `ai_voice_default_character` - AI语音默认角色
-- `max_memories_per_user` - 每用户最大记忆数
-- `memory_inject_enabled` - 是否自动注入用户记忆到LLM上下文
-- `inject_group_role_enabled` - 是否自动注入群成员身份
-- `auto_input_status_enabled` - 是否自动设置输入状态
-- `enable_human_typing` - 是否启用拟人化输入延迟
-- `tool_permissions` - 工具权限控制（WebUI配置，格式：`{"工具名": "global/admin/disabled"}`）
-- `privacy_mode` - 隐私模式（`normal`=普通，`privacy`=隐藏群号/QQ号）
-
-## 注意事项
-
-### 1. NapCat 兼容性
-- 需要 NapCat 支持 `get_credentials` 或 `get_cookies` API 来获取 QQ 空间 Cookie
-- 消息撤回功能需要 NapCat 支持 `delete_msg` API
-- QQ状态设置需要 `set_online_status` API
-- AI语音需要 `get_ai_characters` 和 `send_group_ai_record` API
-
-### 2. Cookie 有效期
-- QQ 空间 Cookie 通常几天到几周会过期
-- 插件每次发空间都会自动获取最新 Cookie，无需手动配置
-
-### 3. 风控提醒
-- 频繁发表说说可能导致 QQ 空间被限制
-- 主动私聊消息容易被风控，建议主要用于群聊
-- 频繁戳一戳可能触发频率限制
-
-### 4. 定时任务区别
-
-| 特性 | 定时消息 (schedule_message) | 定时指令 (create_scheduled_command) |
-|------|----------------------------|-----------------------------------|
-| 存储方式 | 内存 | JSON文件持久化 |
-| 重启保留 | ❌ 丢失 | ✅ 保留 |
-| 功能范围 | 仅发送消息 | 发空间、改状态、LLM提醒 |
-
-### 5. 记忆管理说明
-- 记忆按用户ID隔离存储
-- 超过最大记忆数时自动清理最旧的记忆
-- 支持标签和重要度（1-10）分类
-- 可配置将记忆自动注入LLM上下文
-
-## 故障排查
-
-### 发表说说失败
-**现象：** 返回"Cookie无效"或"会话未初始化"
-
-**解决：**
-1. 检查 NapCat 是否已登录
-2. 检查 NapCat 版本是否支持 get_credentials API
-3. 尝试重新登录 NapCat 刷新 Cookie
-
-### LLM不调用工具
-**现象：** LLM 回复不知道如何操作
-
-**解决：**
-1. 确认系统提示词中已包含工具使用规范
-2. 检查插件是否已启用（enabled: true）
-3. 查看日志确认 search_wyc_tools 是否被加载
-
-### 定时任务未执行
-**现象：** 到时间后没有执行
-
-**解决：**
-- schedule_message：检查插件是否重启（重启丢失）
-- create_scheduled_command：检查日志确认任务是否被加载
-- 确认目标ID在发送时仍然有效
-
-### 发送邮件失败
-**现象：** 返回认证错误
-
-**解决：**
-1. 确认插件配置中已正确填写发件人邮箱和授权码
-2. 检查授权码是否为最新
-3. 确认发件人QQ邮箱已开启SMTP服务
-
-## 管理员命令
-
-插件提供以下管理员命令（需AstrBot管理员权限）：
-
-| 命令 | 说明 |
-|------|------|
-| /tool_memory list/add/delete/update/get | 记忆管理 |
-| /tool_send_message <目标ID> <消息> | 发送消息 |
-| /tool_schedule <目标ID> <消息> <时间> | 创建定时消息 |
-| /tool_publish_qzone <内容> | 发说说 |
-| /tool_status <状态> <分钟> | 设置QQ状态 |
-| /tool_status_get | 查看当前状态 |
-| /tool_poke <QQ号> | 戳一戳 |
-| /tool_recall | 引用撤回消息 |
-| /tool_email <收件人> <主题> <内容> | 发送邮件 |
-| /tool_search <关键词> | 搜索联系人 |
-| /tool_list [类型] [limit] | 列出联系人 |
-| /tool_scheduled_list | 列出定时指令 |
-| /tool_scheduled_cancel <ID> | 取消定时指令 |
-| /tool_scheduled_delete <ID> | 删除定时指令 |
-| /ai_characters | 查看AI语音角色 |
-| /ai_voice [角色] <文本> | 发送AI语音 |
-| /ban_user <QQ号> <分钟> | 禁言用户 |
-| /unban_user <QQ号> | 解禁用户 |
-| /kick <QQ号> | 踢出用户 |
-| /whole_ban <on/off> | 全体禁言开关 |
-| /set_card <QQ号> <昵称> | 修改群名片 |
-| /send_notice <内容> | 发布群公告 |
-| /del_notice <公告ID> | 删除群公告 |
-| /list_files | 群文件列表 |
-| /delete_group_file <file_id> | 删除群文件 |
-| /group_members | 群成员列表 |
-| /set_admin <QQ号> <on/off> | 设置管理员 |
-| /set_group_name <名称> | 修改群名称 |
-| /list_notices | 公告列表 |
-| /upload_file <路径> [文件名] | 上传群文件 |
-| /create_folder <名称> | 创建文件夹 |
-| /del_folder <ID> | 删除文件夹 |
-| /group_honor [类型] | 群荣誉 |
-| /at_all_remain | @全体剩余次数 |
-| /set_title <QQ号> <头衔> | 专属头衔 |
-| /shut_list | 禁言列表 |
-| /ignore_requests | 忽略列表 |
-| /set_add_option <选项> | 加群验证方式 |
-| /group_sign | 群签到 |
-| /set_qq_avatar [图片] | 设置QQ头像 |
-| /set_profile nickname=xxx personal_note=xxx | 修改个人资料 |
-| /send_like <QQ号> [次数] | 点赞 |
-| /get_group_msg_history [群号] [序号] [数量] | 群历史消息 |
-| /get_friend_msg_history <QQ号> [序号] [数量] | 好友历史消息 |
-| /set_group_portrait [群号] [图片] | 设置群头像 |
-| /fetch_custom_face [数量] | 自定义表情 |
-| /set_input_status <QQ号> <类型> | 输入状态 |
-| /move_group_file <file_id> <目录> <目标> | 移动群文件 |
-| /rename_group_file <file_id> <目录> <名称> | 重命名群文件 |
-| /trans_group_file <file_id> | 传输群文件 |
-| /tool_all_help | 查看完整帮助 |
-
-## 开发者信息
-- 作者：Wyccotccy
-- GitHub：https://github.com/Wyccotccy/astrbot_plugin_qzone_tools
-- 问题反馈：请提交 GitHub Issue
-
-## 更新日志
-
-详细更新日志请查看 [CHANGELOG.md](CHANGELOG.md)
-
-### v3.6.0
-- **修复**：获取群/好友历史消息工具重构，移除已废弃的 `message_seq` 参数，改用分页拉取机制，兼容 NapCat 接口变更
-- **修复**：设置QQ头像和群头像时无法读取本地文件的问题，新增 `_resolve_image_file` 方法自动转为 base64 传递
-- **优化**：WebUI 管理面板底层通信增强，Bridge SDK 内联化 + 超时容错
-- WebUI 新增记忆管理可视化（添加/编辑/删除记忆）
-
-### v3.0.0
-- 重点优化了LLM工具调用逻辑，采用 search_wyc_tools → run_wyc_tool 三步机制，避免一次性注入过多工具造成token浪费
-- 新增记忆管理功能（MemoryManager），支持添加、搜索、更新、删除用户记忆
-- 新增个人资料管理（set_qq_profile），支持修改昵称和个性签名
-- 新增设置QQ头像功能（set_qq_avatar）
-- 新增群文件移动/重命名/传输功能
-- 新增点赞、历史消息获取、群头像设置等功能
-- 新增拟人化输入状态延迟功能
-- 工具注册表增加关键词匹配，提升LLM搜索准确度
-
-### v2.1.0
-- 新增大量群管工具和群文件管理功能
-- 新增设置输入状态功能
-
-### v2.0.0
-- 新增16个群管功能
-- 新增AI声聊功能
-- 修复已知问题
-
-### v1.4.0
-- 新增大量群管功能
-- 修复已知问题
-
-### v1.3.0
-- 新增群成员关系获取/注入功能
-- 修复已知问题
-
-### v1.2.1
-- 新增群聊列表/好友列表搜索功能，支持模糊搜索
-- 优化定时任务与定时消息的区分
-- 修复QQ空间Cookie过期问题，改为每次发空间都获取最新Cookie
-
-### v1.2.0
-- 新增QQ邮箱发送功能，支持纯文本和HTML邮件
-- 完善系统提示词
-
-### v1.1.0
-- 新增QQ状态管理功能
-- 新增定时指令功能（持久化存储）
-- 新增群聊消息撤回功能
-- 优化搜索联系人功能
-
-### v1.0.0
-- 初始版本发布，支持发表说说、戳一戳、搜索联系人、发送消息、定时消息
-
-## 许可证
-MIT License
+# QzoneTools · 更多LLM工具
+
+为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
+
+<p>
+  <img src="https://img.shields.io/badge/version-5.2.2-blue" alt="version">
+  <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
+  <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
+  <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
+</p>
 
 ---
 
-Enjoy it! 🎉
-## ⚠️ 闪传功能配置
+## 目录
 
-使用闪传功能（`create_flash_task`、`download_fileset` 等）需要配置 **闪传中转目录**。
+- [功能特性](#功能特性)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [浏览器自动化](#浏览器自动化)
+- [完整工具列表](#完整工具列表)
+- [配置说明](#配置说明)
+- [管理员命令](#管理员命令)
+- [常见问题](#常见问题)
+- [更新日志](#更新日志)
 
-### 原因
+---
 
-AstrBot 和 NapCat 通常运行在不同的 Docker 容器中，它们的文件系统是隔离的。为了让 NapCat 能访问 AstrBot 工作区的文件，需要配置一个共享目录。
+## 功能特性
 
-### 配置步骤
+| 模块 | 能力 |
+|------|------|
+| 📝 **QQ空间** | 发表说说（自动获取最新 Cookie） |
+| 💬 **消息** | 主动发消息、引用撤回、戳一戳、定时消息、高级定时指令（持久化） |
+| 👥 **群管理** | 禁言、踢人、全体禁言、改名片、群公告、群文件、管理员设置、群荣誉、加群方式、打卡等 25 项 |
+| 🎨 **个人资料** | 修改昵称/签名、设置 QQ 头像、设置群头像、点赞、自定义表情 |
+| 🧠 **记忆管理** | 自动提取用户重要信息，支持增删改查、标签分类、自动注入上下文 |
+| 📧 **邮件** | 通过 QQ 邮箱 SMTP 发送邮件 |
+| 🤖 **AI 声聊** | QQ 官方免费 TTS，指定角色发送语音 |
+| 🌐 **浏览器自动化** | 坐标交互（点击/双击/右键/长按/拖拽/悬停/输入）、搜索、标签页、收藏夹、反风控伪装 |
+| 🧪 **工作区** | Python 代码执行（AST 沙箱）、文件读写、图片生成与发送 |
+| 🛡️ **权限控制** | 109 个工具逐一配置 `global/admin/disabled`，63 个敏感工具默认仅管理员可用 |
+| 🔒 **隐私模式** | 群号/QQ号 SHA1 不可逆脱敏，LLM 看不到真实 ID |
+| ⚡ **稳定性** | 全部 NapCat API 带超时、异步无阻塞、后台任务防回收、浏览器空闲自动回收 |
+
+---
+
+## 安装
+
+### 方式一：插件市场（推荐）
+
+AstrBot WebUI → 插件市场 → 搜索 `qzone_tools` → 安装
+
+### 方式二：Git 克隆
 
 ```bash
-# 1. 创建共享目录（在宿主机上）
-mkdir -p /opt/astrbot_flash
-
-# 2. 启动 AstrBot 容器时添加挂载（读写）
-docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:rw ...
-
-# 3. 启动 NapCat 容器时添加挂载（只读）
-docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
+cd /AstrBot/data/plugins
+git clone https://github.com/Wyccotccy/astrbot_plugin_qzone_tools.git
 ```
 
-### 在插件中配置
+### 方式三：手动上传
 
-在 WebUI 的"基础配置"页面，找到"闪传中转目录"，填入：
+下载仓库 ZIP → WebUI → 插件 → 安装插件 → 上传压缩包
+
+安装后重启 AstrBot 或重载插件即可。首次使用浏览器功能时，插件会自动检测并安装 Playwright + Chromium（约 2 分钟）。
+
+---
+
+## 快速开始
+
+### 三步工具调用机制（LLM 必读）
+
+插件共有 109 个工具，**不会一次性全部注入上下文**（那会浪费大量 token）。LLM 必须遵循三步流程：
+
 ```
-/tmp/astrbot_flash
+第 1 步：search_wyc_tools("关键词")      ← 用简短关键词搜索，禁止用完整问句
+第 2 步：call_wyc_tools()                ← 搜索不到时才查看完整列表
+第 3 步：run_wyc_tool("工具名", {...})   ← 确定工具名后执行
 ```
 
-或直接编辑 `config.yaml`：
-```yaml
-flash_transfer_dir: /tmp/astrbot_flash
+### 推荐系统提示词
+
+插件会通过 `on_llm_request` 自动注入工具使用规范，通常无需额外配置。如需自行添加：
+
 ```
+你拥有通过工具调用实现的以下能力，在适当场景下请主动使用：
 
-### 工作原理
+调用任何功能前，必须先使用 search_wyc_tools 搜索工具名称（使用简短关键词），
+再通过 run_wyc_tool 执行。禁止直接猜测或编造工具名称！
 
-1. 当调用 `create_flash_task` 时，插件会自动将文件复制到中转目录
-2. NapCat 从同一路径读取文件并创建闪传任务
-3. 这样两个容器都能访问到文件
-
-
-
-## 🌐 浏览器自动化（v4.0.0 新增）
-
-插件支持浏览器自动化，可以打开网页、点击按钮、输入文字、截图等。
-
-### 工具列表
-
-| 工具 | 功能 | 搜索关键词 |
-|------|------|-----------|
-| `open_page` | 打开网页 | 打开网页、浏览器打开 |
-| `click_element` | 点击元素 | 点击按钮、点击元素 |
-| `type_text` | 输入文字 | 输入文字、填写表单 |
-| `screenshot_page` | 网页截图（自动展示给LLM） | 截图、获取验证码 |
-| `close_page` | 关闭浏览器 | 关闭浏览器 |
-| `fetch_url` | 获取网页内容 | 获取网页、读取网页 |
+可用功能领域：QQ空间、戳一戳、联系人搜索、主动发消息、定时任务、QQ状态、
+消息撤回、QQ邮件、记忆管理、群管理、AI语音、个人资料、浏览器自动化
+```
 
 ### 使用示例
 
-```
-# 1. 打开网页
-open_page("https://example.com/login")
+| 用户说 | LLM 调用链 |
+|--------|-----------|
+| "帮我发条说说，今天天气真好" | `search_wyc_tools("发说说")` → `run_wyc_tool("publish_qzone", {"content": "今天天气真好"})` |
+| "找一下通知群" | `search_wyc_tools("搜索")` → `run_wyc_tool("search_contacts", {"keyword": "通知"})` |
+| "把捣乱的张三禁言 10 分钟" | `search_wyc_tools("禁言")` → `run_wyc_tool("set_group_ban", {...})` |
+| "记住我喜欢喝咖啡" | `search_wyc_tools("记忆")` → `run_wyc_tool("add_memory", {"content": "用户喜欢喝咖啡"})` |
+| "打开 B 站看看热搜" | `search_wyc_tools("浏览器")` → `run_wyc_tool("browser_visit", {"url": "..."})` |
 
-# 2. 输入用户名
-type_text("#username", "myuser")
+---
 
-# 3. 输入密码并按回车
-type_text("#password", "mypass", true)
+## 浏览器自动化
 
-# 4. 截图（用于验证码）
-screenshot_page()
+### 坐标交互体系（v5.1.0+）
 
-# 5. 输入验证码并提交
-type_text("#code", "1234", true)
-
-# 6. 关闭浏览器
-close_page()
-```
-
-### 自动安装
-
-插件加载时会自动检查 Playwright 是否安装：
-- 如果未安装，会自动执行 `pip install playwright` 和 `playwright install chromium`
-- 首次安装约需 2 分钟（下载 113MB 浏览器）
-- 安装过程会记录日志
-
-### 配置开关
-
-在 WebUI 的"能力控制"页面，可以单独开关每个浏览器工具。
-
-
-## 🌐 高级浏览器自动化（v4.1.0 新增）
-
-
-### 搜索引擎
-
-| 搜索引擎 | 搜索关键词 |
-|---------|-----------|
-| 百度 | `搜索 关键词` |
-| 必应 | `必应 关键词` |
-| 谷歌 | `谷歌 关键词` |
-
-### 完整工具列表
-
-| 工具 | 功能 | 搜索关键词 |
-|------|------|-----------|
-| `browser_search` | 搜索网页 | 搜索、百度搜索、必应搜索 |
-| `browser_visit` | 访问链接 | 访问链接、打开网址 |
-| `browser_click` | 点击坐标 | 点击坐标、点击位置 |
-| `browser_input` | 输入文字 | 输入文字、填写输入框 |
-| `browser_scroll` | 滚动页面 | 滚动页面、上下滚动 |
-| `browser_swipe` | 滑动操作 | 滑动、拖拽 |
-| `browser_zoom` | 缩放页面 | 缩放、放大缩小 |
-| `browser_screenshot` | 截图（自动展示给LLM） | 截图、截取页面 |
-| `browser_back` | 返回上一页 | 返回、上一页 |
-| `browser_forward` | 下一页 | 前进、下一页 |
-| `browser_tabs` | 标签页管理 | 标签页、切换标签 |
-| `browser_close_tab` | 关闭标签页 | 关闭标签 |
-| `browser_close` | 关闭浏览器 | 关闭浏览器 |
-| `browser_chat` | 发送对话 | 对话、发送消息 |
-| `browser_favorite_list` | 查看收藏夹 | 收藏夹、查看收藏 |
-| `browser_favorite_add` | 添加收藏 | 添加收藏、收藏链接 |
-| `browser_favorite_delete` | 删除收藏 | 删除收藏、取消收藏 |
-| `browser_install` | 安装浏览器 | 安装浏览器 |
-
-### 使用示例
+插件**不使用 CSS 选择器**，而是采用「AI 看截图 → 输出坐标 → 看新截图」的视觉闭环，因此能操作任何页面（包括动态渲染、Canvas、验证码）：
 
 ```
-# 搜索
-browser_search("Python教程", "百度")
-
-# 访问网页
-browser_visit("https://example.com")
-
-# 页面交互
-browser_input("Hello World", true)
-browser_click(200, 300)
-browser_scroll("下", 1000)
-
-# 截图
-browser_screenshot()
-
-# 标签页
-browser_tabs()
-browser_tabs(2)
-browser_close_tab(1)
-
-# 收藏夹
-browser_favorite_add("GitHub", "https://github.com")
-browser_favorite_list()
+1. browser_visit("https://example.com")   → 自动回传截图
+2. AI 看图，确定按钮在 (253, 158)
+3. browser_click(253, 158)                → 又回传新截图
+4. AI 看到结果，决定下一步
 ```
 
-### 浏览器引擎支持
+坐标与截图像素一一对应（左上角为原点），每次操作后自动回传最新截图。坐标越界会自动贴边，不会报错。
 
-- **chromium**：默认，通用性强
-- **firefox**：兼容性好，稳定
-- **webkit**：资源占用低
+| 工具 | 用途 |
+|------|------|
+| `browser_click` | 点击坐标 |
+| `browser_double_click` | 双击（选中文本/打开文件夹） |
+| `browser_right_click` | 右键（上下文菜单） |
+| `browser_long_press` | 长按（100–10000ms，唤起悬浮菜单） |
+| `browser_drag` | 拖拽（自动插值，模拟真实拖动） |
+| `browser_hover` | 悬停（触发下拉菜单/提示） |
+| `browser_input_at` | 点击坐标处输入框并逐字键入 |
+| `browser_wait` | 等待 5–45 秒（自动通知用户 + 回传新截图） |
 
-## ⚠️ 闪传功能说明
+### 反风控伪装（v5.2.0+）
 
-闪传功能（`create_flash_task` 等）**仅支持非 Docker 环境**直接使用。
+以 `headless=True` 裸指纹运行会被绝大多数带风控的网站识别拦截。插件已内置完整伪装（配置项 `browser_stealth_enabled`，默认开启）：
 
-### 为什么？
+| 层面 | 措施 |
+|------|------|
+| 内核 | 优先 `channel="chromium"` 完整版新无头模式，插件/`window.chrome` 与真人浏览器一致 |
+| UA | 读取内核真实 UA 并抹除 `Headless` 字样，版本号与内核精确匹配 |
+| JS 注入 | 隐藏 `navigator.webdriver`、补齐 `window.chrome`、WebGL 厂商伪装、`permissions` 修正、中文语言 |
+| 环境 | `locale=zh-CN`、`timezone=Asia/Shanghai`、浅色配色 |
+| 启动参数 | 移除 `--disable-gpu`、新增 `--disable-blink-features=AutomationControlled` |
 
-闪传功能需要访问本地文件，而 Docker 容器之间是隔离的。如果 AstrBot 和 NapCat 运行在不同的容器中，它们无法直接访问对方的文件。
+> ⚠️ 仍可能被拦的残留特征：**海外机房 IP**、首次访问无历史 Cookie。遇到滑块验证需人工过一次，之后 Cookie 会持久化复用。
 
-### 解决方案
+### 视觉模型门禁
 
-**方案 1：不在 Docker 中使用闪传**
-如果你的 AstrBot 和 NapCat 都在本机运行（非 Docker），闪传功能可以直接使用。
+26 个浏览器工具**仅对支持图像输入的模型开放**（配置项 `browser_vision_gate_enabled`）。非多模态模型调用会收到明确提示，引导切换模型。
 
-**方案 2：配置共享目录（Docker 环境）**
-如果你是 Docker 环境，需要配置共享目录：
+### 其他浏览器工具
+
+`browser_search`（百度/必应/谷歌）、`browser_visit`、`browser_input`、`browser_scroll`、`browser_zoom`、`browser_screenshot`、`browser_back` / `browser_forward`、`browser_tabs` / `browser_close_tab`、`browser_chat`、`browser_favorite_*`（收藏夹）、`browser_install`（手动装依赖）
+
+### 支持的浏览器引擎
+
+- **chromium**（默认）— 通用性强，推荐
+- **firefox** — 兼容性好
+- **webkit** — 资源占用低
+
+---
+
+## 完整工具列表
+
+<details>
+<summary><b>展开全部 109 个工具</b></summary>
+
+### 记忆管理（5）
+`add_memory` · `search_memories` · `update_memory` · `delete_memory` · `get_memory_detail`
+
+### 消息与定时（8）
+`send_message` · `schedule_message` · `cancel_scheduled_message` · `list_scheduled_messages`
+`create_scheduled_command` · `list_scheduled_commands` · `cancel_scheduled_command` · `delete_scheduled_command`
+
+### QQ空间 / 互动（4）
+`publish_qzone` · `send_poke` · `send_like` · `recall_by_reply`
+
+### QQ状态（3）
+`update_qq_status` · `get_qq_status` · `get_fun_status_list`
+
+### 邮件（1）
+`send_qq_email`
+
+### 联系人（3）
+`search_contacts` · `list_contacts` · `get_user_group_role`
+
+### 群管理（25）
+`set_group_ban` · `set_group_kick` · `set_group_whole_ban` · `set_group_card` · `set_group_admin`
+`set_group_name` · `set_group_special_title` · `set_group_add_option` · `set_group_portrait`
+`send_group_notice` · `delete_group_notice` · `get_group_notice_list`
+`set_essence_msg` · `delete_essence_msg` · `get_group_members_info` · `get_group_shut_list`
+`get_group_honor_info` · `get_group_at_all_remain` · `get_group_ignore_add_request` · `send_group_sign`
+
+### 群文件（9）
+`list_group_files` · `upload_group_file` · `delete_group_file` · `create_group_file_folder`
+`delete_group_folder` · `move_group_file` · `rename_group_file` · `trans_group_file` · `get_share_link`
+
+### 个人资料（4）
+`set_qq_profile` · `set_qq_avatar` · `fetch_custom_face` · `set_input_status`
+
+### AI 声聊（2）
+`get_ai_characters` · `send_ai_voice`
+
+### 历史消息（2）
+`get_group_msg_history` · `get_friend_msg_history`
+
+### 闪传（8）
+`create_flash_task` · `get_flash_file_list` · `get_flash_file_url` · `send_flash_msg`
+`get_fileset_info` · `get_fileset_id` · `download_fileset` · `send_flash_msg`
+
+### 在线文件（6）
+`get_online_file_msg` · `send_online_file` · `send_online_folder`
+`receive_online_file` · `refuse_online_file` · `cancel_online_file`
+
+### 好友管理（1）
+`delete_friend`
+
+### 工作区（5）
+`run_python_code` · `list_workspace_files` · `read_workspace_file` · `read_image` · `send_file` · `delete_workspace_file`
+
+### 浏览器（26）
+**坐标交互**：`browser_click` · `browser_double_click` · `browser_right_click` · `browser_long_press` · `browser_drag` · `browser_input_at` · `browser_hover` · `browser_wait`
+
+**页面操作**：`browser_search` · `browser_visit` · `browser_input` · `browser_scroll` · `browser_zoom` · `browser_screenshot` · `browser_back` · `browser_forward` · `browser_tabs` · `browser_close_tab` · `browser_close` · `browser_chat`
+
+**收藏夹**：`browser_favorite_list` · `browser_favorite_add` · `browser_favorite_delete`
+
+**其他**：`fetch_url` · `browser_install` · `open_page` · `screenshot_page` · `close_page`
+
+</details>
+
+> 工具名可用 `search_wyc_tools("<关键词>")` 检索，或 `call_wyc_tools()` 查看完整列表（含参数说明）。
+
+---
+
+## 配置说明
+
+WebUI → 插件 → 更多LLM工具 → 配置页。共 **164 个配置项**，常用项：
+
+### 基础
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
+| `enabled` | `true` | 插件总开关 |
+| `enable_<工具名>` | `true` | 单独启停任意工具（109 项全量覆盖） |
+| `tool_permissions` | `{}` | 权限档位 `{"工具名": "global/admin/disabled"}` |
+| `privacy_mode` | `normal` | `privacy` 时群号/QQ号 SHA1 脱敏 |
+| `max_output_chars` | — | 工具返回内容字符上限（防上下文溢出） |
+
+### 记忆与人格
+
+| 配置 | 说明 |
+|------|------|
+| `max_memories_per_user` | 每用户最大记忆数（超出删最旧） |
+| `memory_inject_enabled` | 自动注入用户记忆到上下文 |
+| `max_inject_memories` | 单次注入的最大记忆条数 |
+| `inject_group_role_enabled` | 自动注入发言者在群内的身份 |
+| `inject_tool_prompt_enabled` | 注入工具使用说明（约 800–1000 token，默认关） |
+
+### 功能开关
+
+| 配置 | 说明 |
+|------|------|
+| `group_manage_enabled` | 群管理功能总开关 |
+| `kick_enabled` | 踢人开关（需群管理总开关开启） |
+| `search_enabled` | 联系人搜索 |
+| `auto_input_status_enabled` | 私聊自动显示"正在输入" |
+| `enable_human_typing` | 拟人化回复延迟（含 `typing_*` 系列参数） |
+
+### 邮件
+
+| 配置 | 说明 |
+|------|------|
+| `email_sender` | 发件人 QQ 邮箱 |
+| `email_authorization_code` | 授权码（非登录密码，WebUI 脱敏） |
+| `email_smtp_server` / `email_smtp_port` | SMTP 服务器与端口 |
+
+### 浏览器
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
+| `browser_vision_gate_enabled` | `true` | 视觉模型门禁 |
+| `browser_stealth_enabled` | `true` | 反风控伪装 |
+| `browser_type` | `chromium` | chromium / firefox / webkit |
+| `browser_mode` | `embedded` | embedded / external(CDP) |
+| `cdp_url` | — | CDP 远程调试地址（external 模式） |
+| `browser_render_mode` | `full` | full / simple / minimal / text |
+| `image_output_format` | `png` | 截图输出格式（webp 部分模型不支持） |
+| `llm_screenshot_text_only` | `false` | 截图仅返回文本（非多模态模型用） |
+| `viewport_size` / `max_pages` / `timeout` | — | 视口、标签页上限、超时 |
+| `idle_timeout` | `300` | 空闲多久自动关浏览器 |
+
+### 安全
+
+| 配置 | 说明 |
+|------|------|
+| `ssrf_blocked_urls` | 自定义阻断 URL/IP |
+| `ssrf_custom_blocked_ranges` | 自定义阻断网段（CIDR） |
+| `run_python_sandbox_enabled` | Python 增强沙箱 |
+| `workspace_banned_patterns` | 工作区禁止的代码正则 |
+| `resolve_image_restricted` | 限制图片读取路径 |
+| `flash_transfer_dir` / `docker_container_name` | 闪传共享目录与 NapCat 容器名 |
+
+---
+
+## 管理员命令
+
+51 个 QQ 命令走独立路径，**仅 AstrBot 管理员**（`admins_id`）可用，不受 LLM 权限体系影响：
+
+<details>
+<summary><b>展开命令列表</b></summary>
+
+| 命令 | 说明 |
+|------|------|
+| `/tool_all_help` | 查看完整帮助 |
+| `/tool_memory list/add/delete/update/get` | 记忆管理 |
+| `/tool_send_message <目标ID> <消息>` | 发送消息 |
+| `/tool_schedule <目标ID> <消息> <时间>` | 定时消息 |
+| `/tool_scheduled_list` / `_cancel <ID>` / `_delete <ID>` | 定时指令管理 |
+| `/tool_publish_qzone <内容>` | 发说说 |
+| `/tool_status <状态> <分钟>` / `/tool_status_get` | QQ 状态 |
+| `/tool_poke <QQ号>` | 戳一戳 |
+| `/tool_recall` | 引用撤回 |
+| `/tool_email <收件人> <主题> <内容>` | 发邮件 |
+| `/tool_search <关键词>` / `/tool_list [类型] [limit]` | 联系人 |
+| `/ai_characters` / `/ai_voice [角色] <文本>` | AI 语音 |
+| `/ban_user <QQ号> <分钟>` / `/unban_user <QQ号>` | 禁言/解禁 |
+| `/kick <QQ号>` | 踢出 |
+| `/whole_ban <on/off>` | 全体禁言 |
+| `/set_card <QQ号> <昵称>` | 改名片 |
+| `/send_notice <内容>` / `/del_notice <公告ID>` / `/list_notices` | 群公告 |
+| `/list_files` / `/delete_group_file <file_id>` / `/upload_file <路径> [文件名]` | 群文件 |
+| `/create_folder <名称>` / `/del_folder <ID>` | 群文件夹 |
+| `/move_group_file` / `/rename_group_file` / `/trans_group_file` | 文件操作 |
+| `/group_members` | 群成员列表 |
+| `/set_admin <QQ号> <on/off>` | 管理员设置 |
+| `/set_group_name <名称>` | 群名称 |
+| `/group_honor [类型]` | 群荣誉 |
+| `/at_all_remain` | @全体剩余次数 |
+| `/set_title <QQ号> <头衔>` | 专属头衔 |
+| `/shut_list` | 禁言列表 |
+| `/ignore_requests` | 忽略的加群请求 |
+| `/set_add_option <选项>` | 加群验证方式 |
+| `/group_sign` | 群打卡 |
+| `/set_qq_avatar [图片]` | 设置QQ头像 |
+| `/set_group_portrait [群号] [图片]` | 设置群头像 |
+| `/set_profile nickname=xxx personal_note=xxx` | 个人资料 |
+| `/send_like <QQ号> [次数]` | 点赞 |
+| `/get_group_msg_history [群号] [序号] [数量]` | 群历史消息 |
+| `/get_friend_msg_history <QQ号> [序号] [数量]` | 好友历史消息 |
+| `/fetch_custom_face [数量]` | 自定义表情 |
+| `/set_input_status <QQ号> <类型>` | 输入状态 |
+
+</details>
+
+---
+
+## 常见问题
+
+<details>
+<summary><b>发说说失败（Cookie 无效）</b></summary>
+
+1. 检查 NapCat 是否已登录
+2. 确认 NapCat 版本 ≥ 4.17.55（需支持 `get_credentials` / `get_cookies`）
+3. 重新登录 NapCat 刷新 Cookie（插件每次发说说都会自动取最新 Cookie，无需手动配置）
+</details>
+
+<details>
+<summary><b>LLM 不调用工具 / 说不知道怎么做</b></summary>
+
+1. 确认插件已启用（`enabled: true`）
+2. 日志中确认 `search_wyc_tools` 已加载
+3. 该模型需支持 Function Calling
+</details>
+
+<details>
+<summary><b>浏览器工具被拒绝（视觉门禁）</b></summary>
+
+提示「当前模型不支持图像输入（视觉），无法使用浏览器功能」：
+
+1. 切换到多模态模型（GPT-4o / GLM-4V / Qwen-VL / Gemini / Claude 等）
+2. 或到 AstrBot 服务商配置为当前模型勾选「图像」能力
+3. 或关闭 `browser_vision_gate_enabled`（不推荐，AI 看不到截图就无法操作）
+</details>
+
+<details>
+<summary><b>网页被风控拦截 / 一直弹验证码</b></summary>
+
+1. 确认 `browser_stealth_enabled` 为开启状态
+2. 海外机房 IP 本身信誉低，这是伪装无法消除的
+3. 首次访问无 Cookie，遇到滑块需人工过一次，之后 Cookie 会复用
+4. 极严风控（如部分登录页）建议改用 `browser_mode=external` 接真机浏览器 CDP
+</details>
+
+<details>
+<summary><b>定时任务到点没执行</b></summary>
+
+1. 检查日志确认任务已加载（重启后自动恢复）
+2. 超过计划时间 5 分钟以上的任务会被跳过（防过期补发）
+3. 确认目标 ID 仍然有效
+</details>
+
+<details>
+<summary><b>浏览器启动失败 / PTY spawn failed</b></summary>
+
+1. 插件会自动安装 Playwright，首次约需 2 分钟
+2. 可手动调用 `browser_install` 工具
+3. 容器内以 root 运行需 `--no-sandbox`（插件已自动处理）
+</details>
+
+<details>
+<summary><b>闪传功能不可用</b></summary>
+
+闪传需要 AstrBot 与 NapCat 共享目录（Docker 环境两容器文件系统隔离）：
 
 ```bash
-# 1. 创建共享目录（宿主机）
+# 宿主机创建共享目录
 mkdir -p /opt/astrbot_flash
 
-# 2. AstrBot 容器添加挂载
+# AstrBot 容器挂载（读写）
 docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:rw ...
 
-# 3. NapCat 容器添加挂载
+# NapCat 容器挂载（只读）
 docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 ```
 
-然后在插件配置中设置 `flash_transfer_dir` 为 `/tmp/astrbot_flash`。
+然后配置 `flash_transfer_dir = /tmp/astrbot_flash`。
 
-### 替代方案
+替代方案：用 `send_file` 工具直接发送文件。
+</details>
 
-如果闪传功能不可用，你可以使用 `send_message` 工具直接发送文件给用户。
+---
+
+## 更新日志
+
+完整历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v5.2.2 — 修复权限/代理/资料三处问题
+- **#13 权限设置重载后失效**：`tool_permissions` 改存独立文件 `tool_permissions.json`，避开 AstrBot 配置完整性检查对空 object 子键的清理（此前保存即被删，日志实锤）
+- **#12 浏览器设置代理后无法使用**：Playwright 的 `new_context(proxy=)` 只接受 dict，新增 `_normalize_proxy()` 自动转换字符串（支持无 scheme / 账密 / socks5）
+- **#9 无法设置 personal_note**：NapCat 要求 `nickname` 与 `personal_note` 同时必填，未指定字段自动用当前资料回填
+- WebUI 权限页改为显示**实际生效档位**，不再把敏感工具误显示为「全局」
+
+### v5.2.1 — 修复重复回复
+LLM 先输出完整文本（立即发出）→ 再调 `send_message_to_user` 因幻觉 session 失败 → 最终回复重复同样内容。已通过 `on_llm_request` 注入发送规则约束。
+
+### v5.2.0 — 浏览器反风控伪装
+修复裸 headless 指纹导致 99% 带风控网站拦截：完整版 Chromium 新无头内核 + UA 抹平 + `navigator.webdriver` 隐藏 + WebGL 厂商伪装 + 中文语言/时区。
+
+### v5.1.0 — 坐标交互体系 + 安全大修
+- 移除 CSS 选择器操作，全面转向视觉坐标交互（新增 6 个坐标工具 + `browser_wait`）
+- 视觉模型门禁
+- 安全：修复工具路径权限绕过（严重）、Python 沙箱失效、SSRF 多种绕过、路径穿越
+- 稳定性：消除 30 秒事件循环阻塞、72 处 NapCat API 加超时、后台任务防回收
+- 补齐 45 个工具开关（109 个全覆盖）
+
+### 早期版本
+v5.0.x（图片发送/安全加固）、v4.x（浏览器自动化首版）、v3.x（记忆管理/群管扩展）、v1.x–v2.x（初版）
+
+---
+
+## 开发者信息
+
+- **作者**：Wyccotccy
+- **仓库**：https://github.com/Wyccotccy/astrbot_plugin_qzone_tools
+- **反馈**：GitHub Issues 或 QQ 1449783068（12:00–03:00）
+
+## 许可证
+
+MIT License
