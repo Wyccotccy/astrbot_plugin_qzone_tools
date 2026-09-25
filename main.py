@@ -1083,9 +1083,13 @@ class Main(Star):
         self._user_last_active: Dict[str, float] = {}
         self._typing_lock = asyncio.Lock()
         # 工作区配置
+        # 注意：工作区必须位于 data_dir（持久化数据目录），不能写在插件安装目录内，
+        # 否则用户文件会污染包体、影响插件升级与审计（AstrBot 插件市场上架要求）
         self.workspace_enabled = self.config.get("workspace_enabled", True)
-        self.workspace_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace")
+        self.workspace_dir = os.path.join(self.data_dir, "workspace")
         self.workspace_banned_patterns = self.config.get("workspace_banned_patterns", [])
+        # 先迁移旧数据（此时目标目录尚未创建，迁移判断才生效），再确保目录存在
+        self._migrate_legacy_dirs()
         os.makedirs(self.workspace_dir, exist_ok=True)
         
         # 闪传中转目录配置
@@ -1177,6 +1181,45 @@ class Main(Star):
 
     def _permissions_file(self) -> str:
         return os.path.join(self.data_dir, "tool_permissions.json")
+
+    def _migrate_legacy_dirs(self) -> None:
+        """把旧版本误写在插件安装目录内的持久化数据迁移到 data_dir。
+
+        历史版本曾把 workspace/ fonts/ favorite.json 写在插件包内，
+        升级到新版本后这些数据需要搬走，否则用户会"丢失"文件
+        （AstrBot 插件市场要求持久化数据必须位于 data_dir）。
+        """
+        package_dir = os.path.dirname(os.path.abspath(__file__))
+        if os.path.realpath(package_dir) == os.path.realpath(self.data_dir):
+            return  # 极端情况下两者相同，无需迁移
+
+        # (旧路径, 新路径) —— 仅迁移"文件/目录存在 且 目标不存在"的项
+        pairs = [
+            (os.path.join(package_dir, "workspace"), self.workspace_dir),
+            (os.path.join(package_dir, "fonts"), os.path.join(self.data_dir, "fonts")),
+        ]
+        for old, new in pairs:
+            try:
+                if not os.path.exists(old) or os.path.exists(new):
+                    continue
+                import shutil
+
+                shutil.move(old, new)
+                logger.info(f"[QZoneTools] 已迁移旧数据目录: {old} -> {new}")
+            except Exception as e:
+                logger.warning(f"[QZoneTools] 迁移 {old} 失败（可手动处理）: {_safe_error_msg(e)}")
+
+        # favorite.json → data_dir/favorites.json
+        old_fav = os.path.join(package_dir, "favorite.json")
+        new_fav = os.path.join(self.data_dir, "favorites.json")
+        try:
+            if os.path.exists(old_fav) and not os.path.exists(new_fav):
+                import shutil
+
+                shutil.move(old_fav, new_fav)
+                logger.info(f"[QZoneTools] 已迁移收藏夹: {old_fav} -> {new_fav}")
+        except Exception as e:
+            logger.warning(f"[QZoneTools] 迁移收藏夹失败（可手动处理）: {_safe_error_msg(e)}")
 
     def _load_tool_permissions(self) -> Dict[str, str]:
         """从独立文件载入权限表；兼容读取旧版主配置里的 tool_permissions。"""
@@ -3747,14 +3790,15 @@ class Main(Star):
         """
         # 收藏夹
         try:
-            favorite_file = Path(__file__).parent / "favorite.json"
+            # 持久化数据必须写 data_dir，不能写插件安装目录（市场上架要求）
+            favorite_file = Path(self.data_dir) / "favorites.json"
             self.fav_mgr = FavoriteManager(favorite_file)
         except Exception as e:
             logger.error(f"[Browser] 收藏夹初始化失败: {e}")
 
-        # 刻度叠加（resource 目录缺失时自动创建，避免后续 truetype 抛错）
+        # 刻度叠加（resource 目录位于包内，只读资源；运行时产物写入 data_dir）
         try:
-            resource_dir = Path(__file__).parent / "resource"
+            resource_dir = Path(self.data_dir) / "resource"
             try:
                 resource_dir.mkdir(parents=True, exist_ok=True)
             except Exception:
@@ -5635,7 +5679,8 @@ class Main(Star):
         import tempfile
 
         # 获取字体路径（不存在则自动下载，使用异步 HTTP）
-        font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
+        # 字体属于运行时下载产物，写入 data_dir 而非插件安装目录（市场上架要求）
+        font_dir = os.path.join(self.data_dir, 'fonts')
         font_path = os.path.join(font_dir, 'NotoSansCJK-Regular.ttc')
         if not os.path.exists(font_path):
             await self._ensure_font(font_dir, font_path)

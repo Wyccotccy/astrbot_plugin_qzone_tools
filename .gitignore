@@ -1,3 +1,6 @@
 __pycache__/
 fonts/
 workspace/
+resource/
+favorite.json
+favorites.json

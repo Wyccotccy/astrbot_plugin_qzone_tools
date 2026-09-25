@@ -3,7 +3,7 @@
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
 <p>
-  <img src="https://img.shields.io/badge/version-5.2.3-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-5.2.4-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
   <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
@@ -433,6 +433,11 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 ## 更新日志
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v5.2.4 — 持久化数据迁出插件目录（市场上架合规）
+- 工作区 / 字体 / 收藏夹 / 刻度资源全部迁移到 `data/plugin_data/astrbot_plugin_qzone_tools/`
+- 新增自动迁移逻辑，老用户升级不丢数据
+- `.gitignore` 补充运行时目录，`favorite.json` 移出版本控制
 
 ### v5.2.3 — 权限档位扩展为 4 档
 - 新增「群主/管理员（仅群聊）」档：群聊中群主/群管理可用，私聊自动回退超管
