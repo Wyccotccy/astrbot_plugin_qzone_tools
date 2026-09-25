@@ -1,3 +1,153 @@
+## [5.2.2] - 2026-09-25
+
+### 🐛 问题修复（Issues #9 / #12 / #13）
+
+#### #13 权限修改无效，重载/重启后全部变回默认
+- **根因**：`tool_permissions` 在 `_conf_schema.json` 中声明为 `type: "object"` + `items: {}`（空）。AstrBot 的 `AstrConfig.check_config_integrity()` 递归比对时会把这些动态子键全部判定为「参考配置中没有的配置项」并删除 —— 日志实锤 `Config key removed: tool_permissions.set_group_ban`，因此保存后重载/重启即被清空
+- **修复**：权限表改存**独立文件** `plugin_data/astrbot_plugin_qzone_tools/tool_permissions.json`（原子写入，不进主配置，从根上避开完整性检查）；schema 中该键降级为 string 占位；WebUI 读写走独立通道；自动迁移旧版主配置中的已有权限
+
+#### #12 浏览器设置代理后无法使用
+- **根因**：`new_context(proxy=...)` 传的是配置里的**字符串**（如 `http://127.0.0.1:7890`），而 Playwright 只接受 **dict**（`{"server": ..., "username": ..., "password": ...}`），字符串会直接导致上下文创建失败
+- **修复**：新增 `_normalize_proxy()` 统一规范化 —— 支持 `http://host:port`、`host:port`（自动补 scheme）、`socks5://user:pass@host:port`（自动拆出账密并 URL 解码）、dict 原样透传、空值返回 None
+
+#### #9 无法设置 personal_note
+- **根因**：NapCat 的 `set_qq_profile` 要求 `nickname` 与 `personal_note` **均为必填**。只传 `personal_note` 时报 `Schema compilation error: Expected required property`
+- **修复**：未指定的字段先用 `get_login_info` 取回当前资料回填后再提交；确实取不到昵称时给出明确错误提示而非报 schema 错
+
+### 🔧 改进
+- WebUI「权限控制」页改为回传**实际生效档位**：此前敏感工具未显式配置时实际按 admin 生效，但页面因空表全部显示为「全局」，造成"设置没生效"的误判（issue #10 的观感来源）
+- 版本号 5.2.1 → 5.2.2
+
+### ✅ 验证
+- 配置持久化：模拟 AstrBot 完整性检查 + 插件重载，权限表完整恢复（主配置仍为空 `{}`，独立文件生效）
+- 代理规范化：7 种输入形态全部正确（含 URL 编码账密解码）
+- 浏览器回归：坐标交互 10/10 通过，改动无副作用
+
+---
+
+## [5.2.1] - 2026-09-24
+
+### 🐛 问题修复
+
+#### 修复浏览器场景重复回复（同一内容发两次）
+- **根因**（日志实锤的三步链）：
+  1. AstrBot 截图审查机制下，LLM 在工具循环中先输出完整文本 → `buffer_intermediate_messages=false` 使其**立即发出**（消息①）
+  2. LLM 又调 `send_message_to_user`（文本+截图），但**幻觉编造 session 参数**（`platform_id:QQ:group:979465319`）→ `invalid session` 失败
+  3. 工具失败后 Agent 结束，最终文本回复（重复同样内容）再次发出（消息②）
+- **修复**：`on_llm_request` 注入新增 [回复与发送规则]：① `send_message_to_user` 的 session 参数必须省略 ② 完整回复只输出一次，禁止先输出文字再重复发送 ③ 工具期间进度只用一句简短提示，完整结果最后一次性输出
+- 备注：`buffer_intermediate_messages=true` 只能把两条合并为一条（重复内容仍在），治标不治本，未启用
+
+---
+
+## [5.2.0] - 2026-09-24
+
+### ✨ 新增功能
+
+#### 浏览器反风控伪装（browser_stealth）
+- **背景**：此前浏览器以 `headless=True` 裸指纹运行，UA 自带 `HeadlessChrome`、`navigator.webdriver=true`、WebGL 渲染器暴露 SwiftShader，带风控的网站（知乎/淘宝/B站/云服务登录页等）几乎必然识别为机器人并拦截
+- **完整版新无头内核**：chromium 引擎优先以 `channel="chromium"` 启动（Playwright ≥1.49 完整版 Chromium 新无头模式，插件/`window.chrome` 等与真人浏览器一致），不可用时自动回退默认内核
+- **真实 UA 抹平**：启动时读取内核真实 User-Agent 并抹去 `Headless` 字样（版本号与内核精确匹配），外发请求 UA 为正常 `Chrome/149.x`
+- **stealth 注入**（`add_init_script`，页面 JS 执行前生效）：
+  - `navigator.webdriver → false`（配合启动参数 `--disable-blink-features=AutomationControlled` 双保险）
+  - 补齐 Chromium 内核缺失的 `window.chrome`（runtime/app/csi/loadTimes）
+  - `navigator.languages → ["zh-CN","zh"]`、hardwareConcurrency/deviceMemory=8
+  - WebGL UNMASKED vendor/renderer 伪装为 Intel 显卡（隐藏软件渲染特征）
+  - `permissions.query('notifications') → prompt`（修复 headless 默认 denied 的异常特征）
+- **context 拟真**：`locale=zh-CN`、`timezone=Asia/Shanghai`、浅色配色、`device_scale_factor=1`
+- **启动参数调整**：移除 `--disable-gpu`（避免 WebGL 软件渲染指纹），新增 `--lang=zh-CN`
+- **新增配置 `browser_stealth_enabled`**（默认开启，WebUI 可关）；CDP 模式同样注入 stealth 脚本
+- **实测**：指纹自检 13/13 通过、坐标交互回归 10/10 通过、外发 UA 无 Headless 字样
+
+---
+
+## [5.1.0] - 2026-09-19
+
+### ✨ 新增功能
+
+#### 浏览器坐标交互体系（视觉模型专属）
+- **完全移除选择器操作**：删除 `click_element`（CSS 选择器点击）、`type_text`（选择器输入）、`browser_swipe`，浏览器操作全面转向 **AI 看截图 → 输出坐标** 的视觉交互模式
+- **新增 6 个坐标交互工具**（坐标与截图像素一一对应，左上角为原点）：
+  - `browser_double_click(x, y)` - 双击坐标（选中文本/打开文件夹）
+  - `browser_right_click(x, y)` - 右键坐标（上下文菜单）
+  - `browser_long_press(x, y, duration_ms)` - 长按坐标（唤起悬浮菜单，100-10000ms）
+  - `browser_drag(x1, y1, x2, y2, duration_ms)` - 坐标拖拽（拖滑块/移动元素，按距离自动插值模拟真实拖动）
+  - `browser_input_at(x, y, text, press_enter)` - 点击坐标处输入框并逐字键入（带 30ms 打字延迟，真实触发 input 事件）
+  - `browser_hover(x, y)` - 悬停坐标（触发下拉菜单/悬浮提示）
+- **坐标越界自动贴边**：超出视口的坐标自动限制到边界内，不报错
+- **每次操作自动回传新截图**：AI 点击/拖拽后立即看到页面最新状态，形成「看截图→出坐标→看结果」视觉闭环
+
+#### browser_wait 等待工具
+- **新增 `browser_wait(seconds)`**：一次调用完成「通知用户 + 等待 + 重看页面」
+  - 调用后立即向当前会话发送 `⏳ AI正在等待网页→Ns`
+  - 等待 5-45 秒（自动夹紧）后自动截取最新页面截图回传给 LLM
+  - 适用于页面跳转、验证码倒计时、异步加载等场景，避免 LLM 反复截图轮询浪费 token
+  - 通知用户失败不影响等待流程
+
+#### 视觉模型门禁
+- **新增 `browser_vision_gate_enabled` 配置**（默认开启）：浏览器工具仅对支持图像输入的多模态模型开放
+- 三层判定：provider `modalities` 含 `image` → 放行；配置了但无 `image` → 拒绝；未配置 → 模型名启发式兜底（GPT-4o/GLM-4v/VL/Gemini/Claude 等 + GLM 版本号正则）
+- 非视觉模型调用浏览器工具会收到明确提示，引导切换模型或补配能力
+
+### 🔒 安全修复
+
+#### 工具权限控制（重大）
+- **修复 LLM 工具路径完全绕过权限校验的严重漏洞**：此前 `run_wyc_tool` 内的 105 个工具无任何角色校验，群内任意用户可通过提示词注入让 LLM 执行踢人/禁言/删文件
+- **新增 `SENSITIVE_TOOLS` 敏感工具集**（59 个高危工具默认仅管理员可用）：群管理、身份资料修改、代码执行、文件外发、定时任务、浏览器等
+- **`tool_permissions` 的 admin 档真正生效**：此前仅 disabled 档有效，admin 档等同无限制（安全误导）
+- 权限判定三级：AstrBot 全局管理员（admins_id）→ 群主/群管理员（含 60 秒角色缓存）→ 拒绝
+- `run_wyc_tool` 双重校验 + 越权调用告警日志；非管理员在工具搜索/列表阶段即看不到敏感工具
+
+#### Python 沙箱（重大）
+- **修复沙箱完全失效**：`run_python_sandbox_enabled` 配置此前从未被读取
+- **移除自动注入的 `import os as _os`**（此前用户代码可直接 `_os.system()` 拿 shell）
+- **检测改为 AST + 正则双层**：拦截 `getattr(__builtins__, '__import__')` 等动态导入绕过，覆盖 importlib/builtins/pickle/pty 等危险模块
+- **子进程资源限制**：RLIMIT_CPU/AS/FSIZE/NPROC + `-I` 隔离模式 + 白名单环境变量 + 用户代码封装进函数作用域
+
+#### SSRF 防护加固
+- **非标准 IP 写法归一化**：拦截十进制（`2130706433`）/十六进制（`0x7f000001`）/八进制（`0177.0.0.1`）/IPv4 映射 IPv6（`::ffff:127.0.0.1`）等绕过手法
+- **DNS 解析校验**：域名解析到内网地址即阻断（防 DNS rebinding）
+- **重定向拦截**：`fetch_url` 禁止自动跟随重定向，302 目标同样做 SSRF 校验
+- 默认拦截全部私有/回环/链路本地/保留网段
+
+#### 路径穿越修复
+- **统一 `_safe_resolve_path`**：`send_file`/`read_image`/`read_workspace_file` 此前支持任意绝对路径（可读容器内任意文件发到 QQ），现仅允许工作区/截图缓存/闪传目录（realpath 防软链接穿透）
+- `download_fileset` 下载文件名净化，防路径穿越写入
+
+#### 其他安全
+- 邮箱授权码 WebUI 脱敏（回传 `***` 表示不修改），不再明文下发前端
+- WebUI 文件上传增加 32MB 大小限制 + base64 校验 + 原子写
+
+### 🐛 修复
+
+#### 事件循环阻塞（重大）
+- **修复 `run_python_code` 同步 `subprocess.run` 阻塞**：此前最长冻结整个 AstrBot 事件循环 30 秒（所有群消息/插件/WebUI 全部停摆），改用 `asyncio.create_subprocess_exec`
+- 同步阻塞的 `docker cp`（闪传）、`urllib.request.urlretrieve`（字体/文件下载）、`apt-get install` 全部异步化或移除
+
+#### 卡死/资源泄漏
+- **72 处 NapCat API 调用统一接入超时封装**（`_call`/`_safe_call_action`，默认 30s）：此前 NapCat 无响应时 await 永久挂起
+- **`_update_contacts_cache` 网络 IO 移出锁外**：消除"持锁 + 无超时 IO"死锁配方
+- **7 处 `asyncio.create_task` 全部登记引用**（`_create_bg_task`）：修复后台任务被 GC 静默回收（定时指令轮询/浏览器监控可能无声停止），带异常回调
+- **`terminate()` 完整清理**：取消全部登记任务 + 关闭浏览器释放 Playwright 进程 + 等待任务真正结束（消除 "Task was destroyed" 警告），修复 `command_executor` 为 None 时的潜在崩溃
+- `_periodic_refresh` 单次刷新失败不再终止整个刷新循环
+- `BrowserDownloader.verify_browser` 加验证锁 + 2 次重试 + `--no-sandbox`（容器 root 运行），修复并发启动导致的 `Target page, context or browser has been closed`
+- `_safe_await` 异常覆盖面扩展：浏览器/页面被关闭类错误同样触发重试
+- `BrowserSupervisor` 锁范围缩小：浏览器操作不再串行化所有并发调用；`_stop_browser` 失败时仍正确置空状态
+- `FavoriteManager` 原子写（临时文件 + fsync + replace），防并发写损坏
+
+#### 配置系统
+- **补齐 45 个工具开关**：`_conf_schema.json` 此前只有 61 个 `enable_*`，45 个工具（含 `run_python_code`/`send_file`/全部浏览器工具）无法通过 WebUI 关闭；现 109 个工具全量覆盖
+- WebUI 保存白名单放行全部 `enable_*` 开关（此前保存被静默丢弃）
+
+### 🔧 变更
+
+- **定时消息持久化**：`schedule_message`/WebUI 定时消息接入 `scheduled_messages.json`，重启自动恢复（过期 5 分钟以上不补发），提示文案同步更新
+- **隐私模式真正实现**：`privacy_mode=privacy` 时工具返回文本中的群号/QQ号替换为不可逆短标识（SHA1 前 6 位，可区分不可还原）
+- 隐私脱敏挂在 `run_wyc_tool` 统一出口，全部工具生效
+- 浏览器启动检查统一走 `BrowserDownloader`（并发安全），移除每次启动都执行的 `apt-get install`
+- `metadata.yaml` 版本 5.0.6 → 5.1.0
+
+---
+
 ## [5.0.6] - 2026-06-16
 
 ### ✨ 改进

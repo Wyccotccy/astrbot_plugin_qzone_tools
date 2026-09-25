@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import platform
 import shutil
 import uuid
@@ -13,11 +14,110 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from .image_utils import get_format_from_config, get_output_ext, _FORMAT_MAP as IMG_FORMAT_MAP
+from astrbot.api import logger
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext, Cookie, Page, Playwright
 
 T = TypeVar("T")
+
+# ======================================================
+# 反风控伪装脚本（stealth）
+# 在每个页面所有 JS 执行前注入，抹平 headless 自动化指纹。
+# 配合 channel="chromium"（完整版新无头内核）+ 正常 UA 使用。
+# ======================================================
+STEALTH_JS = """
+(() => {
+  try {
+    // --- navigator.webdriver（配合 --disable-blink-features=AutomationControlled 双保险）---
+    Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
+
+    // --- window.chrome（Chromium 开源内核不带此对象，但 UA 标 Chrome，必须补上）---
+    if (!window.chrome) { window.chrome = {}; }
+    window.chrome.runtime = window.chrome.runtime || {
+      PlatformOs: { MAC: 'mac', WIN: 'win', ANDROID: 'android', CROS: 'cros', LINUX: 'linux', OPENBSD: 'openbsd' },
+      PlatformArch: { ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64', MIPS: 'mips', MIPS64: 'mips64' },
+      PlatformNaclArch: { ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64', MIPS: 'mips', MIPS64: 'mips64' },
+      RequestUpdateCheckStatus: { NO_UPDATE: 'no_update', UPDATE_AVAILABLE: 'update_available', THROTTLED: 'throttled' },
+      OnInstalledReason: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },
+      OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
+      connect: function () { return { onDisconnect: { addListener: function () {} }, onMessage: { addListener: function () {} }, postMessage: function () {} }; },
+      sendMessage: function () {},
+    };
+    window.chrome.app = window.chrome.app || {
+      isInstalled: false,
+      InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+      RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
+      getDetails: function () {},
+      getIsInstalled: function () { return false; },
+      runningState: function () { return 'cannot_run'; },
+    };
+    window.chrome.csi = window.chrome.csi || function () {
+      return { startE: Date.now(), onloadT: Date.now(), pageT: Date.now() - 100, tran: 15 };
+    };
+    window.chrome.loadTimes = window.chrome.loadTimes || function () {
+      return {
+        commitLoadTime: Date.now() / 1000, connectionInfo: 'h2',
+        finishDocumentLoadTime: Date.now() / 1000, finishLoadTime: Date.now() / 1000,
+        firstPaintAfterLoadTime: 0, firstPaintTime: Date.now() / 1000,
+        navigationType: 'Other', npnNegotiatedProtocol: 'h2',
+        requestTime: Date.now() / 1000 - 0.2, startLoadTime: Date.now() / 1000 - 0.2,
+        wasAlternateProtocolAvailable: false, wasFetchedViaSpdy: true, wasNpnNegotiated: true,
+      };
+    };
+
+    // --- plugins/mimeTypes：完整版新无头内核原生带 PDF 插件，不伪造 ---
+
+    // --- 语言 / 硬件 ---
+    Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh'], configurable: true });
+    try {
+      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
+      Object.defineProperty(navigator, 'deviceMemory', { get: () => 8, configurable: true });
+      Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0, configurable: true });
+    } catch (e) {}
+
+    // --- 权限 API（未授权应返回 prompt，headless 默认 denied 是异常特征）---
+    const origQuery = navigator.permissions && navigator.permissions.query
+      ? navigator.permissions.query.bind(navigator.permissions) : null;
+    if (origQuery) {
+      navigator.permissions.query = (p) => {
+        if (p && p.name === 'notifications') {
+          return Promise.resolve({ state: 'prompt', onchange: null, name: 'notifications' });
+        }
+        return origQuery(p);
+      };
+    }
+
+    // --- WebGL 厂商/渲染器（软件渲染 SwiftShader 是典型 headless 特征）---
+    const GL_VENDOR = 'Intel Inc.';
+    const GL_RENDERER = 'Intel(R) UHD Graphics 630';
+    const patchGL = (proto) => {
+      if (!proto) { return; }
+      const orig = proto.getParameter;
+      proto.getParameter = function (param) {
+        if (param === 37445) { return GL_VENDOR; }
+        if (param === 37446) { return GL_RENDERER; }
+        return orig.call(this, param);
+      };
+      const origExt = proto.getExtension;
+      proto.getExtension = function (name) {
+        const ext = origExt.call(this, name);
+        if (ext && name === 'WEBGL_debug_renderer_info') {
+          const oGet = ext.getParameter ? ext.getParameter.bind(ext) : null;
+          if (oGet) {
+            ext.getParameter = (p) => (p === 37445 ? GL_VENDOR : p === 37446 ? GL_RENDERER : oGet(p));
+          }
+        }
+        return ext;
+      };
+    };
+    patchGL(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
+    patchGL(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
+  } catch (e) { /* 伪装失败不影响正常功能 */ }
+})();
+"""
+
+
 
 
 class CookieManager:
@@ -97,7 +197,7 @@ class BrowserCore:
 
     async def _safe_await(self, coro_factory, retries: int = 2) -> T:  # type: ignore
         """
-        Playwright 操作超时重试机制
+        Playwright 操作超时/状态异常重试机制
         :param coro_factory: 无参 callable，每次调用返回一个新的协程（因为协程对象是一次性的）
         :param retries: 重试次数
         """
@@ -107,6 +207,15 @@ class BrowserCore:
         except (TypeError, ValueError):
             timeout = 30.0
 
+        # 可重试的异常特征：超时 / 浏览器或页面已关闭 / 连接断开
+        retryable_markers = (
+            "has been closed",
+            "Target closed",
+            "Browser has been closed",
+            "Connection closed",
+            "Target page, context or browser has been closed",
+        )
+
         last_exc = None
         for attempt in range(retries + 1):
             try:
@@ -114,7 +223,16 @@ class BrowserCore:
             except asyncio.TimeoutError as e:
                 last_exc = e
                 if attempt < retries:
-                    await asyncio.sleep(0.5)  # 等待再重试
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                # 浏览器/页面被关闭类错误同样可重试
+                msg = str(e)
+                if any(marker in msg for marker in retryable_markers):
+                    last_exc = e
+                    if attempt < retries:
+                        await asyncio.sleep(0.5)
+                        continue
+                raise
         raise RuntimeError("Playwright 操作超时") from last_exc
 
     async def _safe_page_op(self, page: Page, coro: Coroutine[Any, Any, T]) -> T:
@@ -189,6 +307,11 @@ class BrowserCore:
                     )
 
                 self.context = self.browser.contexts[0]
+                if bool(self.config.get("browser_stealth_enabled", True)) and self.browser_type == "chromium":
+                    try:
+                        await self.context.add_init_script(STEALTH_JS)
+                    except Exception:
+                        pass
                 await self._restore_cookies()
 
                 self.all_pages = list(self.context.pages)
@@ -200,15 +323,62 @@ class BrowserCore:
                 return
 
             engine = getattr(self.playwright, self.browser_type)
-            self.browser = await engine.launch(
-                headless=True,
-                **self._get_launch_options(self.browser_type),
-            )
+            launch_opts = self._get_launch_options(self.browser_type)
+            stealth_on = bool(self.config.get("browser_stealth_enabled", True))
+
+            self.browser = None
+            if self.browser_type == "chromium":
+                try:
+                    # channel="chromium" → Playwright ≥1.49 走完整版 Chromium 新无头内核，
+                    # 指纹远比默认 headless_shell 接近真人浏览器；缺失时回退默认内核
+                    self.browser = await engine.launch(
+                        channel="chromium", headless=True, **launch_opts
+                    )
+                except Exception:
+                    self.browser = None
+            if self.browser is None:
+                self.browser = await engine.launch(headless=True, **launch_opts)
+
+            ctx_opts: dict[str, Any] = {}
+            init_scripts: list[str] = []
+            if stealth_on:
+                # UA：读取内核真实 UA 并抹去 Headless 字样，保证版本号与内核精确匹配
+                stealth_ua = ""
+                try:
+                    tmp_ctx = await self.browser.new_context()
+                    tmp_page = await tmp_ctx.new_page()
+                    stealth_ua = await tmp_page.evaluate("navigator.userAgent")
+                    await tmp_ctx.close()
+                except Exception:
+                    stealth_ua = ""
+                if not stealth_ua:
+                    stealth_ua = (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                    )
+                stealth_ua = stealth_ua.replace("HeadlessChrome", "Chrome").replace(
+                    "HeadlessFirefox", "Firefox"
+                )
+                ctx_opts = {
+                    "user_agent": stealth_ua,
+                    "locale": "zh-CN",
+                    "timezone_id": "Asia/Shanghai",
+                    "color_scheme": "light",
+                    "device_scale_factor": 1,
+                }
+                if self.browser_type == "chromium":
+                    init_scripts.append(STEALTH_JS)
 
             self.context = await self.browser.new_context(
                 viewport=self.config["viewport_size"] or None,
-                proxy=self.config["proxy"] or None,
+                proxy=self._normalize_proxy(self.config.get("proxy")),
+                **ctx_opts,
             )
+            for script in init_scripts:
+                try:
+                    await self.context.add_init_script(script)
+                except Exception:
+                    pass
             await self._restore_cookies()
 
             await self._ensure_page()
@@ -268,16 +438,71 @@ class BrowserCore:
     # 参数
     # ======================================================
 
+    @staticmethod
+    def _normalize_proxy(raw: Any) -> dict[str, str] | None:
+        """把配置里的代理字符串规范成 Playwright 要求的 dict 形式。
+
+        Playwright 的 new_context(proxy=...) 只接受 dict（{"server": ..., "username": ..., "password": ...}），
+        传字符串会直接抛错导致浏览器启动失败（issue #12）。此处兼容多种写法：
+
+        - "http://127.0.0.1:7890"                → {"server": "http://127.0.0.1:7890"}
+        - "socks5://user:pass@127.0.0.1:1080"    → 拆出 username / password
+        - "127.0.0.1:7890"                       → 自动补 http:// 前缀
+        - {"server": "...", ...}                 → 原样使用
+        """
+        if not raw:
+            return None
+        if isinstance(raw, dict):
+            server = str(raw.get("server") or "").strip()
+            if not server:
+                return None
+            result = {"server": server}
+            if raw.get("username"):
+                result["username"] = str(raw["username"])
+            if raw.get("password"):
+                result["password"] = str(raw["password"])
+            return result
+
+        text = str(raw).strip()
+        if not text:
+            return None
+        if "://" not in text:
+            text = f"http://{text}"
+
+        result: dict[str, str] = {}
+        try:
+            from urllib.parse import unquote, urlsplit
+
+            parts = urlsplit(text)
+            if not parts.hostname:
+                return {"server": text}
+            port = f":{parts.port}" if parts.port else ""
+            result["server"] = f"{parts.scheme}://{parts.hostname}{port}"
+            if parts.username:
+                result["username"] = unquote(parts.username)
+            if parts.password:
+                result["password"] = unquote(parts.password)
+        except Exception:
+            # 解析失败时退回原串，交给 Playwright 判断
+            return {"server": text}
+        return result or None
+
     def _get_launch_options(self, engine: str) -> dict[str, Any]:
         args = [
             "--mute-audio",
-            "--disable-gpu",
             "--disable-dev-shm-usage",
             "--disable-background-networking",
             "--disable-background-timer-throttling",
             "--disable-renderer-backgrounding",
             "--disable-extensions",
+            # 隐藏自动化标志（navigator.webdriver）+ 正常语言
+            "--disable-blink-features=AutomationControlled",
+            "--lang=zh-CN",
         ]
+
+        # 容器内以 root 运行必须关闭 Chromium 沙箱，否则可能启动失败
+        if engine == "chromium" and hasattr(os, "geteuid") and os.geteuid() == 0:
+            args += ["--no-sandbox", "--disable-setuid-sandbox"]
 
         opts: dict[str, Any] = {"args": args}
 
@@ -691,19 +916,11 @@ class BrowserCore:
             return None
 
     async def swipe(self, coords: Sequence[int]) -> str | None:
+        """兼容保留：等价于 drag。"""
         if len(coords) != 4:
             return "滑动参数格式错误"
-        async with self._op_lock:
-            page = await self._ensure_page()
-            sx, sy, ex, ey = map(int, coords)
-
-            await page.mouse.move(sx, sy)
-            await page.mouse.down()
-            await page.mouse.move(ex, ey, steps=5)
-            await page.mouse.up()
-
-            await asyncio.sleep(1)
-            return None
+        sx, sy, ex, ey = coords
+        return await self.drag(sx, sy, ex, ey)
 
     async def text_input(self, text: str, enter: bool = True) -> str | None:
         async with self._op_lock:
@@ -723,32 +940,162 @@ class BrowserCore:
 
             return "未找到可用的输入框"
 
-    async def click_by_selector(self, selector: str) -> str | None:
-        """通过 CSS 选择器或文字点击元素。"""
+    # ======================================================
+    # 坐标交互原语（AI 视觉定位 → 坐标操作）
+    # 坐标系：与 screenshot() 返回的截图像素一一对应（当前视口）
+    # ======================================================
+
+    def _viewport(self) -> tuple[int, int]:
+        """返回当前视口尺寸 (w, h)。"""
+        try:
+            vs = self.config.get("viewport_size") or {}
+            return int(vs.get("width", 1280)), int(vs.get("height", 720))
+        except Exception:
+            return 1280, 720
+
+    def _clamp_coord(self, x: int, y: int) -> tuple[int, int]:
+        """把坐标限制在视口范围内，越界时贴边并记录。"""
+        w, h = self._viewport()
+        cx, cy = max(0, min(int(x), w - 1)), max(0, min(int(y), h - 1))
+        if (cx, cy) != (int(x), int(y)):
+            logger.debug(f"[Browser] 坐标越界已贴边: ({x},{y}) -> ({cx},{cy})")
+        return cx, cy
+
+    async def long_press(self, x: int, y: int, duration_ms: int = 1000) -> str | None:
+        """在坐标处长按（按下并保持一段时间后松开）。"""
         async with self._op_lock:
             page = await self._ensure_page()
-            await page.wait_for_load_state("load")
+            x, y = self._clamp_coord(x, y)
+            duration_ms = max(100, min(int(duration_ms), 10000))
             try:
-                await page.click(selector, timeout=5000)
+                await self._safe_page_op(
+                    page,
+                    self._safe_await(
+                        lambda: page.mouse.move(x, y)
+                    ),
+                )
+                await self._safe_page_op(
+                    page,
+                    self._safe_await(
+                        lambda: page.mouse.down()
+                    ),
+                )
+                await asyncio.sleep(duration_ms / 1000)
+                await self._safe_page_op(
+                    page,
+                    self._safe_await(
+                        lambda: page.mouse.up()
+                    ),
+                )
                 return None
-            except Exception:
-                try:
-                    await page.click(f'text="{selector}"', timeout=5000)
-                    return None
-                except Exception as e:
-                    return f"点击失败: {str(e)[:200]}"
+            except Exception as e:
+                return f"长按失败: {str(e)[:200]}"
 
-    async def text_input_by_selector(self, selector: str, text: str) -> str | None:
+    async def drag(self, start_x: int, start_y: int,
+                   end_x: int, end_y: int,
+                   duration_ms: int = 600) -> str | None:
+        """从起点坐标拖拽到终点坐标（按住不放移动，模拟真实拖动）。"""
         async with self._op_lock:
             page = await self._ensure_page()
-            await page.wait_for_load_state("load")
+            sx, sy = self._clamp_coord(start_x, start_y)
+            ex, ey = self._clamp_coord(end_x, end_y)
+            duration_ms = max(100, min(int(duration_ms), 10000))
+            # 按拖动距离估算插值步数（每步约 8px）
+            dist = max(abs(ex - sx), abs(ey - sy))
+            steps = max(5, min(dist // 8 if dist > 0 else 5, 60))
+            try:
+                await self._safe_page_op(
+                    page,
+                    self._safe_await(lambda: page.mouse.move(sx, sy)),
+                )
+                await self._safe_page_op(
+                    page,
+                    self._safe_await(lambda: page.mouse.down()),
+                )
+                await self._safe_page_op(
+                    page,
+                    self._safe_await(
+                        lambda: page.mouse.move(ex, ey, steps=steps)
+                    ),
+                )
+                await asyncio.sleep(duration_ms / 1000)
+                await self._safe_page_op(
+                    page,
+                    self._safe_await(lambda: page.mouse.up()),
+                )
+                return None
+            except Exception as e:
+                return f"拖拽失败: {str(e)[:200]}"
 
-            el = await page.query_selector(selector)
-            if el is None:
-                return f"未找到选择器【{selector}】对应的元素"
+    async def input_at(self, x: int, y: int, text: str,
+                       press_enter: bool = False) -> str | None:
+        """点击坐标处（聚焦输入框），然后键入文字。"""
+        async with self._op_lock:
+            page = await self._ensure_page()
+            x, y = self._clamp_coord(x, y)
+            try:
+                await self._safe_page_op(
+                    page,
+                    self._safe_await(
+                        lambda: page.mouse.click(x, y, delay=60)
+                    ),
+                )
+                await asyncio.sleep(0.2)
+                await self._safe_page_op(
+                    page,
+                    self._safe_await(lambda: page.keyboard.type(text, delay=30)),
+                )
+                if press_enter:
+                    await self._safe_page_op(
+                        page,
+                        self._safe_await(lambda: page.keyboard.press("Enter")),
+                    )
+                return None
+            except Exception as e:
+                return f"输入失败: {str(e)[:200]}"
 
-            await el.fill(text)
-            return None
+    async def double_click(self, x: int, y: int) -> str | None:
+        """在坐标处双击。"""
+        async with self._op_lock:
+            page = await self._ensure_page()
+            x, y = self._clamp_coord(x, y)
+            try:
+                await self._safe_page_op(
+                    page,
+                    self._safe_await(lambda: page.mouse.dblclick(x, y)),
+                )
+                return None
+            except Exception as e:
+                return f"双击失败: {str(e)[:200]}"
+
+    async def right_click(self, x: int, y: int) -> str | None:
+        """在坐标处右键单击（打开上下文菜单）。"""
+        async with self._op_lock:
+            page = await self._ensure_page()
+            x, y = self._clamp_coord(x, y)
+            try:
+                await self._safe_page_op(
+                    page,
+                    self._safe_await(lambda: page.mouse.click(x, y, button="right")),
+                )
+                return None
+            except Exception as e:
+                return f"右键失败: {str(e)[:200]}"
+
+    async def hover(self, x: int, y: int) -> str | None:
+        """悬停在坐标处（触发悬浮菜单/提示）。"""
+        async with self._op_lock:
+            page = await self._ensure_page()
+            x, y = self._clamp_coord(x, y)
+            try:
+                await self._safe_page_op(
+                    page,
+                    self._safe_await(lambda: page.mouse.move(x, y)),
+                )
+                await asyncio.sleep(0.3)
+                return None
+            except Exception as e:
+                return f"悬停失败: {str(e)[:200]}"
 
     async def go_back(self) -> str | None:
         async with self._op_lock:

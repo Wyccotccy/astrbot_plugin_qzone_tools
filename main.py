@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import hashlib
 import json
 import os
 import re
+import socket
 import time
 import uuid
 import smtplib
@@ -15,7 +17,7 @@ from email.utils import formataddr
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
-from urllib.parse import urlencode, quote as url_quote
+from urllib.parse import urlencode, quote as url_quote, urljoin
 
 import aiohttp
 import ipaddress
@@ -84,35 +86,218 @@ CONFIG_SAVE_WHITELIST = {
     "default_url", "proxy", "viewport_size", "max_pages",
     "timeout", "zoom_factor", "max_memory_percent",
     "idle_timeout", "monitor_interval",
+    "browser_vision_gate_enabled", "browser_stealth_enabled",
 }
 
 
-SENSITIVE_FIELDS = set()  # 本地 WebUI 无需脱敏，用户需要看到真实值
+# WebUI 返回配置时需要脱敏的字段（保存时若回传掩码则保留原值）
+SENSITIVE_FIELDS = {"email_authorization_code"}
+
+# 掩码占位符 — 前端回传此值时视为"未修改"
+MASK_PLACEHOLDER = "***"
+
+# 敏感工具 — 未在 tool_permissions 中显式配置时，默认仅管理员可用
+# （全局管理员 admins_id / 群主 / 群管理）
+SENSITIVE_TOOLS = {
+    # 群管理
+    "set_group_ban", "set_group_kick", "set_group_whole_ban", "set_group_card",
+    "set_group_admin", "set_group_name", "set_group_special_title",
+    "set_group_add_option", "set_group_portrait", "send_group_sign",
+    "set_essence_msg", "delete_essence_msg",
+    "send_group_notice", "delete_group_notice",
+    "delete_group_file", "delete_group_folder", "upload_group_file",
+    "create_group_file_folder", "move_group_file", "rename_group_file",
+    "trans_group_file",
+    # 身份与资料
+    "set_qq_avatar", "set_qq_profile", "update_qq_status",
+    # 高危：代码执行 / 文件外发 / 删除
+    "delete_friend", "run_python_code", "delete_workspace_file", "send_file",
+    # 对外发消息与定时
+    "send_message", "schedule_message", "publish_qzone", "recall_by_reply",
+    "send_qq_email", "create_scheduled_command",
+    "cancel_scheduled_command", "delete_scheduled_command",
+    # 文件传输
+    "create_flash_task", "send_flash_msg", "send_online_file",
+    "send_online_folder", "receive_online_file", "refuse_online_file",
+    "cancel_online_file", "download_fileset",
+    # 浏览器（资源占用高，且以机器人身份操作）
+    "fetch_url", "open_page",
+    "screenshot_page", "close_page", "browser_install",
+    "browser_close", "browser_close_tab", "browser_visit",
+    "browser_click", "browser_double_click", "browser_right_click",
+    "browser_long_press", "browser_drag", "browser_input_at",
+    "browser_input", "browser_hover", "browser_favorite_add",
+    "browser_favorite_delete", "browser_chat",
+}
+
+
+def _normalize_ip_literal(hostname: str) -> Optional[str]:
+    """把十进制/八进制/十六进制等非标准 IP 写法归一化成标准点分十进制。
+
+    返回归一化后的 IP 字符串；无法识别为 IP 时返回 None。
+    """
+    host = hostname.strip().strip("[]")
+    if not host:
+        return None
+
+    # 纯数字形式：http://2130706433/ == 127.0.0.1
+    if host.isdigit():
+        try:
+            value = int(host, 10)
+            if 0 <= value <= 0xFFFFFFFF:
+                return str(ipaddress.IPv4Address(value))
+        except (ValueError, ipaddress.AddressValueError):
+            return None
+        return None
+
+    # 十六进制形式：http://0x7f000001/
+    if host.lower().startswith("0x"):
+        try:
+            value = int(host, 16)
+            if 0 <= value <= 0xFFFFFFFF:
+                return str(ipaddress.IPv4Address(value))
+        except (ValueError, ipaddress.AddressValueError):
+            return None
+        return None
+
+    # 含点的混合进制形式：0177.0.0.1 / 0x7f.1.1.1 / 2130706433
+    parts = host.split(".")
+    if len(parts) == 4:
+        octets = []
+        for part in parts:
+            try:
+                if part.lower().startswith("0x"):
+                    octets.append(int(part, 16))
+                elif len(part) > 1 and part.startswith("0"):
+                    octets.append(int(part, 8))
+                else:
+                    octets.append(int(part, 10))
+            except ValueError:
+                return None
+        if all(0 <= o <= 255 for o in octets):
+            return ".".join(str(o) for o in octets)
+
+    return None
+
+
+# 需要视觉能力的工具 —— 仅多模态（支持图像输入）的模型可用
+# 这些工具的输出依赖截图，纯文本模型无法使用
+VISION_REQUIRED_TOOLS = {
+    "open_page", "screenshot_page", "close_page",
+    "browser_search", "browser_visit", "browser_click",
+    "browser_double_click", "browser_right_click",
+    "browser_long_press", "browser_drag", "browser_input_at",
+    "browser_input", "browser_hover", "browser_scroll", "browser_wait",
+    "browser_zoom", "browser_screenshot", "browser_back",
+    "browser_forward", "browser_tabs", "browser_close_tab",
+    "browser_close", "browser_chat", "browser_favorite_list",
+    "browser_favorite_add", "browser_favorite_delete",
+}
+
+# 视觉模型名启发式（provider 未声明 modalities 时的兜底判定）
+_VISION_MODEL_PATTERNS = (
+    "gpt-4o", "gpt-4.1", "gpt-4-turbo", "gpt-4-vision", "gpt-5", "o3", "o4",
+    "chatgpt-4o", "vision", "-vl", "vl-", "qwen-vl", "qvq", "gemini",
+    "claude-3", "claude-4", "claude-opus", "claude-sonnet", "claude-haiku",
+    "minimax-v", "abab", "doubao-vision", "step-1v", "step-3", "yi-vision",
+    "internvl", "minicpm-v", "llama-3.2-vision", "pixtral", "molmo",
+    "grok-4", "grok-vision", "mimo-vision", "4v",
+)
+
+# GLM 系列视觉版本（glm-4v / glm4v / glm-4.5v / glm-4.6v / glm-5v ...）
+_VISION_GLM_RE = re.compile(r"glm[-.]?\d+(?:\.\d+)?v", re.IGNORECASE)
+
+
+def _model_looks_visual(model_name: str) -> bool:
+    """按模型名启发式判断是否为视觉模型。"""
+    name = (model_name or "").lower()
+    if any(p in name for p in _VISION_MODEL_PATTERNS):
+        return True
+    return bool(_VISION_GLM_RE.search(name))
 
 
 def _is_ip_blocked(hostname: str, blocked_ranges: list) -> bool:
-    """检查 hostname 是否命中 SSRF 黑名单。支持 CIDR 和精确域名。"""
-    try:
-        ip = ipaddress.ip_address(hostname)
+    """检查 hostname 是否命中 SSRF 黑名单。支持 CIDR、精确域名、非标准 IP 写法。"""
+    # 先尝试归一化非标准写法（十进制/八进制/十六进制/IPv6 映射）
+    normalized = _normalize_ip_literal(hostname)
+    candidates = [hostname]
+    if normalized and normalized != hostname:
+        candidates.insert(0, normalized)
+
+    for cand in candidates:
+        try:
+            ip = ipaddress.ip_address(cand)
+        except ValueError:
+            continue
+
+        # IPv4-mapped IPv6（::ffff:127.0.0.1）解包成 IPv4 再判
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+
         for cidr in blocked_ranges:
             try:
                 if ip in ipaddress.ip_network(cidr, strict=False):
                     return True
             except ValueError:
                 pass
+        # 未配 CIDR 时，也拦私有/回环/链路本地/保留地址
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return True
         return False
+
+    # 非 IP 字面量：按域名精确/后缀匹配
+    hn = hostname.lower().strip(".")
+    for entry in blocked_ranges:
+        if "/" in entry:
+            continue
+        entry_l = entry.lower()
+        if hn == entry_l or hn.endswith("." + entry_l):
+            return True
+    return False
+
+
+async def _resolve_and_check_host(hostname: str, blocked_ranges: list) -> Optional[str]:
+    """解析域名的所有 A/AAAA 记录，任一命中黑名单即阻断（防 DNS rebinding）。"""
+    if _is_ip_blocked(hostname, blocked_ranges):
+        return f"URL 被安全策略阻断: {hostname} 命中 SSRF 黑名单"
+
+    # 非 IP 字面量才需要 DNS 解析
+    try:
+        ipaddress.ip_address(hostname.strip("[]"))
+        return None
     except ValueError:
-        hn = hostname.lower().strip(".")
-        for entry in blocked_ranges:
-            if "/" in entry:
-                continue
-            if hn == entry.lower():
-                return True
-        return False
+        pass
+
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await asyncio.wait_for(
+            loop.getaddrinfo(hostname, None, type=socket.SOCK_STREAM),
+            timeout=5,
+        )
+    except Exception:
+        return None
+
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return f"URL 被安全策略阻断: {hostname} 解析到内网地址 {addr}"
+        for cidr in blocked_ranges:
+            try:
+                if ip in ipaddress.ip_network(cidr, strict=False):
+                    return f"URL 被安全策略阻断: {hostname} 解析到 {addr} 命中黑名单"
+            except ValueError:
+                pass
+    return None
 
 
 def _check_ssrf(url: str, blocked_ranges: list) -> Optional[str]:
-    """检查 URL 是否命中 SSRF 黑名单。返回 None=安全，字符串=阻断原因。"""
+    """同步版 SSRF 检查（仅做字面量判断，用于快速拦截）。"""
     from urllib.parse import urlparse
     try:
         parsed = urlparse(url)
@@ -136,6 +321,17 @@ def _safe_error_msg(e: Exception) -> str:
     if len(msg) > 200:
         msg = msg[:200] + "..."
     return msg or "操作失败"
+
+
+async def _safe_call_action(client, action: str, timeout: float = 30, **params):
+    """模块级 NapCat API 调用封装（带超时）。
+
+    供没有 config 访问能力的类（QzoneSession / QQStatusManager /
+    ScheduledCommandExecutor）使用，避免 NapCat 无响应时永久挂起。
+    """
+    return await asyncio.wait_for(
+        client.call_action(action, **params), timeout=max(float(timeout), 1.0)
+    )
 
 
 class MemoryManager:
@@ -261,6 +457,7 @@ class DatabaseManager:
         self.data_dir = data_dir
         self.db_path = os.path.join(data_dir, "commands_db.json")
         self.status_path = os.path.join(data_dir, "status.json")
+        self.scheduled_path = os.path.join(data_dir, "scheduled_messages.json")
         self._lock = asyncio.Lock()
         self._init_storage()
 
@@ -270,6 +467,8 @@ class DatabaseManager:
             self._save_json(self.db_path, {"scheduled_commands": [], "version": "1.0"})
         if not os.path.exists(self.status_path):
             self._save_json(self.status_path, {"current_status": "online", "status_name": "在线"})
+        if not os.path.exists(self.scheduled_path):
+            self._save_json(self.scheduled_path, {"tasks": []})
 
     def _load_json(self, filepath: str, default: Any = None) -> Any:
         try:
@@ -362,6 +561,37 @@ class DatabaseManager:
             }
             self._save_json(self.status_path, record)
 
+    # ---------- 定时消息持久化 ----------
+
+    async def save_scheduled_task(self, task: dict):
+        """保存/更新一条定时消息（按 task_id 去重）。"""
+        async with self._lock:
+            db_data = self._load_json(self.scheduled_path, {"tasks": []})
+            tasks = db_data.get("tasks", [])
+            for i, t in enumerate(tasks):
+                if isinstance(t, dict) and t.get("task_id") == task.get("task_id"):
+                    tasks[i] = task
+                    break
+            else:
+                tasks.append(task)
+            db_data["tasks"] = tasks
+            self._save_json(self.scheduled_path, db_data)
+
+    async def delete_scheduled_task(self, task_id: str):
+        async with self._lock:
+            db_data = self._load_json(self.scheduled_path, {"tasks": []})
+            tasks = [t for t in db_data.get("tasks", [])
+                     if isinstance(t, dict) and t.get("task_id") != task_id]
+            db_data["tasks"] = tasks
+            self._save_json(self.scheduled_path, db_data)
+
+    async def load_scheduled_tasks(self) -> List[dict]:
+        """读取所有未完成、未取消的定时消息。"""
+        db_data = self._load_json(self.scheduled_path, {"tasks": []})
+        tasks = db_data.get("tasks", [])
+        return [t for t in tasks if isinstance(t, dict)
+                and not t.get("completed") and not t.get("cancelled")]
+
     async def load_status(self) -> Optional[dict]:
         return self._load_json(self.status_path)
 
@@ -395,16 +625,16 @@ class QzoneSession:
     async def initialize(self, client) -> bool:
         try:
             self.client = client
-            login_info = await client.call_action('get_login_info')
+            login_info = await _safe_call_action(client, 'get_login_info')
             self.uin = str(login_info.get('user_id', ''))
             if not self.uin:
                 return False
             try:
-                creds = await client.call_action('get_credentials', domain='qzone.qq.com')
+                creds = await _safe_call_action(client, 'get_credentials', domain='qzone.qq.com')
                 self.cookie = creds.get('cookies', '')
             except Exception:
                 try:
-                    cookies = await client.call_action('get_cookies', domain='qzone.qq.com')
+                    cookies = await _safe_call_action(client, 'get_cookies', domain='qzone.qq.com')
                     self.cookie = cookies.get('cookies', '')
                 except:
                     return False
@@ -480,6 +710,35 @@ class ScheduledTask:
         self.cancelled = False
         self.completed = False
 
+    def to_dict(self) -> dict:
+        """序列化为可持久化的字典。"""
+        return {
+            "task_id": self.task_id,
+            "target_id": self.target_id,
+            "message": self.message,
+            "send_time": self.send_time.isoformat(),
+            "chat_type": self.chat_type,
+            "target_name": self.target_name,
+            "cancelled": self.cancelled,
+            "completed": self.completed,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ScheduledTask":
+        """从持久化字典恢复。send_time 解析失败时抛 ValueError。"""
+        send_time = datetime.fromisoformat(str(d.get("send_time", "")))
+        task = cls(
+            task_id=str(d.get("task_id", "")),
+            target_id=str(d.get("target_id", "")),
+            message=str(d.get("message", "")),
+            send_time=send_time,
+            chat_type=str(d.get("chat_type", "group")),
+            target_name=str(d.get("target_name", "")),
+        )
+        task.cancelled = bool(d.get("cancelled", False))
+        task.completed = bool(d.get("completed", False))
+        return task
+
 
 class QQStatusManager:
     def __init__(self):
@@ -525,7 +784,7 @@ class QQStatusManager:
     async def _force_set_online(self, client):
         try:
             params = {"status": 10, "ext_status": 0, "battery_status": 0}
-            await client.call_action('set_online_status', **params)
+            await _safe_call_action(client, 'set_online_status', **params)
             self.current_status = "online"
             self.current_status_name = "在线"
             self.status_end_time = None
@@ -587,7 +846,7 @@ class QQStatusManager:
         status_info = self.get_status_info(status_key)
         try:
             params = {"status": status_info["status"], "ext_status": status_info["ext"], "battery_status": 0}
-            await client.call_action('set_online_status', **params)
+            await _safe_call_action(client, 'set_online_status', **params)
             if status_key == "online":
                 if self.restore_task and not self.restore_task.done():
                     self.restore_task.cancel()
@@ -617,7 +876,7 @@ class QQStatusManager:
             if not client:
                 return
             params = {"status": 10, "ext_status": 0, "battery_status": 0}
-            await client.call_action('set_online_status', **params)
+            await _safe_call_action(client, 'set_online_status', **params)
             async with self._lock:
                 self.current_status = "online"
                 self.current_status_name = "在线"
@@ -700,9 +959,9 @@ class ScheduledCommandExecutor:
                 chat_type = params.get("chat_type", "group")
                 if target_id and message:
                     if chat_type == "group":
-                        await client.call_action('send_group_msg', group_id=int(target_id), message=message)
+                        await _safe_call_action(client, 'send_group_msg', group_id=int(target_id), message=message)
                     else:
-                        await client.call_action('send_private_msg', user_id=int(target_id), message=message)
+                        await _safe_call_action(client, 'send_private_msg', user_id=int(target_id), message=message)
             elif command_type == "llm_remind":
                 prompt = params.get("prompt", "")
                 if prompt and session_info:
@@ -783,15 +1042,22 @@ class Main(Star):
         self.status_manager = QQStatusManager()
         self.command_executor: Optional[ScheduledCommandExecutor] = None
         self._restored = False
+        self._bg_tasks: Dict[str, asyncio.Task] = {}
         self._refresh_task: Optional[asyncio.Task] = None
         self._refresh_lock = asyncio.Lock()
         self.ai_default_character = self.config.get("ai_voice_default_character", "")
         self.ai_voice_max_length = self.config.get("ai_voice_max_text_length", 500)
         self._ai_characters_cache: Dict[str, Tuple[float, list]] = {}
+        # 群成员角色缓存: "group:user" -> (timestamp, role)
+        self._role_cache: Dict[str, Tuple[float, str]] = {}
         self.auto_input_status_enabled = self.config.get("auto_input_status_enabled", False)
         self.auto_input_status_timeout = self.config.get("auto_input_status_timeout", 10)
         self.tool_enabled = self._load_tool_enabled_flags()
         self._tool_registry = self._build_tool_registry()
+        # 工具权限表（独立存储，避免被 AstrBot 配置完整性检查清空）
+        self._tool_permissions = self._load_tool_permissions()
+        # 所有工具的 enable_* 开关集合（用于 WebUI 保存白名单，避免开关被丢弃）
+        self._tool_enable_keys = {f"enable_{name}" for name in self._tool_registry}
         self.enable_human_typing = self.config.get("enable_human_typing", False)
         self.typing_idle_threshold = self.config.get("typing_idle_threshold", 900)
         self.typing_initial_delay_min = self.config.get("typing_initial_delay_min", 5)
@@ -842,7 +1108,7 @@ class Main(Star):
             "set_group_portrait": True, "fetch_custom_face": True, "set_input_status": True,
             "get_ai_characters": True, "send_ai_voice": True, "search_contacts": True, "list_contacts": True,
             "set_qq_profile": True,
- "create_flash_task": True, "get_flash_file_list": True,
+            "create_flash_task": True, "get_flash_file_list": True,
             "get_flash_file_url": True, "send_flash_msg": True, "get_share_link": True,
             "get_fileset_info": True, "get_fileset_id": True, "download_fileset": True,
             "get_online_file_msg": True, "send_online_file": True, "send_online_folder": True,
@@ -852,11 +1118,14 @@ class Main(Star):
             "read_workspace_file": True, "delete_workspace_file": True,
             "read_image": True, "send_file": True,
             "fetch_url": True,
-            "open_page": True, "click_element": True, "type_text": True,
+            "open_page": True,
             "screenshot_page": True, "close_page": True,
-            # 高级浏览器工具
+            # 高级浏览器工具（坐标交互体系）
             "browser_search": True, "browser_visit": True, "browser_click": True,
-            "browser_input": True, "browser_scroll": True, "browser_swipe": True,
+            "browser_double_click": True, "browser_right_click": True,
+            "browser_long_press": True, "browser_drag": True,
+            "browser_input_at": True, "browser_input": True,
+            "browser_scroll": True, "browser_hover": True, "browser_wait": True,
             "browser_zoom": True, "browser_screenshot": True, "browser_back": True,
             "browser_forward": True, "browser_tabs": True, "browser_close_tab": True,
             "browser_close": True, "browser_chat": True,
@@ -869,19 +1138,232 @@ class Main(Star):
                 default_enabled[tool_name] = self.config.get(config_key)
         return default_enabled
 
-    def _get_available_tools(self) -> Dict[str, dict]:
+    def _get_tool_permission(self, name: str) -> str:
+        """取得工具的有效权限档位：global / admin / disabled。
+
+        优先级：tool_permissions 显式配置 > SENSITIVE_TOOLS 默认 admin > global
+
+        注意：权限表独立存储于 tool_permissions.json（见 _load_tool_permissions），
+        不放在插件主配置里 —— AstrBot 的 check_config_integrity 会把 schema 中
+        `items` 为空的 object 类型的子键全部当作"未知配置"删除，导致保存在主配置
+        里的 tool_permissions 在重载/重启后被清空（issue #13）。
+        """
+        tool_perms = self._tool_permissions if isinstance(self._tool_permissions, dict) else {}
+        if name in tool_perms:
+            perm = tool_perms.get(name)
+            if perm in ("global", "admin", "disabled"):
+                return perm
+        if name in SENSITIVE_TOOLS:
+            return "admin"
+        return "global"
+
+    def _permissions_file(self) -> str:
+        return os.path.join(self.data_dir, "tool_permissions.json")
+
+    def _load_tool_permissions(self) -> Dict[str, str]:
+        """从独立文件载入权限表；兼容读取旧版主配置里的 tool_permissions。"""
+        # 1) 独立文件（权威）
+        path = self._permissions_file()
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return {k: v for k, v in data.items() if v in ("global", "admin", "disabled")}
+                logger.warning("[QZoneTools] tool_permissions.json 格式异常，忽略")
+            except Exception as e:
+                logger.error(f"[QZoneTools] 读取 tool_permissions.json 失败: {_safe_error_msg(e)}")
+        # 2) 旧版主配置迁移（保存一次后即迁移完成）
+        legacy = self.config.get("tool_permissions", {})
+        if isinstance(legacy, dict) and legacy:
+            cleaned = {k: v for k, v in legacy.items() if v in ("global", "admin", "disabled")}
+            if cleaned:
+                logger.info(f"[QZoneTools] 从主配置迁移 {len(cleaned)} 条权限设置到 tool_permissions.json")
+                self._save_tool_permissions(cleaned)
+                return cleaned
+        return {}
+
+    def _save_tool_permissions(self, perms: Dict[str, str]) -> bool:
+        """把权限表原子写入独立文件。"""
+        path = self._permissions_file()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(perms, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            return True
+        except Exception as e:
+            logger.error(f"[QZoneTools] 写入 tool_permissions.json 失败: {_safe_error_msg(e)}")
+            return False
+
+    def _get_available_tools(self, event: AstrMessageEvent = None) -> Dict[str, dict]:
         if not self.config.get("enabled", True):
             return {}
-        tool_perms = self.config.get("tool_permissions", {})
+        is_admin = bool(event is not None and self._event_is_admin(event))
         available = {}
         for name, meta in self._tool_registry.items():
             if not self.tool_enabled.get(name, True):
                 continue
-            perm = tool_perms.get(name, "global")
+            perm = self._get_tool_permission(name)
             if perm == "disabled":
+                continue
+            # admin 档：仅管理员可见（避免 LLM 看到后用不了，浪费上下文）
+            if perm == "admin" and not is_admin:
                 continue
             available[name] = meta
         return available
+
+    def _event_is_admin(self, event: AstrMessageEvent) -> bool:
+        """判断事件发送者是否为管理员。
+
+        1) AstrBot 全局管理员（admins_id）→ 直接放行
+        2) 群主 / 群管理 → 放行
+        """
+        try:
+            if event.is_admin():
+                return True
+        except Exception:
+            pass
+
+        group_id = ""
+        try:
+            group_id = event.get_group_id() or ""
+        except Exception:
+            pass
+
+        sender_id = ""
+        try:
+            sender_id = str(event.get_sender_id() or "")
+        except Exception:
+            pass
+        if not sender_id:
+            return False
+
+        # 私聊：非全局管理员一律拒绝
+        if not group_id:
+            return False
+
+        # 复用已缓存的群信息（get_group 对入站消息返回 message_obj.group）
+        try:
+            group = getattr(event.message_obj, "group", None)
+            if group is not None:
+                owner = getattr(group, "group_owner", None)
+                admins = getattr(group, "group_admins", None) or []
+                if owner and str(owner) == sender_id:
+                    return True
+                if sender_id in {str(a) for a in admins}:
+                    return True
+        except Exception:
+            pass
+
+        # 缓存的群信息不可用时无法同步判定，交由 _event_is_admin_async 实时查询
+        return False
+
+    async def _event_is_admin_async(self, event: AstrMessageEvent) -> bool:
+        """异步版管理员判定（必要时实时查询群成员角色）。"""
+        if self._event_is_admin(event):
+            return True
+        try:
+            group_id = event.get_group_id() or ""
+            sender_id = str(event.get_sender_id() or "")
+        except Exception:
+            return False
+        if not group_id or not sender_id:
+            return False
+        role = await self._get_group_member_role(group_id, sender_id)
+        return role in ("群主", "管理员")
+
+    # ==================== 视觉模型门禁 ====================
+
+    async def _require_vision_model(self, event: AstrMessageEvent) -> Optional[str]:
+        """检查当前会话模型是否支持视觉（图像输入）。
+
+        返回 None = 允许；返回字符串 = 拒绝原因。
+        判定顺序：
+        1. provider 配置的 modalities 含 "image" → 允许
+        2. modalities 已配置但不含 "image" → 拒绝
+        3. modalities 未配置 → 模型名启发式判定
+        """
+        if not self.config.get("browser_vision_gate_enabled", True):
+            return None
+        try:
+            umo = getattr(event, "unified_msg_origin", None)
+            prov = None
+            if hasattr(self.context, "get_using_provider_async"):
+                prov = await self.context.get_using_provider_async(umo=umo)
+            elif hasattr(self.context, "get_using_provider"):
+                prov = self.context.get_using_provider(umo=umo)
+            if prov is None:
+                # 拿不到 provider 时保守放行（避免误伤）
+                return None
+
+            pcfg = getattr(prov, "provider_config", None)
+            if not isinstance(pcfg, dict):
+                pcfg = {}
+            model_name = str(pcfg.get("model") or "")
+            if not model_name:
+                meta = getattr(prov, "meta", None)
+                model_name = str(getattr(meta, "model", "") or "")
+            modalities = pcfg.get("modalities")
+
+            if isinstance(modalities, list) and modalities:
+                if "image" in modalities:
+                    return None
+                return (f"⛔ 当前模型「{model_name or '未知'}」不支持图像输入（视觉），"
+                        f"无法使用浏览器功能。浏览器操作依赖截图识别，请切换到视觉模型，"
+                        f"或在服务商配置中为该模型勾选「图像」能力。")
+            # modalities 未配置 → 启发式兜底
+            if _model_looks_visual(model_name):
+                return None
+            return (f"⛔ 当前模型「{model_name or '未知'}」未声明视觉能力，"
+                    f"无法使用浏览器功能。浏览器操作依赖截图识别，请切换到视觉模型，"
+                    f"或在服务商配置中为该模型勾选「图像」能力。")
+        except Exception as e:
+            logger.debug(f"[VisionGate] 检测异常（放行）: {e}")
+            return None
+
+    # ==================== 隐私模式 ====================
+
+    def _privacy_on(self) -> bool:
+        return str(self.config.get("privacy_mode", "normal")).lower() == "privacy"
+
+    @staticmethod
+    def _mask_id(value) -> str:
+        """把群号/QQ号打码成不可逆的短标识，保留可区分性。"""
+        s = str(value or "")
+        if not s:
+            return s
+        if len(s) <= 2:
+            return "*" * len(s)
+        return f"ID-{hashlib.sha1(s.encode()).hexdigest()[:6]}"
+
+    def _apply_privacy(self, text: str) -> str:
+        """隐私模式下把文本中的长数字串（群号/QQ号）替换为脱敏标识。
+
+        同时移除工具返回的 ID 字段名中的真实号码。
+        """
+        if not self._privacy_on() or not text:
+            return text
+
+        # 5 位以上的连续数字视为 QQ 号/群号
+        def _repl(m):
+            return self._mask_id(m.group(0))
+
+        return re.sub(r"\b\d{5,12}\b", _repl, text)
+
+    def _privacy_filter_result(self, result):
+        """对工具返回值做隐私脱敏（仅处理 message 文本字段）。"""
+        if not self._privacy_on():
+            return result
+        if isinstance(result, dict):
+            msg = result.get("message")
+            if isinstance(msg, str):
+                result = dict(result)
+                result["message"] = self._apply_privacy(msg)
+        return result
 
     def _build_tool_registry(self) -> Dict[str, dict]:
         registry = {}
@@ -2358,17 +2840,113 @@ class Main(Star):
 
         registry["browser_click"] = {
             "name": "browser_click",
-            "description": "点击页面上的坐标位置。",
+            "description": "点击页面坐标。坐标与你最近看到的截图像素一一对应（左上角为原点）。请先看截图确定目标位置，再输出 x,y 坐标。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "x": {"type": "integer", "description": "X坐标，必填"},
-                    "y": {"type": "integer", "description": "Y坐标，必填"}
+                    "x": {"type": "integer", "description": "X坐标（截图像素），必填"},
+                    "y": {"type": "integer", "description": "Y坐标（截图像素），必填"}
                 },
                 "required": ["x", "y"]
             },
-            "keywords": ["点击坐标", "click coord", "点击位置"],
+            "keywords": ["点击坐标", "click coord", "点击位置", "点击", "click", "点击按钮", "点击元素", "点一下"],
             "handler": self.browser_click_tool
+        }
+
+        registry["browser_double_click"] = {
+            "name": "browser_double_click",
+            "description": "在页面坐标处双击（用于选中文本、打开文件夹等场景）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "X坐标（截图像素），必填"},
+                    "y": {"type": "integer", "description": "Y坐标（截图像素），必填"}
+                },
+                "required": ["x", "y"]
+            },
+            "keywords": ["双击", "double click", "连点两下"],
+            "handler": self.browser_double_click_tool
+        }
+
+        registry["browser_right_click"] = {
+            "name": "browser_right_click",
+            "description": "在页面坐标处右键单击（打开浏览器上下文菜单）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "X坐标（截图像素），必填"},
+                    "y": {"type": "integer", "description": "Y坐标（截图像素），必填"}
+                },
+                "required": ["x", "y"]
+            },
+            "keywords": ["右键", "right click", "右击", "上下文菜单"],
+            "handler": self.browser_right_click_tool
+        }
+
+        registry["browser_long_press"] = {
+            "name": "browser_long_press",
+            "description": "在页面坐标处长按（按住不放一段时间后松开，用于唤起悬浮菜单/拖动条等）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "X坐标（截图像素），必填"},
+                    "y": {"type": "integer", "description": "Y坐标（截图像素），必填"},
+                    "duration_ms": {"type": "integer", "description": "按住时长（毫秒），默认1000，范围100-10000"}
+                },
+                "required": ["x", "y"]
+            },
+            "keywords": ["长按", "long press", "按住不放", "长击"],
+            "handler": self.browser_long_press_tool
+        }
+
+        registry["browser_drag"] = {
+            "name": "browser_drag",
+            "description": "从起点坐标拖拽到终点坐标（按住不放移动，用于拖动滑块、移动元素、拖拽排序等）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_x": {"type": "integer", "description": "起点X坐标（截图像素），必填"},
+                    "start_y": {"type": "integer", "description": "起点Y坐标（截图像素），必填"},
+                    "end_x": {"type": "integer", "description": "终点X坐标（截图像素），必填"},
+                    "end_y": {"type": "integer", "description": "终点Y坐标（截图像素），必填"},
+                    "duration_ms": {"type": "integer", "description": "拖动持续时间（毫秒），默认600"}
+                },
+                "required": ["start_x", "start_y", "end_x", "end_y"]
+            },
+            "keywords": ["拖拽", "拖动", "drag", "滑动", "swipe", "拉动", "拖滑块"],
+            "handler": self.browser_drag_tool
+        }
+
+        registry["browser_input_at"] = {
+            "name": "browser_input_at",
+            "description": "点击指定坐标处的输入框并输入文字。请先看截图确定输入框位置，再输出坐标和文字。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "输入框X坐标（截图像素），必填"},
+                    "y": {"type": "integer", "description": "输入框Y坐标（截图像素），必填"},
+                    "text": {"type": "string", "description": "要输入的文字，必填"},
+                    "press_enter": {"type": "boolean", "description": "输入后是否按回车提交，默认false"}
+                },
+                "required": ["x", "y", "text"]
+            },
+            "keywords": ["输入文字", "input text", "填写输入框", "填写表单", "输入内容", "打字", "type text"],
+            "handler": self.browser_input_at_tool
+        }
+
+        registry["browser_hover"] = {
+            "name": "browser_hover",
+            "description": "把鼠标悬停在指定坐标（触发下拉菜单、悬浮提示等）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "X坐标（截图像素），必填"},
+                    "y": {"type": "integer", "description": "Y坐标（截图像素），必填"}
+                },
+                "required": ["x", "y"]
+            },
+            "keywords": ["悬停", "hover", "悬浮", "鼠标移上去"],
+            "handler": self.browser_hover_tool
         }
 
         registry["browser_input"] = {
@@ -2400,21 +2978,20 @@ class Main(Star):
             "handler": self.browser_scroll_tool
         }
 
-        registry["browser_swipe"] = {
-            "name": "browser_swipe",
-            "description": "模拟滑动操作。",
+        registry["browser_wait"] = {
+            "name": "browser_wait",
+            "description": ("等待页面加载/跳转/倒计时。调用后会立即通知用户「AI正在等待网页(Ns)」，"
+                            "等待结束后自动截取最新页面截图给你。"
+                            "适用于：页面正在跳转、验证码倒计时、异步加载、点击后结果未出现等场景。"
+                            "一次调用完成「通知用户+等待+重看页面」，无需反复截图轮询浪费次数。"),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "start_x": {"type": "integer", "description": "起始X坐标"},
-                    "start_y": {"type": "integer", "description": "起始Y坐标"},
-                    "end_x": {"type": "integer", "description": "结束X坐标"},
-                    "end_y": {"type": "integer", "description": "结束Y坐标"}
-                },
-                "required": ["start_x", "start_y", "end_x", "end_y"]
+                    "seconds": {"type": "integer", "description": "等待秒数（5-45），默认10"}
+                }
             },
-            "keywords": ["滑动", "swipe", "拖拽"],
-            "handler": self.browser_swipe_tool
+            "keywords": ["等待", "等待页面", "wait", "等待加载", "等一下", "倒计时", "页面跳转"],
+            "handler": self.browser_wait_tool
         }
 
         registry["browser_zoom"] = {
@@ -2585,36 +3162,6 @@ class Main(Star):
             "handler": self.open_page_tool
         }
 
-        registry["click_element"] = {
-            "name": "click_element",
-            "description": "点击网页元素（简化版，使用CSS选择器）。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "selector": {"type": "string", "description": "CSS选择器或按钮文字，必填"}
-                },
-                "required": ["selector"]
-            },
-            "keywords": ["点击按钮", "click", "点击元素"],
-            "handler": self.click_element_tool
-        }
-
-        registry["type_text"] = {
-            "name": "type_text",
-            "description": "在网页输入框中输入文字（简化版）。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "selector": {"type": "string", "description": "输入框的CSS选择器，必填"},
-                    "text": {"type": "string", "description": "要输入的文字，必填"},
-                    "press_enter": {"type": "boolean", "description": "输入后是否按回车，默认false"}
-                },
-                "required": ["selector", "text"]
-            },
-            "keywords": ["输入文字", "type", "填写表单", "输入内容"],
-            "handler": self.type_text_tool
-        }
-
         registry["screenshot_page"] = {
             "name": "screenshot_page",
             "description": "对当前网页截图（简化版）。",
@@ -2671,7 +3218,7 @@ class Main(Star):
         """
         if not query or not query.strip():
             return {"status": "error", "message": "请提供搜索关键词（简短词语，如邮箱、禁言）"}
-        available_tools = self._get_available_tools()
+        available_tools = self._get_available_tools(event)
         query_lower = query.strip().lower()
         matched = []
         for name, meta in available_tools.items():
@@ -2694,7 +3241,7 @@ class Main(Star):
     @filter.llm_tool(name="call_wyc_tools")
     async def call_wyc_tools(self, event: AstrMessageEvent, **kwargs) -> dict:
         """返回当前可用的所有工具的简要列表（名称 + 描述）。此工具无需参数，仅当 search_wyc_tools 找不到合适工具时使用。"""
-        available_tools = self._get_available_tools()
+        available_tools = self._get_available_tools(event)
         tools_list = []
         for name, meta in available_tools.items():
             tools_list.append(f"- {name}: {meta['description']}")
@@ -2709,9 +3256,31 @@ class Main(Star):
             tool_name(string): 要执行的工具名称，必填
             tool_args(string): 工具参数的 JSON 字符串，必填。例如：'{"content": "你好"}'
         """
-        available_tools = self._get_available_tools()
+        available_tools = self._get_available_tools(event)
         if not tool_name or tool_name not in available_tools:
+            # 区分"不存在/已禁用"与"权限不足"，给出正确提示
+            if tool_name and tool_name in self._tool_registry:
+                perm = self._get_tool_permission(tool_name)
+                if perm == "disabled":
+                    return {"status": "error", "message": f"工具 {tool_name} 已被管理员禁用。"}
+                if perm == "admin" and not await self._event_is_admin_async(event):
+                    return {"status": "error", "message": f"⛔ 工具 {tool_name} 仅群主/管理员可用，当前用户无权限。"}
             return {"status": "error", "message": f"无效的工具名称或工具未启用: {tool_name}。请先使用 search_wyc_tools 或 call_wyc_tools 获取可用工具。"}
+        # 二次权限校验（防御 _get_available_tools 的判定偏差）
+        perm = self._get_tool_permission(tool_name)
+        if perm == "disabled":
+            return {"status": "error", "message": f"工具 {tool_name} 已被管理员禁用。"}
+        if perm == "admin" and not await self._event_is_admin_async(event):
+            logger.warning(
+                f"[QZoneTools] 拒绝越权调用: tool={tool_name} "
+                f"sender={event.get_sender_id()} group={event.get_group_id()}"
+            )
+            return {"status": "error", "message": f"⛔ 工具 {tool_name} 仅群主/管理员可用，当前用户无权限。"}
+        # 视觉模型门禁：浏览器类工具仅多模态模型可用
+        if tool_name in VISION_REQUIRED_TOOLS:
+            vision_err = await self._require_vision_model(event)
+            if vision_err:
+                return {"status": "error", "message": vision_err}
         try:
             if isinstance(tool_args, dict):
                 args_dict = tool_args
@@ -2735,6 +3304,8 @@ class Main(Star):
             return {"status": "error", "message": f"缺少必填参数: {', '.join(param_desc)}。请参考工具定义传入正确参数。"}
         try:
             result = await handler(event, **args_dict)
+            # 隐私模式下对返回文本脱敏（隐藏群号/QQ号）
+            result = self._privacy_filter_result(result)
             # 如果结果包含截图路径，自动读取图片并返回 ImageContent
             # 这样 LLM 可以直接看到截图，无需再调 read_image
             if isinstance(result, dict) and "screenshot" in result:
@@ -2788,9 +3359,18 @@ class Main(Star):
         safe = {}
         for k, v in cfg.items():
             if k in SENSITIVE_FIELDS:
-                safe[k] = "***" if v else ""
+                # 脱敏：仅回传掩码，不回传真实密钥
+                safe[k] = MASK_PLACEHOLDER if v else ""
             else:
                 safe[k] = v
+        # tool_permissions 已迁移到独立文件存储，需单独回传（见 _load_tool_permissions）
+        # 回传"生效档位"而非原始表：敏感工具未显式配置时实际生效为 admin，
+        # 若回传空表前端会全部显示为「全局」，造成"设置没生效"的误判（issue #10）。
+        effective_perms = {}
+        for name in self._tool_registry:
+            effective_perms[name] = self._get_tool_permission(name)
+        effective_perms.update(self._tool_permissions)  # 显式配置优先展示
+        safe["tool_permissions"] = effective_perms
         return jsonify({"success": True, "config": safe})
 
     async def handle_save_config(self):
@@ -2799,10 +3379,30 @@ class Main(Star):
             new_config = data.get("config", {})
             if not isinstance(new_config, dict):
                 return jsonify({"success": False, "error": "格式错误"})
-            # 白名单过滤：只允许保存已知字段
+
+            # tool_permissions 单独落盘（不写入主配置，避免被 AstrBot 完整性检查清空）
+            if "tool_permissions" in new_config:
+                raw_perms = new_config.pop("tool_permissions")
+                if isinstance(raw_perms, dict):
+                    cleaned = {
+                        k: v for k, v in raw_perms.items()
+                        if isinstance(k, str) and v in ("global", "admin", "disabled")
+                    }
+                    if self._save_tool_permissions(cleaned):
+                        self._tool_permissions = cleaned
+                        logger.info(f"[QZoneTools] 权限设置已保存（{len(cleaned)} 条）")
+                    else:
+                        return jsonify({"success": False, "error": "权限设置写入失败，请查看日志"})
+                else:
+                    logger.warning("[WebUI] tool_permissions 格式异常，已忽略")
+
+            # 白名单过滤：允许已声明配置项 + 所有 enable_* 工具开关
             safe_config = {}
             for k, v in new_config.items():
-                if k in CONFIG_SAVE_WHITELIST:
+                if k in CONFIG_SAVE_WHITELIST or k in self._tool_enable_keys:
+                    # 敏感字段：回传掩码时表示"未修改"，保留原值
+                    if k in SENSITIVE_FIELDS and v == MASK_PLACEHOLDER:
+                        continue
                     safe_config[k] = v
                 else:
                     logger.warning(f"[WebUI] 忽略未知配置项: {k}")
@@ -2818,6 +3418,8 @@ class Main(Star):
             self.resolve_image_restricted = self.config.get("resolve_image_restricted", True)
             self.run_python_sandbox_enabled = self.config.get("run_python_sandbox_enabled", False)
             self.docker_container_name = self.config.get("docker_container_name", "napcat")
+            # 隐私模式 / 工作区开关可能变化
+            self.workspace_enabled = self.config.get("workspace_enabled", True)
             return jsonify({"success": True, "message": "配置已保存"})
         except Exception as e:
             logger.error(f"[WebUI] 保存配置失败: {_safe_error_msg(e)}", exc_info=True)
@@ -2926,6 +3528,10 @@ class Main(Star):
                 send_time=parsed_time, chat_type=chat_type
             )
             self.scheduled_tasks[task_id] = task
+            try:
+                await self.db_manager.save_scheduled_task(task.to_dict())
+            except Exception as e:
+                logger.error(f"[WebUI] 定时消息持久化失败: {e}")
             delay_seconds = (parsed_time - datetime.now()).total_seconds()
             async_task = asyncio.create_task(self._execute_scheduled_task(task_id, delay_seconds))
             self.running_tasks[task_id] = async_task
@@ -2948,6 +3554,10 @@ class Main(Star):
                 self.running_tasks[task_id].cancel()
                 del self.running_tasks[task_id]
             del self.scheduled_tasks[task_id]
+            try:
+                await self.db_manager.delete_scheduled_task(task_id)
+            except Exception as e:
+                logger.debug(f"[WebUI] 清理定时消息持久化记录失败: {e}")
             return jsonify({"success": True, "message": "定时消息已取消"})
         except Exception as e:
             logger.error(f"[WebUI] 取消定时消息失败: {e}", exc_info=True)
@@ -3006,12 +3616,27 @@ class Main(Star):
             data = await request.get_json()
             if not data or "filename" not in data or "content" not in data:
                 return jsonify({"success": False, "error": "缺少 filename 或 content"})
-            filename = os.path.basename(data["filename"])
-            import base64
-            content = base64.b64decode(data["content"])
+            filename = os.path.basename(str(data["filename"]))
+            if not filename:
+                return jsonify({"success": False, "error": "文件名无效"})
+            import base64 as _b64
+            raw = data["content"]
+            if not isinstance(raw, str):
+                return jsonify({"success": False, "error": "content 必须是 base64 字符串"})
+            # 限制大小：base64 膨胀约 4/3，这里限制原始大小 32MB
+            max_b64_len = 32 * 1024 * 1024 * 4 // 3
+            if len(raw) > max_b64_len:
+                return jsonify({"success": False, "error": "文件过大（上限 32MB）"})
+            try:
+                content = _b64.b64decode(raw, validate=True)
+            except Exception:
+                return jsonify({"success": False, "error": "base64 内容无效"})
             filepath = os.path.join(self.workspace_dir, filename)
-            with open(filepath, 'wb') as f:
+            # 原子写：避免写一半被读取
+            tmp_path = filepath + ".part"
+            with open(tmp_path, 'wb') as f:
                 f.write(content)
+            os.replace(tmp_path, filepath)
             return jsonify({"success": True, "message": "已上传"})
         except Exception as e:
             logger.error(f"[WebUI] 上传文件失败: {e}", exc_info=True)
@@ -3024,29 +3649,60 @@ class Main(Star):
         self._register_page_routes()
         self.status_manager.set_db_manager(self.db_manager)
         self.command_executor = ScheduledCommandExecutor(self)
-        asyncio.create_task(self.command_executor.start_periodic_check())
-        asyncio.create_task(self._delayed_restore())
-        self._refresh_task = asyncio.create_task(self._periodic_refresh())
-        
+        # 所有后台任务均保存引用，避免被 GC 回收 + 便于 terminate 时统一取消
+        self._create_bg_task(self.command_executor.start_periodic_check(), "command_executor")
+        self._create_bg_task(self._delayed_restore(), "delayed_restore")
+        self._refresh_task = self._create_bg_task(self._periodic_refresh(), "periodic_refresh")
+
         # 检查并安装 Playwright
-        asyncio.create_task(self._check_and_install_playwright())
-        
+        self._create_bg_task(self._check_and_install_playwright(), "playwright_setup")
+
         # 初始化高级浏览器管理
         self._init_browser_advanced()
-        
+
         logger.info(f"[Main] 插件已加载")
+
+    def _create_bg_task(self, coro, name: str) -> asyncio.Task:
+        """创建并登记后台任务：保存引用 + 统一异常日志，防止静默失败与 GC 回收。"""
+        task = asyncio.create_task(coro)
+        self._bg_tasks[name] = task
+
+        def _on_done(t: asyncio.Task, _name: str = name):
+            self._bg_tasks.pop(_name, None)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error(f"[QZoneTools] 后台任务 {_name} 异常退出: {exc}", exc_info=exc)
+
+        task.add_done_callback(_on_done)
+        return task
     
     def _init_browser_advanced(self):
-        """初始化高级浏览器管理组件"""
+        """初始化高级浏览器管理组件。
+
+        各组件独立 try：任一失败不影响其他组件（尤其是 browser_supervisor）。
+        """
+        # 收藏夹
         try:
-            # 收藏夹
             favorite_file = Path(__file__).parent / "favorite.json"
             self.fav_mgr = FavoriteManager(favorite_file)
-            
-            # 刻度叠加
-            self.overlay = TickOverlay(self.data_dir, Path(__file__).parent / "resource", self.config)
-            
-            # 浏览器监控器
+        except Exception as e:
+            logger.error(f"[Browser] 收藏夹初始化失败: {e}")
+
+        # 刻度叠加（resource 目录缺失时自动创建，避免后续 truetype 抛错）
+        try:
+            resource_dir = Path(__file__).parent / "resource"
+            try:
+                resource_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            self.overlay = TickOverlay(self.data_dir, resource_dir, self.config)
+        except Exception as e:
+            logger.warning(f"[Browser] 刻度叠加初始化失败（功能不可用）: {e}")
+
+        # 浏览器监控器（独立于上面，必须初始化成功）
+        try:
             browser_config = {
                 "browser_type": self.config.get("browser_type", "chromium"),
                 "browser_mode": self.config.get("browser_mode", "embedded"),
@@ -3068,66 +3724,56 @@ class Main(Star):
                 }
             }
             self.browser_supervisor = BrowserSupervisor(browser_config, str(self.data_dir))
-            asyncio.create_task(self.browser_supervisor.start())
+            self._create_bg_task(self.browser_supervisor.start(), "browser_supervisor")
             logger.info("[Browser] 高级浏览器管理已初始化")
         except Exception as e:
-            logger.error(f"[Browser] 初始化高级浏览器管理失败: {e}")
+            logger.error(f"[Browser] 浏览器监控器初始化失败: {e}")
     
     async def _check_and_install_playwright(self):
         """检查 Playwright 是否安装，未安装则自动安装"""
         try:
-            # 先安装系统依赖
-            logger.info("[Playwright] 检查系统依赖...")
-            deps = ['libnss3', 'libatk1.0-0', 'libatk-bridge2.0-0', 'libcups2', 'libdrm2',
-                    'libxkbcommon0', 'libxcomposite1', 'libxdamage1', 'libxfixes3',
-                    'libxrandr2', 'libgbm1', 'libpango-1.0-0', 'libcairo2', 'libasound2']
-            proc = await asyncio.create_subprocess_exec(
-                'apt-get', 'install', '-y', '-qq', *deps,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await proc.communicate()
-            
             # 检查 playwright 模块
             try:
-                import playwright
+                import playwright  # noqa: F401
                 logger.info("[Playwright] 模块已安装")
             except ImportError:
                 logger.info("[Playwright] 未安装，开始安装...")
                 proc = await asyncio.create_subprocess_exec(
                     sys.executable, '-m', 'pip', 'install', 'playwright',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await proc.communicate()
+                try:
+                    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    logger.error("[Playwright] 模块安装超时")
+                    return
                 if proc.returncode == 0:
                     logger.info("[Playwright] 模块安装成功")
                 else:
-                    logger.error(f"[Playwright] 模块安装失败: {stderr.decode()[:200]}")
+                    logger.error(
+                        f"[Playwright] 模块安装失败: "
+                        f"{stderr.decode(errors='ignore')[:200]}"
+                    )
                     return
-            
-            # 检查浏览器是否安装
-            try:
-                from playwright.async_api import async_playwright
-                pw = await async_playwright().start()
-                browser = await pw.chromium.launch(headless=True)
-                await browser.close()
-                await pw.stop()
-                logger.info("[Playwright] 浏览器已安装且可用")
-            except Exception as e:
-                logger.info(f"[Playwright] 浏览器未安装或不可用，开始安装...")
-                proc = await asyncio.create_subprocess_exec(
-                    'playwright', 'install', 'chromium',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await proc.communicate()
-                if proc.returncode == 0:
-                    logger.info("[Playwright] 浏览器安装成功")
-                else:
-                    logger.error(f"[Playwright] 浏览器安装失败: {stderr.decode()[:200]}")
+
+            # 检查浏览器是否可用（统一走 BrowserDownloader，避免多处并发 launch）
+            from .core.downloader import BrowserDownloader
+            browser_type = self.config.get("browser_type", "chromium")
+            if await BrowserDownloader.verify_browser(browser_type):
+                logger.info(f"[Playwright] {browser_type} 浏览器已安装且可用")
+                return
+
+            logger.info(f"[Playwright] {browser_type} 浏览器不可用，开始安装...")
+            downloader = BrowserDownloader(Path(self.data_dir))
+            ok, msg = await downloader.download(browser_type)
+            if ok:
+                logger.info(f"[Playwright] {msg}")
+            else:
+                logger.error(f"[Playwright] 浏览器安装失败: {msg}")
         except Exception as e:
-            logger.error(f"[Playwright] 检查/安装过程异常: {e}")
+            logger.error(f"[Playwright] 检查/安装过程异常: {_safe_error_msg(e)}")
 
     async def _periodic_refresh(self):
         while True:
@@ -3136,6 +3782,9 @@ class Main(Star):
                 await self._refresh_session()
             except asyncio.CancelledError:
                 break
+            except Exception as e:
+                # 单次刷新失败不应终止整个循环
+                logger.warning(f"[Session] 定期刷新失败: {_safe_error_msg(e)}")
 
     async def _refresh_session(self):
         async with self._refresh_lock:
@@ -3169,31 +3818,60 @@ class Main(Star):
             if self._client:
                 await self.status_manager.restore_from_db(self._client)
                 await self.command_executor._check_and_execute_pending()
+                await self._restore_scheduled_tasks()
                 self._restored = True
         except Exception as e:
             logger.error(f"恢复失败: {e}")
 
     async def terminate(self):
+        # 1) 取消所有登记在册的后台任务
+        bg_snapshot = list(self._bg_tasks.values())
+        for task in bg_snapshot:
+            if not task.done():
+                task.cancel()
+        self._bg_tasks.clear()
+
         if self._refresh_task and not self._refresh_task.done():
             self._refresh_task.cancel()
+
+        # 2) 停止定时命令执行器
         if self.command_executor:
             self.command_executor.stop_periodic_check()
+            for task_id, task in list(self.command_executor.running_tasks.items()):
+                if not task.done():
+                    task.cancel()
+
+        # 3) 取消定时消息任务
         for task_id, task in list(self.running_tasks.items()):
             if not task.done():
                 task.cancel()
-        for task_id, task in list(self.command_executor.running_tasks.items()):
-            if not task.done():
-                task.cancel()
+
+        # 4) 取消状态管理任务
         if self.status_manager.restore_task and not self.status_manager.restore_task.done():
             self.status_manager.restore_task.cancel()
         if self.status_manager.pending_task and not self.status_manager.pending_task.done():
             self.status_manager.pending_task.cancel()
+
+        # 5) 持久化当前 QQ 状态
         if self.status_manager.is_status_active() and self.db_manager:
             await self.db_manager.save_status(
                 self.status_manager.current_status,
                 self.status_manager.current_status_name,
                 self.status_manager.status_end_time
             )
+
+        # 6) 关闭浏览器，释放 Playwright 进程
+        if self.browser_supervisor:
+            try:
+                await self.browser_supervisor.stop()
+            except Exception as e:
+                logger.warning(f"[Browser] 关闭浏览器失败: {e}")
+
+        # 7) 等待被取消的任务真正结束，避免 "Task was destroyed" 警告
+        pending = [t for t in bg_snapshot if not t.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
         logger.info("[Main] 插件已卸载")
 
     # ==================== 图片格式转换 & 文本提取 ====================
@@ -3245,22 +3923,45 @@ class Main(Star):
             logger.debug(f"从 platform_manager 获取 client 失败: {e}")
         return None
 
+    async def _call(self, client, action: str, timeout: float = None, **params):
+        """统一的 NapCat API 调用封装：强制超时，避免 NapCat 无响应导致永久挂起。
+
+        - 若调用方已显式传 timeout，则沿用该值
+        - 未传时使用 client_timeout（默认 30 秒）
+        """
+        if timeout is None:
+            timeout = params.pop("timeout", None)
+        if timeout is None:
+            try:
+                timeout = float(self.config.get("client_timeout", 30))
+            except (TypeError, ValueError):
+                timeout = 30.0
+        timeout = max(float(timeout), 1.0)
+        return await asyncio.wait_for(
+            client.call_action(action, **params), timeout=timeout
+        )
+
     async def _update_contacts_cache(self, client):
+        # 先判断是否需要刷新，避免在持锁期间做网络 IO
+        now = time.time()
+        if now - self._cache_time < self._cache_expire and (self._groups_cache or self._friends_cache):
+            return
+        # 网络请求放在锁外，避免 NapCat 卡顿导致锁长期占用
+        groups, friends = [], []
+        try:
+            groups_result = await self._call(client, 'get_group_list')
+            groups = groups_result if isinstance(groups_result, list) else groups_result.get('data', [])
+        except Exception as e:
+            logger.debug(f"[ContactsCache] get_group_list 失败: {e}")
+        try:
+            friends_result = await self._call(client, 'get_friend_list')
+            friends = friends_result if isinstance(friends_result, list) else friends_result.get('data', [])
+        except Exception as e:
+            logger.debug(f"[ContactsCache] get_friend_list 失败: {e}")
         async with self._cache_lock:
-            now = time.time()
-            if now - self._cache_time < self._cache_expire and (self._groups_cache or self._friends_cache):
-                return
-            try:
-                groups_result = await client.call_action('get_group_list')
-                self._groups_cache = groups_result if isinstance(groups_result, list) else groups_result.get('data', [])
-            except:
-                self._groups_cache = []
-            try:
-                friends_result = await client.call_action('get_friend_list')
-                self._friends_cache = friends_result if isinstance(friends_result, list) else friends_result.get('data', [])
-            except:
-                self._friends_cache = []
-            self._cache_time = now
+            self._groups_cache = groups
+            self._friends_cache = friends
+            self._cache_time = time.time()
 
     def _validate_target_id(self, target_id: str) -> Tuple[bool, str]:
         target_id = str(target_id).strip()
@@ -3298,19 +3999,24 @@ class Main(Star):
         return None
 
     async def _execute_scheduled_task(self, task_id: str, delay_seconds: float):
+        task = self.scheduled_tasks.get(task_id)
         try:
             await asyncio.sleep(delay_seconds)
             task = self.scheduled_tasks.get(task_id)
             if not task or task.cancelled:
                 return
-            client = self._client
+            client = self._client or await self._get_client()
             if not client:
+                logger.warning(f"[定时消息] 任务 {task_id} 执行时无法获取 client，跳过")
                 return
             if task.chat_type == "group":
-                await client.call_action('send_group_msg', group_id=int(task.target_id), message=task.message)
+                await self._call(client, 'send_group_msg', group_id=int(task.target_id), message=task.message)
             else:
-                await client.call_action('send_private_msg', user_id=int(task.target_id), message=task.message)
+                await self._call(client, 'send_private_msg', user_id=int(task.target_id), message=task.message)
             task.completed = True
+        except asyncio.CancelledError:
+            # 被取消：不标记完成，交由 cancel 流程清理
+            raise
         except Exception as e:
             logger.error(f"定时任务执行失败: {e}")
         finally:
@@ -3318,20 +4024,78 @@ class Main(Star):
                 del self.scheduled_tasks[task_id]
             if task_id in self.running_tasks:
                 del self.running_tasks[task_id]
+            # 完成后从持久化存储中移除（一次性任务）
+            try:
+                await self.db_manager.delete_scheduled_task(task_id)
+            except Exception as e:
+                logger.debug(f"[定时消息] 清理持久化记录失败: {e}")
+
+    async def _restore_scheduled_tasks(self):
+        """插件启动时恢复未执行的定时消息。"""
+        try:
+            records = await self.db_manager.load_scheduled_tasks()
+        except Exception as e:
+            logger.error(f"[定时消息] 读取持久化任务失败: {e}")
+            return
+        if not records:
+            return
+        now = datetime.now()
+        restored = 0
+        for rec in records:
+            try:
+                task = ScheduledTask.from_dict(rec)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"[定时消息] 记录格式错误已跳过: {e}")
+                try:
+                    await self.db_manager.delete_scheduled_task(rec.get("task_id", ""))
+                except Exception:
+                    pass
+                continue
+            if task.completed or task.cancelled:
+                continue
+            # 已过期较久的任务不再补发（超过 5 分钟），直接清理
+            delay = (task.send_time - now).total_seconds()
+            if delay < -300:
+                logger.warning(f"[定时消息] 任务 {task.task_id} 已过期，跳过")
+                await self.db_manager.delete_scheduled_task(task.task_id)
+                continue
+            self.scheduled_tasks[task.task_id] = task
+            coro = self._execute_scheduled_task(task.task_id, max(delay, 0))
+            self.running_tasks[task.task_id] = self._create_bg_task(
+                coro, f"scheduled_{task.task_id}"
+            )
+            restored += 1
+        if restored:
+            logger.info(f"[定时消息] 已恢复 {restored} 个未执行的定时消息任务")
 
     async def _get_group_member_role(self, group_id: str, user_id: str) -> str:
+        """查询群成员角色。带 60 秒缓存，避免权限校验反复打 NapCat API。"""
+        cache_key = f"{group_id}:{user_id}"
+        cached = self._role_cache.get(cache_key)
+        if cached is not None and time.time() - cached[0] < 60:
+            return cached[1]
+
         client = await self._get_client()
         if not client:
             return "unknown"
         try:
-            info = await client.call_action('get_group_member_info', group_id=int(group_id), user_id=int(user_id), no_cache=False)
+            info = await self._call(client, 'get_group_member_info',
+                                    group_id=int(group_id), user_id=int(user_id),
+                                    no_cache=False)
             role = info.get('role', 'member')
             if role == 'owner':
-                return '群主'
+                result = '群主'
             elif role == 'admin':
-                return '管理员'
+                result = '管理员'
             else:
-                return '成员'
+                result = '成员'
+            self._role_cache[cache_key] = (time.time(), result)
+            # 简单的缓存清理，避免无限增长
+            if len(self._role_cache) > 500:
+                cutoff = time.time() - 60
+                self._role_cache = {k: v for k, v in self._role_cache.items()
+                                    if v[0] > cutoff}
+            return result
         except Exception as e:
             logger.debug(f"获取群成员角色失败: {e}")
             return "unknown"
@@ -3346,7 +4110,7 @@ class Main(Star):
         if not client:
             return []
         try:
-            response = await client.call_action('get_ai_characters', group_id=group_id, chat_type=1, timeout=8)
+            response = await self._call(client, 'get_ai_characters', group_id=group_id, chat_type=1, timeout=8)
             if isinstance(response, dict) and response.get("status") == "ok":
                 data = response.get("data", [])
             elif isinstance(response, list):
@@ -3388,6 +4152,63 @@ class Main(Star):
         if hasattr(raw, 'image') and raw.image:
             return raw.image
         return None
+
+    def _allowed_file_roots(self) -> tuple:
+        """返回允许访问的文件根目录（realpath 形式）。"""
+        roots = [os.path.realpath(self.workspace_dir)]
+        try:
+            roots.append(os.path.realpath(os.path.join(self.data_dir, "screenshot_cache")))
+        except Exception:
+            pass
+        if self.flash_transfer_dir:
+            try:
+                roots.append(os.path.realpath(self.flash_transfer_dir))
+            except Exception:
+                pass
+        return tuple(roots)
+
+    def _safe_resolve_path(self, filename: str, must_exist: bool = True) -> Optional[str]:
+        """把用户传入的文件名解析为受限路径。
+
+        规则：
+        - 相对路径：仅允许在工作区内（含 screenshot_cache / 闪传目录）
+        - 绝对路径：仅允许落在允许的根目录内（用 realpath 防软链接穿透）
+        - 拒绝 `..`、软链接穿透、Windows 反斜杠等穿越手法
+
+        返回绝对路径；不合规或不存在时返回 None。
+        """
+        if not filename:
+            return None
+        raw = str(filename).strip().replace("\\", "/")
+        if not raw:
+            return None
+
+        roots = self._allowed_file_roots()
+
+        if os.path.isabs(raw):
+            # Windows 盘符形式在 Linux 下不视为绝对路径，这里额外兜底
+            candidate = raw
+        else:
+            base = os.path.basename(raw)
+            candidate = os.path.join(self.workspace_dir, base)
+            if not os.path.exists(candidate):
+                alt = os.path.join(self.data_dir, "screenshot_cache", base)
+                if os.path.isfile(alt):
+                    candidate = alt
+
+        try:
+            real = os.path.realpath(candidate)
+        except Exception:
+            return None
+
+        # 必须以允许的根目录开头（加分隔符避免 /workspace2 命中 /workspace）
+        if not any(real == r or real.startswith(r + os.sep) for r in roots):
+            logger.warning(f"[QZoneTools] 路径越界已拒绝: {real}")
+            return None
+
+        if must_exist and not os.path.exists(real):
+            return None
+        return real
 
     async def _resolve_image_file(self, file: str) -> Optional[str]:
         """将图片文件转为 base64:// 格式，用于跨容器传递。安全限制: 仅允许工作区目录和 /tmp。"""
@@ -3505,9 +4326,9 @@ class Main(Star):
             chat_type = "group" if is_group else "private"
         try:
             if chat_type == "group":
-                await client.call_action('send_group_msg', group_id=int(target_id), message=message)
+                await self._call(client, 'send_group_msg', group_id=int(target_id), message=message)
             else:
-                await client.call_action('send_private_msg', user_id=int(target_id), message=message)
+                await self._call(client, 'send_private_msg', user_id=int(target_id), message=message)
             return {"status": "success", "message": f"✅ 已发送消息到 {target_id}"}
         except Exception as e:
             return {"status": "error", "message": f"发送失败: {_safe_error_msg(e)}"}
@@ -3529,10 +4350,14 @@ class Main(Star):
         task_id = str(uuid.uuid4())[:8]
         task = ScheduledTask(task_id=task_id, target_id=target_id, message=message, send_time=parsed_time, chat_type=chat_type)
         self.scheduled_tasks[task_id] = task
+        try:
+            await self.db_manager.save_scheduled_task(task.to_dict())
+        except Exception as e:
+            logger.error(f"[定时消息] 持久化失败（任务仅存于内存）: {e}")
         delay_seconds = (parsed_time - datetime.now()).total_seconds()
         asyncio_task = asyncio.create_task(self._execute_scheduled_task(task_id, delay_seconds))
         self.running_tasks[task_id] = asyncio_task
-        msg = f"✅ 定时任务已创建\n任务ID: {task_id}\n时间: {parsed_time.strftime('%Y-%m-%d %H:%M:%S')}\n⚠️ 注意：此任务重启后丢失，如需持久化请使用 create_scheduled_command"
+        msg = f"✅ 定时任务已创建\n任务ID: {task_id}\n时间: {parsed_time.strftime('%Y-%m-%d %H:%M:%S')}\n💾 已持久化，重启后自动恢复"
         return {"status": "success", "message": msg}
 
     async def cancel_scheduled_message(self, event: AstrMessageEvent, task_id: str) -> dict:
@@ -3547,6 +4372,10 @@ class Main(Star):
             del self.running_tasks[task_id]
         if task_id in self.scheduled_tasks:
             del self.scheduled_tasks[task_id]
+        try:
+            await self.db_manager.delete_scheduled_task(task_id)
+        except Exception as e:
+            logger.debug(f"[定时消息] 清理持久化记录失败: {e}")
         return {"status": "success", "message": f"✅ 已取消任务 {task_id}"}
 
     async def list_scheduled_messages(self, event: AstrMessageEvent, show_all: bool = False) -> dict:
@@ -3588,12 +4417,12 @@ class Main(Star):
             chat_type = "private" if event.is_private_chat() else "group"
         try:
             if chat_type == "private":
-                await client.call_action('friend_poke', user_id=int(target_qq))
+                await self._call(client, 'friend_poke', user_id=int(target_qq))
             else:
                 group_id = event.get_group_id()
                 if not group_id:
                     return {"status": "error", "message": "错误：无法获取群号"}
-                await client.call_action('group_poke', group_id=int(group_id), user_id=int(target_qq))
+                await self._call(client, 'group_poke', group_id=int(group_id), user_id=int(target_qq))
             return {"status": "success", "message": f"✅ 已戳一戳 {target_qq}"}
         except Exception as e:
             return {"status": "error", "message": f"发送失败: {_safe_error_msg(e)}"}
@@ -3911,7 +4740,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            await client.call_action('set_group_admin', group_id=int(group_id), user_id=int(user_id), enable=enable)
+            await self._call(client, 'set_group_admin', group_id=int(group_id), user_id=int(user_id), enable=enable)
             action = "设置为管理员" if enable else "取消管理员"
             return {"status": "success", "message": f"✅ 已{action}用户 {user_id}"}
         except Exception as e:
@@ -3927,7 +4756,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            await client.call_action('set_group_name', group_id=int(group_id), group_name=group_name)
+            await self._call(client, 'set_group_name', group_id=int(group_id), group_name=group_name)
             return {"status": "success", "message": f"✅ 群名称已修改为：{group_name}"}
         except Exception as e:
             return {"status": "error", "message": f"操作失败: {_safe_error_msg(e)}"}
@@ -3942,7 +4771,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            result = await client.call_action('_get_group_notice', group_id=int(group_id))
+            result = await self._call(client, '_get_group_notice', group_id=int(group_id))
             notices = result.get('data', []) if isinstance(result, dict) else result
             if not notices:
                 return {"status": "success", "message": "该群暂无公告"}
@@ -3971,7 +4800,7 @@ class Main(Star):
             return {"status": "error", "message": "无法获取客户端"}
         try:
             name = file_name if file_name else os.path.basename(file_path)
-            result = await client.call_action('upload_group_file', group_id=int(group_id), file=file_path, name=name)
+            result = await self._call(client, 'upload_group_file', group_id=int(group_id), file=file_path, name=name)
             return {"status": "success", "message": f"✅ 文件上传成功，file_id: {result.get('file_id', '未知')}"}
         except Exception as e:
             return {"status": "error", "message": f"上传失败: {_safe_error_msg(e)}"}
@@ -3986,7 +4815,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            result = await client.call_action('create_group_file_folder', group_id=int(group_id), folder_name=folder_name)
+            result = await self._call(client, 'create_group_file_folder', group_id=int(group_id), folder_name=folder_name)
             return {"status": "success", "message": f"✅ 文件夹创建成功，ID: {result.get('folder_id', '未知')}"}
         except Exception as e:
             return {"status": "error", "message": f"创建失败: {_safe_error_msg(e)}"}
@@ -4001,7 +4830,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            await client.call_action('delete_group_folder', group_id=int(group_id), folder_id=folder_id)
+            await self._call(client, 'delete_group_folder', group_id=int(group_id), folder_id=folder_id)
             return {"status": "success", "message": f"✅ 文件夹 {folder_id} 已删除"}
         except Exception as e:
             return {"status": "error", "message": f"删除失败: {_safe_error_msg(e)}"}
@@ -4016,7 +4845,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            result = await client.call_action('get_group_honor_info', group_id=int(group_id), type=honor_type)
+            result = await self._call(client, 'get_group_honor_info', group_id=int(group_id), type=honor_type)
             if honor_type == "talkative" or honor_type == "all":
                 current = result.get('current_talkative', {})
                 if current:
@@ -4045,7 +4874,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            result = await client.call_action('get_group_at_all_remain', group_id=int(group_id))
+            result = await self._call(client, 'get_group_at_all_remain', group_id=int(group_id))
             can = result.get('can_at_all', False)
             remain = result.get('remain_at_all_count', 0)
             return {"status": "success", "message": f"@全体成员: {'可用' if can else '不可用'}，剩余次数: {remain}"}
@@ -4062,7 +4891,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            await client.call_action('set_group_special_title', group_id=int(group_id), user_id=int(user_id), special_title=special_title)
+            await self._call(client, 'set_group_special_title', group_id=int(group_id), user_id=int(user_id), special_title=special_title)
             if special_title:
                 return {"status": "success", "message": f"✅ 已将用户 {user_id} 的头衔设置为：{special_title}"}
             else:
@@ -4080,7 +4909,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            result = await client.call_action('get_group_shut_list', group_id=int(group_id))
+            result = await self._call(client, 'get_group_shut_list', group_id=int(group_id))
             if not result:
                 return {"status": "success", "message": "当前没有被禁言的成员"}
             lines = [f"🔇 被禁言成员列表（共{len(result)}人）"]
@@ -4107,7 +4936,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            result = await client.call_action('get_group_ignore_add_request', group_id=int(group_id))
+            result = await self._call(client, 'get_group_ignore_add_request', group_id=int(group_id))
             requests = result.get('data', []) if isinstance(result, dict) else result
             if not requests:
                 return {"status": "success", "message": "没有被忽略的加群请求"}
@@ -4135,7 +4964,7 @@ class Main(Star):
         if add_type is None:
             return {"status": "error", "message": "无效选项，请使用 allow/need_verify/not_allow"}
         try:
-            await client.call_action('set_group_add_option', group_id=group_id, add_type=add_type)
+            await self._call(client, 'set_group_add_option', group_id=group_id, add_type=add_type)
             return {"status": "success", "message": f"✅ 加群方式已设置为: {option}"}
         except Exception as e:
             return {"status": "error", "message": f"设置失败: {_safe_error_msg(e)}"}
@@ -4150,7 +4979,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            await client.call_action('send_group_sign', group_id=int(group_id))
+            await self._call(client, 'send_group_sign', group_id=int(group_id))
             return {"status": "success", "message": "✅ 群打卡成功"}
         except Exception as e:
             return {"status": "error", "message": f"打卡失败: {_safe_error_msg(e)}"}
@@ -4169,7 +4998,7 @@ class Main(Star):
         if not file:
             return {"status": "error", "message": "❌ 无法读取图片文件"}
         try:
-            await client.call_action('set_qq_avatar', file=file)
+            await self._call(client, 'set_qq_avatar', file=file)
             return {"status": "success", "message": "✅ QQ头像设置成功"}
         except Exception as e:
             logger.error(f"[QZoneTools] 设置QQ头像失败: {type(e).__name__}", exc_info=False)
@@ -4185,7 +5014,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            result = await client.call_action('move_group_file', group_id=group_id, file_id=file_id,
+            result = await self._call(client, 'move_group_file', group_id=group_id, file_id=file_id,
                                              current_parent_directory=current_parent_directory,
                                              target_parent_directory=target_parent_directory)
             if result.get('data', {}).get('ok'):
@@ -4204,7 +5033,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            result = await client.call_action('rename_group_file', group_id=group_id, file_id=file_id,
+            result = await self._call(client, 'rename_group_file', group_id=group_id, file_id=file_id,
                                              current_parent_directory=current_parent_directory, new_name=new_name)
             if result.get('data', {}).get('ok'):
                 return {"status": "success", "message": f"✅ 文件已重命名为：{new_name}"}
@@ -4222,7 +5051,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            result = await client.call_action('trans_group_file', group_id=group_id, file_id=file_id)
+            result = await self._call(client, 'trans_group_file', group_id=group_id, file_id=file_id)
             if result.get('data', {}).get('ok'):
                 return {"status": "success", "message": "✅ 文件传输请求成功"}
             return {"status": "error", "message": "传输失败"}
@@ -4236,7 +5065,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            await client.call_action('send_like', user_id=user_id, times=min(times, 20))
+            await self._call(client, 'send_like', user_id=user_id, times=min(times, 20))
             return {"status": "success", "message": f"✅ 已给 {user_id} 点赞 {times} 次"}
         except Exception as e:
             return {"status": "error", "message": f"点赞失败: {_safe_error_msg(e)}"}
@@ -4315,7 +5144,7 @@ class Main(Star):
 
         async def _fetch_page(seq=None) -> list:
             try:
-                result = await client.call_action(action, **_build_params(seq))
+                result = await self._call(client, action, **_build_params(seq))
                 return result.get('messages', [])
             except Exception:
                 return []
@@ -4349,7 +5178,7 @@ class Main(Star):
             p["reverse_order"] = True
             p["reverseOrder"] = True
             try:
-                result = await client.call_action(action, **p)
+                result = await self._call(client, action, **p)
                 older_batch = result.get('messages', [])
             except Exception:
                 break
@@ -4427,7 +5256,7 @@ class Main(Star):
         if not file:
             return {"status": "error", "message": "❌ 无法读取图片文件"}
         try:
-            await client.call_action('set_group_portrait', group_id=group_id, file=file)
+            await self._call(client, 'set_group_portrait', group_id=group_id, file=file)
             return {"status": "success", "message": "✅ 群头像设置成功"}
         except Exception as e:
             logger.error(f"[QZoneTools] 设置群头像失败: {type(e).__name__}", exc_info=False)
@@ -4438,7 +5267,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            result = await client.call_action('fetch_custom_face', count=count)
+            result = await self._call(client, 'fetch_custom_face', count=count)
             faces = result.get('data', [])
             if not faces:
                 return {"status": "success", "message": "暂无自定义表情"}
@@ -4459,7 +5288,7 @@ class Main(Star):
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
         try:
-            await client.call_action('set_input_status', user_id=user_id, event_type=event_type)
+            await self._call(client, 'set_input_status', user_id=user_id, event_type=event_type)
             status = "输入中" if event_type == 1 else "取消输入"
             return {"status": "success", "message": f"✅ 已设置状态：{status}"}
         except Exception as e:
@@ -4513,7 +5342,7 @@ class Main(Star):
         if len(actual_text) > max_len:
             actual_text = actual_text[:max_len]
         try:
-            await client.call_action('send_group_ai_record', group_id=group_id, character=character_id, text=actual_text, timeout=10)
+            await self._call(client, 'send_group_ai_record', group_id=group_id, character=character_id, text=actual_text, timeout=10)
             return {"status": "success", "message": f"✅ AI 语音已发送（角色ID: {character_id}），内容：{actual_text}"}
         except Exception as e:
             logger.error(f"[AI声聊] 发送失败: {e}")
@@ -4597,13 +5426,30 @@ class Main(Star):
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "无法获取QQ客户端"}
-        params = {}
-        if nickname:
-            params["nickname"] = nickname
-        if personal_note:
-            params["personal_note"] = personal_note
+
+        # NapCat 的 set_qq_profile 要求 nickname / personal_note 均为必填项，
+        # 只传其中一个会报 "Schema compilation error: Expected required property"。
+        # 因此未指定的字段先用当前资料回填（get_login_info 取昵称，本身即当前签名兜底为空串）。
+        params = {"nickname": nickname or "", "personal_note": personal_note or ""}
+        if not nickname or not personal_note:
+            try:
+                info = await self._call(client, 'get_login_info')
+                data = info.get("data", info) if isinstance(info, dict) else {}
+                if not nickname:
+                    params["nickname"] = str(data.get("nickname") or "")
+                if not personal_note:
+                    params["personal_note"] = str(data.get("personal_note") or "")
+            except Exception as e:
+                logger.debug(f"获取当前资料失败，将使用空值回填: {e}")
+            # 昵称仍然为空时无法提交（NapCat 不允许清空昵称）
+            if not params["nickname"]:
+                return {
+                    "status": "error",
+                    "message": "❌ 无法获取当前昵称。修改签名时必须同时提交昵称，请显式指定 nickname。",
+                }
+
         try:
-            await client.call_action('set_qq_profile', **params)
+            await self._call(client, 'set_qq_profile', **params)
             changes = []
             if nickname:
                 changes.append(f"昵称改为「{nickname}」")
@@ -4616,149 +5462,337 @@ class Main(Star):
     # ==================== 工作区工具处理函数 ====================
 
     def _check_banned_patterns(self, code: str) -> Optional[str]:
-        """检查代码是否包含禁止的模式。默认内置危险模块拦截，可追加自定义规则。"""
+        """检查代码是否包含禁止的模式。
+
+        先做 AST 静态分析（识别 import 语句、动态导入调用），
+        再用正则做补充匹配，最后追加用户自定义规则。
+        """
+        # ---------- 1) AST 静态分析 ----------
+        ast_reason = self._check_banned_ast(code)
+        if ast_reason:
+            return ast_reason
+
+        # ---------- 2) 正则补充 ----------
         default_banned = [
-            r"\bimport\s+(subprocess|os|sys|shutil|ctypes|multiprocessing|socket|http|ftplib|smtplib)\b",
-            r"\bfrom\s+(subprocess|os|sys|shutil|ctypes|multiprocessing|socket|http|ftplib|smtplib)\s+import\b",
             r"\b__import__\s*\(",
+            r"\bimportlib\s*\.\s*import_module\s*\(",
+            r"\bgetattr\s*\(\s*__builtins__",
+            r"\bglobals\s*\(\s*\)\s*\[",
+            r"\bbuiltins\s*\.\s*__import__",
+            r"\bos\s*\.\s*(system|popen|exec[lv]\w*|spawn\w*|fork)\s*\(",
+            r"\bsubprocess\s*\.",
+            r"\bctypes\s*\.",
+            r"\bsocket\s*\.\s*socket\s*\(",
+            r"\bcompile\s*\(",
             r"\beval\s*\(",
             r"\bexec\s*\(",
-            r"\bos\.system\s*\(",
-            r"\bos\.popen\s*\(",
-            r"\bcompile\s*\(",
+            r"\bpty\s*\.\s*spawn",
+            r"\bopen\s*\(\s*['\"]/(etc|proc|root|www|AstrBot)",
         ]
         patterns = default_banned + (self.workspace_banned_patterns or [])
-        if not patterns:
-            return None
         import re
         for pattern in patterns:
             try:
                 if re.search(pattern, code):
                     return pattern
             except re.error:
-                # 如果正则无效，尝试精确匹配
                 if pattern in code:
                     return pattern
         return None
 
+    def _check_banned_ast(self, code: str) -> Optional[str]:
+        """基于 AST 的禁止模式检测，覆盖正则难以处理的动态导入。"""
+        import ast as _ast
+
+        banned_modules = {
+            "subprocess", "os", "sys", "shutil", "ctypes", "multiprocessing",
+            "socket", "http", "ftplib", "smtplib", "pty", "signal", "resource",
+            "importlib", "pickle", "marshal", "builtins", "gc",
+        }
+        # 危险属性名
+        banned_attrs = {"system", "popen", "__import__", "import_module"}
+        # 动态取值入口
+        dynamic_entry = {"getattr", "setattr", "globals", "locals", "vars",
+                         "eval", "exec", "compile"}
+
+        try:
+            tree = _ast.parse(code)
+        except SyntaxError:
+            # 语法错误交给执行阶段报错，这里不拦
+            return None
+
+        for node in _ast.walk(tree):
+            # import X / import X.Y
+            if isinstance(node, _ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    if root in banned_modules:
+                        return f"禁止导入模块: {root}"
+            # from X import Y
+            elif isinstance(node, _ast.ImportFrom):
+                root = (node.module or "").split(".")[0]
+                if root in banned_modules:
+                    return f"禁止导入模块: {root}"
+            # 属性访问：x.system / x.__import__
+            elif isinstance(node, _ast.Attribute):
+                if node.attr in banned_attrs:
+                    return f"禁止调用: .{node.attr}"
+            # 调用：getattr(x, "system") / getattr(__builtins__, ...)
+            elif isinstance(node, _ast.Call):
+                func = node.func
+                fname = None
+                if isinstance(func, _ast.Name):
+                    fname = func.id
+                elif isinstance(func, _ast.Attribute):
+                    fname = func.attr
+
+                if fname in dynamic_entry:
+                    # 参数中若出现字符串形式的危险名，判定为绕过尝试
+                    for arg in list(node.args) + [kw.value for kw in node.keywords]:
+                        if isinstance(arg, _ast.Constant) and isinstance(arg.value, str):
+                            val = arg.value.strip()
+                            if (val in banned_attrs or val in banned_modules
+                                    or val == "__builtins__"):
+                                return f"禁止的动态调用: {fname}({val!r})"
+                    # eval/exec/compile 本身就是危险入口
+                    if fname in ("eval", "exec", "compile"):
+                        return f"禁止调用: {fname}"
+        return None
+
     async def run_python_code_tool(self, event: AstrMessageEvent, code: str) -> dict:
-        """在工作区执行Python代码"""
+        """在工作区执行Python代码（异步 + 资源限制）"""
         if not self.workspace_enabled:
             return {"status": "error", "message": "工作区功能未启用，请在配置中开启"}
         if not code or not code.strip():
             return {"status": "error", "message": "请提供要执行的代码"}
-        # 检查禁止模式
+        # 检查禁止模式（AST + 正则）
         banned = self._check_banned_patterns(code)
         if banned:
             return {"status": "error", "message": f"代码包含禁止的内容: {banned}"}
-        import subprocess
+
         import tempfile
-        import shlex
-        # 获取字体路径（不存在则自动下载）
+
+        # 获取字体路径（不存在则自动下载，使用异步 HTTP）
         font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
         font_path = os.path.join(font_dir, 'NotoSansCJK-Regular.ttc')
         if not os.path.exists(font_path):
-            try:
-                os.makedirs(font_dir, exist_ok=True)
-                import urllib.request
-                font_url = 'https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf'
-                print(f'[qzone_tools] 字体不存在，正在下载...')
-                urllib.request.urlretrieve(font_url, font_path)
-                print(f'[qzone_tools] 字体下载完成: {font_path}')
-            except Exception as e:
-                print(f'[qzone_tools] 字体下载失败: {e}')
+            await self._ensure_font(font_dir, font_path)
+
+        # 注意：不再向用户脚本注入 `import os as _os`（曾导致沙箱可被绕过）
         font_config_code = ''
         if os.path.exists(font_path):
-            font_config_code = f"""
-# ===== 中文字体自动配置 =====
-import os as _os
-_FONT_PATH = r'{font_path}'
+            font_config_code = (
+                "\n# ===== 中文字体自动配置 =====\n"
+                "_FONT_PATH = r'" + font_path + "'\n"
+                "try:\n"
+                "    import matplotlib\n"
+                "    matplotlib.use('Agg')\n"
+                "    import matplotlib.pyplot as _plt\n"
+                "    from matplotlib import font_manager as _fm\n"
+                "    _fm.fontManager.addfont(_FONT_PATH)\n"
+                "    _plt.rcParams['font.sans-serif'] = ['Noto Sans CJK SC'] + _plt.rcParams.get('font.sans-serif', [])\n"
+                "    _plt.rcParams['axes.unicode_minus'] = False\n"
+                "except Exception:\n"
+                "    pass\n"
+                "# ===== 字体配置结束 =====\n"
+            )
 
-# 配置 matplotlib
-try:
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    from matplotlib import font_manager as _fm
-    _fm.fontManager.addfont(_FONT_PATH)
-    plt.rcParams['font.sans-serif'] = ['Noto Sans CJK SC'] + plt.rcParams.get('font.sans-serif', [])
-    plt.rcParams['axes.unicode_minus'] = False
-except ImportError:
-    pass
-except Exception:
-    pass
+        # 用户代码包进函数体，避免污染全局命名空间
+        script_content = (
+            "import sys\n"
+            "\n"
+            "# 设置工作区路径\n"
+            "def __setup__():\n"
+            "    import os as __os__\n"
+            "    __os__.chdir(r'" + self.workspace_dir + "')\n"
+            "__setup__()\n"
+            "del __setup__\n"
+            + font_config_code +
+            "\n# ===== 用户代码 =====\n"
+            "def __user_code__():\n"
+            + textwrap.indent(code, '    ') + "\n"
+            "\ntry:\n"
+            "    __user_code__()\n"
+            "except Exception as _e:\n"
+            "    import traceback\n"
+            "    traceback.print_exc()\n"
+            "    sys.exit(1)\n"
+        )
 
-# 配置 PIL/Pillow
-try:
-    from PIL import ImageFont, ImageDraw, Image
-    _pil_font_path = _FONT_PATH
-except ImportError:
-    pass
-except Exception:
-    pass
-
-# 配置环境变量供其他库使用 os.environ['FONT_PATH'] = _FONT_PATH
-# ===== 字体配置结束 =====
-"""
-        # 创建临时脚本文件，在工作区目录执行
-        script_content = f"""
-import os
-import sys
-
-# 设置工作区路径
-workspace_path = r'{self.workspace_dir}'
-os.chdir(workspace_path)
-
-{font_config_code}
-# 用户代码
-try:
-{textwrap.indent(code, '    ')}
-except Exception as e:
-    print(f'ERROR: {{e}}')
-    sys.exit(1)
-"""
+        script_path = None
         try:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False,
+                                            encoding='utf-8', dir=self.workspace_dir) as f:
                 f.write(script_content)
                 script_path = f.name
-            # 执行代码，限制超时
-            result = subprocess.run(
-                [sys.executable, script_path],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd=self.workspace_dir
-            )
-            # 清理临时文件
-            os.unlink(script_path)
-            output = result.stdout
-            if result.stderr:
-                output += f"\n[stderr]\n{result.stderr}"
+
+            rc, stdout, stderr = await self._run_python_async(script_path, timeout=30)
+
+            output = stdout
+            if stderr:
+                output += f"\n[stderr]\n{stderr}"
             if not output.strip():
-                output = "代码执行完成（无输出）"
+                output = "代码执行完成（无输出）" if rc == 0 else f"执行失败（退出码 {rc}）"
+
             # 自动检测生成的图片文件
-            auto_image = self.config.get("python_run_auto_image_enabled", True)
-            if auto_image:
+            if self.config.get("python_run_auto_image_enabled", True):
                 image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
                 new_images = []
                 try:
-                    for f in os.listdir(self.workspace_dir):
-                        fpath = os.path.join(self.workspace_dir, f)
-                        if os.path.isfile(fpath) and os.path.splitext(f)[1].lower() in image_exts:
+                    for fname in os.listdir(self.workspace_dir):
+                        fpath = os.path.join(self.workspace_dir, fname)
+                        if os.path.isfile(fpath) and os.path.splitext(fname)[1].lower() in image_exts:
                             if os.path.getmtime(fpath) > (time.time() - 35):
-                                new_images.append(f)
+                                new_images.append(fname)
                 except Exception:
                     pass
                 if new_images:
                     output += f"\n\n🖼️ 检测到生成的图片文件: {', '.join(new_images)}\n💡 使用 read_image 工具查看图片内容。"
-            # 限制输出长度
-            if len(output) > 2000:
-                output = output[:2000] + "\n... (输出过长已截断)"
+
+            max_out = self.config.get("max_output_chars", 2000)
+            try:
+                max_out = max(200, int(max_out))
+            except (TypeError, ValueError):
+                max_out = 2000
+            if len(output) > max_out:
+                output = output[:max_out] + "\n... (输出过长已截断)"
             return {"status": "success", "message": output}
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
             return {"status": "error", "message": "代码执行超时（超过30秒）"}
         except Exception as e:
             return {"status": "error", "message": f"执行失败: {_safe_error_msg(e)}"}
+        finally:
+            if script_path and os.path.exists(script_path):
+                try:
+                    os.unlink(script_path)
+                except OSError:
+                    pass
+
+    async def _download_to_file(self, url: str, dest_path: str,
+                                max_bytes: int = 100 * 1024 * 1024) -> bool:
+        """异步下载 URL 到指定路径（带 SSRF 校验、大小限制、超时、原子写）。"""
+        try:
+            if not url.startswith(('http://', 'https://')):
+                return False
+            all_blocked = (list(DEFAULT_SSRF_BLACKLIST) + list(self.ssrf_blocked_urls)
+                           + list(self.ssrf_custom_blocked_ranges))
+            from urllib.parse import urlparse
+            host = urlparse(url).hostname or ""
+            if host:
+                reason = await _resolve_and_check_host(host, all_blocked)
+                if reason:
+                    logger.warning(f"[download] 拒绝下载: {reason}")
+                    return False
+
+            timeout = aiohttp.ClientTimeout(total=300, sock_read=60)
+            tmp_path = dest_path + ".part"
+            written = 0
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, allow_redirects=False) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"[download] HTTP {resp.status}: {url[:80]}")
+                        return False
+                    with open(tmp_path, 'wb') as f:
+                        async for chunk in resp.content.iter_chunked(64 * 1024):
+                            written += len(chunk)
+                            if written > max_bytes:
+                                logger.warning("[download] 文件超过大小上限，已中断")
+                                f.close()
+                                try:
+                                    os.unlink(tmp_path)
+                                except OSError:
+                                    pass
+                                return False
+                            f.write(chunk)
+            os.replace(tmp_path, dest_path)
+            return True
+        except Exception as e:
+            logger.warning(f"[download] 下载失败: {_safe_error_msg(e)}")
+            return False
+
+    async def _ensure_font(self, font_dir: str, font_path: str) -> None:
+        """异步下载中文字体（不阻塞事件循环）"""
+        try:
+            os.makedirs(font_dir, exist_ok=True)
+            font_url = ('https://github.com/notofonts/noto-cjk/raw/main/Sans/'
+                        'OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf')
+            logger.info("[qzone_tools] 字体不存在，正在下载...")
+            timeout = aiohttp.ClientTimeout(total=120)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(font_url) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"[qzone_tools] 字体下载失败: HTTP {resp.status}")
+                        return
+                    data = await resp.read()
+            with open(font_path, 'wb') as f:
+                f.write(data)
+            logger.info(f"[qzone_tools] 字体下载完成: {font_path}")
+        except Exception as e:
+            logger.warning(f"[qzone_tools] 字体下载失败: {_safe_error_msg(e)}")
+
+    async def _run_python_async(self, script_path: str, timeout: int = 30):
+        """异步执行 Python 脚本，带资源限制。返回 (returncode, stdout, stderr)。"""
+        def _limits():
+            """子进程资源限制（仅 Linux 生效）"""
+            try:
+                import resource
+                resource.setrlimit(resource.RLIMIT_CPU, (timeout, timeout + 5))
+                resource.setrlimit(resource.RLIMIT_FSIZE, (100 * 1024 * 1024, 100 * 1024 * 1024))
+                resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
+                try:
+                    mem = 2 * 1024 * 1024 * 1024
+                    resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+                except (ValueError, OSError):
+                    pass
+            except Exception:
+                pass
+
+        # 受限环境变量：不继承敏感配置
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "HOME": self.workspace_dir,
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PYTHONIOENCODING": "utf-8",
+            "MPLBACKEND": "Agg",
+            "TMPDIR": self.workspace_dir,
+        }
+
+        proc_kwargs = dict(
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=self.workspace_dir,
+            env=env,
+        )
+        # preexec_fn 仅 Unix 支持；不支持时降级（仍受 timeout 保护）
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-I", "-B", script_path,
+                preexec_fn=_limits, **proc_kwargs,
+            )
+        except (NotImplementedError, ValueError, OSError):
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-I", "-B", script_path, **proc_kwargs,
+            )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:
+                pass
+            raise
+        return (
+            proc.returncode,
+            stdout_b.decode("utf-8", errors="replace"),
+            stderr_b.decode("utf-8", errors="replace"),
+        )
 
     async def list_workspace_files_tool(self, event: AstrMessageEvent) -> dict:
         """列出工作区文件"""
@@ -4785,17 +5819,15 @@ except Exception as e:
         """读取工作区文件内容"""
         if not filename:
             return {"status": "error", "message": f"请提供文件名。文件需放在工作区: {self.workspace_dir}"}
-        # 防止路径穿越
-        filename = os.path.basename(filename)
-        filepath = os.path.join(self.workspace_dir, filename)
-        if not os.path.exists(filepath):
-            return {"status": "error", "message": f"文件不存在: {filename}（工作区: {self.workspace_dir}）"}
+        filepath = self._safe_resolve_path(filename)
+        if not filepath:
+            return {"status": "error", "message": f"文件不存在或路径不允许访问: {filename}（工作区: {self.workspace_dir}）"}
         try:
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
             if len(content) > 3000:
                 content = content[:3000] + "\n... (内容过长已截断)"
-            return {"status": "success", "message": f"文件 {filename} 内容:\n\n{content}"}
+            return {"status": "success", "message": f"文件 {os.path.basename(filepath)} 内容:\n\n{content}"}
         except Exception as e:
             return {"status": "error", "message": f"读取文件失败: {_safe_error_msg(e)}"}
 
@@ -4805,20 +5837,11 @@ except Exception as e:
             filename = kwargs.get('filename') or kwargs.get('file') or kwargs.get('name')
         if not filename:
             return {"status": "error", "message": f"请提供文件名参数。图片需放在工作区: {self.workspace_dir}"}
-        # 支持绝对路径
-        if os.path.isabs(filename) and os.path.isfile(filename):
-            filepath = filename
-            filename = os.path.basename(filename)
-        else:
-            filename = os.path.basename(filename)
-            filepath = os.path.join(self.workspace_dir, filename)
-            if not os.path.exists(filepath):
-                screenshot_dir = os.path.join(self.data_dir, "screenshot_cache")
-                alt_path = os.path.join(screenshot_dir, filename)
-                if os.path.isfile(alt_path):
-                    filepath = alt_path
-        if not os.path.exists(filepath):
-            return {"status": "error", "message": f"文件不存在: {filename}（工作区: {self.workspace_dir}，screenshot_cache: {os.path.join(self.data_dir, 'screenshot_cache')}）"}
+        # 路径安全解析（拒绝越界/软链接穿透）
+        filepath = self._safe_resolve_path(filename)
+        if not filepath:
+            return {"status": "error", "message": f"文件不存在或路径不允许访问: {filename}（工作区: {self.workspace_dir}）"}
+        filename = os.path.basename(filepath)
         # 检查是否是图片文件
         ext = os.path.splitext(filename)[1].lower()
         image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
@@ -4855,21 +5878,11 @@ except Exception as e:
             return {"status": "error", "message": f"请提供文件名。文件需放在工作区: {self.workspace_dir}"}
         if not target_id:
             return {"status": "error", "message": "请提供目标群号或QQ号"}
-        # 支持绝对路径：如果传入的是绝对路径且文件存在，直接使用
-        if os.path.isabs(filename) and os.path.isfile(filename):
-            filepath = filename
-            filename = os.path.basename(filename)
-        else:
-            filename = os.path.basename(filename)
-            filepath = os.path.join(self.workspace_dir, filename)
-            # 工作区找不到时，尝试 screenshot_cache 目录
-            if not os.path.exists(filepath):
-                screenshot_dir = os.path.join(self.data_dir, "screenshot_cache")
-                alt_path = os.path.join(screenshot_dir, filename)
-                if os.path.isfile(alt_path):
-                    filepath = alt_path
-        if not os.path.exists(filepath):
-            return {"status": "error", "message": f"文件不存在: {filename}（工作区: {self.workspace_dir}，screenshot_cache: {os.path.join(self.data_dir, 'screenshot_cache')}）"}
+        # 路径安全解析：只允许工作区 / 截图缓存 / 闪传目录内的文件
+        filepath = self._safe_resolve_path(filename)
+        if not filepath:
+            return {"status": "error", "message": f"文件不存在或路径不允许访问: {filename}（工作区: {self.workspace_dir}）"}
+        filename = os.path.basename(filepath)
         client = await self._get_client(event)
         if not client:
             return {"status": "error", "message": "无法获取客户端"}
@@ -4888,18 +5901,18 @@ except Exception as e:
                     img_b64 = _b64.b64encode(f.read()).decode('utf-8')
                 msg = f'[CQ:image,file=base64://{img_b64}]'
                 if chat_type == "group":
-                    await client.call_action('send_group_msg', group_id=int(target_id), message=msg)
+                    await self._call(client, 'send_group_msg', group_id=int(target_id), message=msg)
                 else:
-                    await client.call_action('send_private_msg', user_id=int(target_id), message=msg)
+                    await self._call(client, 'send_private_msg', user_id=int(target_id), message=msg)
                 return {"status": "success", "message": f"✅ 已发送图片 {filename} 到 {target_id}"}
             else:
                 # 非图片或非 as_image：以文件形式发送
                 # 先尝试 upload_group_file/send_online_file（NapCat 原生文件发送）
                 try:
                     if chat_type == "group":
-                        await client.call_action('upload_group_file', group_id=int(target_id), file=filepath, name=filename)
+                        await self._call(client, 'upload_group_file', group_id=int(target_id), file=filepath, name=filename)
                     else:
-                        await client.call_action('send_online_file', user_id=int(target_id), file_path=filepath, file_name=filename)
+                        await self._call(client, 'send_online_file', user_id=int(target_id), file_path=filepath, file_name=filename)
                     return {"status": "success", "message": f"✅ 已发送文件 {filename} 到 {target_id}"}
                 except Exception:
                     # 如果原生文件发送失败（如路径不可达），尝试 base64 方式
@@ -4912,9 +5925,9 @@ except Exception as e:
                     mime = mime_map.get(file_ext, 'application/octet-stream')
                     msg = f'[CQ:file,file=base64://{file_b64},file_name={filename}]'
                     if chat_type == "group":
-                        await client.call_action('send_group_msg', group_id=int(target_id), message=msg)
+                        await self._call(client, 'send_group_msg', group_id=int(target_id), message=msg)
                     else:
-                        await client.call_action('send_private_msg', user_id=int(target_id), message=msg)
+                        await self._call(client, 'send_private_msg', user_id=int(target_id), message=msg)
                     return {"status": "success", "message": f"✅ 已发送文件 {filename} 到 {target_id}"}
         except Exception as e:
             return {"status": "error", "message": f"发送失败: {_safe_error_msg(e)}"}
@@ -4936,19 +5949,33 @@ except Exception as e:
 
     async def fetch_url_tool(self, event: AstrMessageEvent, url: str, max_chars: int = 500) -> dict:
         """获取网页内容"""
-        import re
         import html
         try:
             if not url.startswith(('http://', 'https://')):
                 url = 'https://' + url
-            # SSRF 黑名单检查
+            # SSRF 检查：字面量 + DNS 解析双重校验
             all_blocked = list(DEFAULT_SSRF_BLACKLIST) + list(self.ssrf_blocked_urls) + list(self.ssrf_custom_blocked_ranges)
-            ssrf_reason = _check_ssrf(url, all_blocked)
+            from urllib.parse import urlparse
+            host = urlparse(url).hostname or ""
+            ssrf_reason = await _resolve_and_check_host(host, all_blocked) if host else None
             if ssrf_reason:
                 return {"status": "error", "message": f"🚫 {ssrf_reason}"}
-            
+
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                # 禁止自动跟随重定向，避免 302 跳到内网绕过检查
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30),
+                                       allow_redirects=False) as resp:
+                    if resp.status in (301, 302, 303, 307, 308):
+                        location = resp.headers.get("Location", "")
+                        # 对重定向目标做同样的 SSRF 校验
+                        redirect_url = urljoin(url, location)
+                        r_host = urlparse(redirect_url).hostname or ""
+                        r_reason = (await _resolve_and_check_host(r_host, all_blocked)
+                                    if r_host else None)
+                        if r_reason:
+                            return {"status": "error", "message": f"🚫 重定向被安全策略阻断: {r_reason}"}
+                        return {"status": "error",
+                                "message": f"页面发生重定向（HTTP {resp.status}）到 {redirect_url}，请直接使用该地址。"}
                     if resp.status != 200:
                         return {"status": "error", "message": f"HTTP {resp.status}: {resp.reason}"}
                     text = await resp.text()
@@ -4984,50 +6011,20 @@ except Exception as e:
         try:
             if not url.startswith(('http://', 'https://')):
                 url = 'https://' + url
-            # SSRF 黑名单检查
+            # SSRF 黑名单检查（字面量 + DNS 解析）
             all_blocked = list(DEFAULT_SSRF_BLACKLIST) + list(self.ssrf_blocked_urls) + list(self.ssrf_custom_blocked_ranges)
-            ssrf_reason = _check_ssrf(url, all_blocked)
+            from urllib.parse import urlparse as _urlparse
+            _host = _urlparse(url).hostname or ""
+            ssrf_reason = (await _resolve_and_check_host(_host, all_blocked)) if _host else None
             if ssrf_reason:
                 return {"status": "error", "message": f"🚫 {ssrf_reason}"}
             result = await self.browser_supervisor.call("search", url=url)
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
-                return {"status": "success", "message": f"已打开: {url}\n\n💡 截图已自动展示给你。如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
+                return {"status": "success", "message": f"已打开: {url}\n\n💡 截图已自动展示给你。后续操作请基于截图输出坐标：点击用 browser_click(x,y)，长按用 browser_long_press，拖拽用 browser_drag，在输入框打字用 browser_input_at。坐标以截图左上角为原点。\n如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
             return {"status": "success", "message": f"已打开: {url}"}
         except Exception as e:
             return {"status": "error", "message": f"打开网页失败: {_safe_error_msg(e)}"}
-
-    async def click_element_tool(self, event: AstrMessageEvent, selector: str) -> dict:
-        """点击网页元素（CSS选择器或文字）"""
-        if not self.browser_supervisor:
-            return {"status": "error", "message": "浏览器管理器未初始化"}
-        try:
-            err = await self.browser_supervisor.call("click_by_selector", selector=selector)
-            if err:
-                return {"status": "error", "message": err}
-            screenshot = await self.browser_supervisor.call("screenshot")
-            if screenshot:
-                return {"status": "success", "message": f"已点击: {selector}\n\n💡 截图已自动展示给你。如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
-            return {"status": "success", "message": f"已点击: {selector}"}
-        except Exception as e:
-            return {"status": "error", "message": f"点击失败: {_safe_error_msg(e)}"}
-
-    async def type_text_tool(self, event: AstrMessageEvent, selector: str, text: str, press_enter: bool = False) -> dict:
-        """在输入框中输入文字"""
-        if not self.browser_supervisor:
-            return {"status": "error", "message": "浏览器管理器未初始化"}
-        try:
-            err = await self.browser_supervisor.call("text_input_by_selector", selector=selector, text=text)
-            if err:
-                return {"status": "error", "message": err}
-            if press_enter:
-                await self.browser_supervisor.call("text_input", text="", enter=True)
-            screenshot = await self.browser_supervisor.call("screenshot")
-            if screenshot:
-                return {"status": "success", "message": f"已输入: {text[:50]}\n\n💡 截图已自动展示给你。如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，target_id 填目标QQ号或群号，as_image=true。", "screenshot": screenshot}
-            return {"status": "success", "message": f"已输入: {text[:50]}"}
-        except Exception as e:
-            return {"status": "error", "message": f"输入失败: {_safe_error_msg(e)}"}
 
     async def screenshot_page_tool(self, event: AstrMessageEvent, save_path: str = None) -> dict:
         """对当前网页截图"""
@@ -5096,9 +6093,11 @@ except Exception as e:
         """访问指定链接"""
         if not self.browser_supervisor:
             return {"status": "error", "message": "浏览器管理器未初始化"}
-        # SSRF 黑名单检查
+        # SSRF 黑名单检查（字面量 + DNS 解析）
         all_blocked = list(DEFAULT_SSRF_BLACKLIST) + list(self.ssrf_blocked_urls) + list(self.ssrf_custom_blocked_ranges)
-        ssrf_reason = _check_ssrf(url, all_blocked)
+        from urllib.parse import urlparse as _urlparse
+        _host = _urlparse(url).hostname or ""
+        ssrf_reason = (await _resolve_and_check_host(_host, all_blocked)) if _host else None
         if ssrf_reason:
             return {"status": "error", "message": f"🚫 {ssrf_reason}"}
         try:
@@ -5145,7 +6144,7 @@ except Exception as e:
         """滚动页面"""
         if not self.browser_supervisor:
             return {"status": "error", "message": "浏览器管理器未初始化"}
-        
+
         try:
             await self.browser_supervisor.call("scroll_by", distance=distance, direction=direction)
             screenshot = await self.browser_supervisor.call("screenshot")
@@ -5156,20 +6155,114 @@ except Exception as e:
         except Exception as e:
             return {"status": "error", "message": f"滚动失败: {_safe_error_msg(e)}"}
 
-    async def browser_swipe_tool(self, event: AstrMessageEvent, start_x: int, start_y: int, end_x: int, end_y: int) -> dict:
-        """滑动操作"""
+    async def browser_wait_tool(self, event: AstrMessageEvent, seconds: int = 10) -> dict:
+        """等待页面加载/跳转/倒计时，期间先通知用户，结束后自动截图回传。
+
+        一次调用完成「通知用户 + 等待 + 重看页面」，
+        避免模型反复调用截图工具轮询浪费上下文。
+        """
         if not self.browser_supervisor:
             return {"status": "error", "message": "浏览器管理器未初始化"}
-        
+
+        # 等待时长限制 5-45 秒
         try:
-            await self.browser_supervisor.call("swipe", coords=[start_x, start_y, end_x, end_y])
+            seconds = int(seconds)
+        except (TypeError, ValueError):
+            seconds = 10
+        seconds = max(5, min(seconds, 45))
+
+        # 1) 立即通知用户（不等模型回复，直接发送到当前会话）
+        try:
+            await event.send(MessageChain().message(f"⏳ AI正在等待网页→{seconds}s"))
+        except Exception as e:
+            logger.debug(f"[browser_wait] 通知用户失败（不影响等待）: {e}")
+
+        # 2) 等待页面（可被取消）
+        try:
+            await asyncio.sleep(seconds)
+        except asyncio.CancelledError:
+            raise
+
+        # 3) 等待结束后截图回传给 LLM
+        try:
             screenshot = await self.browser_supervisor.call("screenshot")
             if screenshot:
                 screenshot = self._convert_image(screenshot)
-                return {"status": "success", "message": f"已滑动", "screenshot": screenshot}
-            return {"status": "success", "message": f"已滑动"}
+                return {
+                    "status": "success",
+                    "message": (f"已等待 {seconds} 秒。💡 等待后的页面截图已自动展示给你，"
+                                f"请观察页面当前状态决定下一步。"),
+                    "screenshot": screenshot,
+                }
+            return {"status": "success", "message": f"已等待 {seconds} 秒（截图失败，可用 browser_screenshot 重试）"}
         except Exception as e:
-            return {"status": "error", "message": f"滑动失败: {_safe_error_msg(e)}"}
+            return {"status": "error", "message": f"等待完成但截图失败: {_safe_error_msg(e)}"}
+
+    async def _coord_action(self, action: str, action_desc: str, **kwargs) -> dict:
+        """坐标交互通用流程：执行动作 → 截图回传给 LLM 看结果。"""
+        if not self.browser_supervisor:
+            return {"status": "error", "message": "浏览器管理器未初始化"}
+        try:
+            err = await self.browser_supervisor.call(action, **kwargs)
+            if err:
+                return {"status": "error", "message": err}
+            screenshot = await self.browser_supervisor.call("screenshot")
+            if screenshot:
+                screenshot = self._convert_image(screenshot)
+                return {
+                    "status": "success",
+                    "message": (f"{action_desc}\n\n💡 操作后的截图已自动展示给你。请观察结果决定下一步。"
+                                f"如需发送给用户，请用 send_file：filename 填 screenshot 字段的路径，"
+                                f"target_id 填目标QQ号或群号，as_image=true。"),
+                    "screenshot": screenshot,
+                }
+            return {"status": "success", "message": action_desc}
+        except Exception as e:
+            return {"status": "error", "message": f"操作失败: {_safe_error_msg(e)}"}
+
+    async def browser_double_click_tool(self, event: AstrMessageEvent, x: int, y: int) -> dict:
+        """双击坐标"""
+        return await self._coord_action("double_click", f"已双击坐标 ({x}, {y})", x=x, y=y)
+
+    async def browser_right_click_tool(self, event: AstrMessageEvent, x: int, y: int) -> dict:
+        """右键坐标"""
+        return await self._coord_action("right_click", f"已右键坐标 ({x}, {y})", x=x, y=y)
+
+    async def browser_long_press_tool(self, event: AstrMessageEvent, x: int, y: int, duration_ms: int = 1000) -> dict:
+        """长按坐标"""
+        try:
+            duration_ms = int(duration_ms)
+        except (TypeError, ValueError):
+            duration_ms = 1000
+        return await self._coord_action(
+            "long_press", f"已在坐标 ({x}, {y}) 长按 {duration_ms}ms",
+            x=x, y=y, duration_ms=duration_ms,
+        )
+
+    async def browser_drag_tool(self, event: AstrMessageEvent, start_x: int, start_y: int,
+                                end_x: int, end_y: int, duration_ms: int = 600) -> dict:
+        """拖拽"""
+        try:
+            duration_ms = int(duration_ms)
+        except (TypeError, ValueError):
+            duration_ms = 600
+        return await self._coord_action(
+            "drag", f"已从 ({start_x}, {start_y}) 拖拽到 ({end_x}, {end_y})",
+            start_x=start_x, start_y=start_y, end_x=end_x, end_y=end_y,
+            duration_ms=duration_ms,
+        )
+
+    async def browser_input_at_tool(self, event: AstrMessageEvent, x: int, y: int,
+                                    text: str, press_enter: bool = False) -> dict:
+        """点击坐标输入文字"""
+        return await self._coord_action(
+            "input_at", f"已在 ({x}, {y}) 输入: {str(text)[:50]}",
+            x=x, y=y, text=text, press_enter=press_enter,
+        )
+
+    async def browser_hover_tool(self, event: AstrMessageEvent, x: int, y: int) -> dict:
+        """悬停坐标"""
+        return await self._coord_action("hover", f"已悬停在坐标 ({x}, {y})", x=x, y=y)
 
     async def browser_zoom_tool(self, event: AstrMessageEvent, scale: float = 1.5) -> dict:
         """缩放页面"""
@@ -5331,17 +6424,14 @@ except Exception as e:
         return {"status": "success", "message": f"{name} 不在收藏夹中"}
 
     async def browser_install_tool(self, event: AstrMessageEvent, browser_type: str = "chromium") -> dict:
-        """安装浏览器"""
+        """安装浏览器（统一走 BrowserDownloader：并发安全 + 安装后验证）"""
         try:
-            proc = await asyncio.create_subprocess_exec(
-                'playwright', 'install', browser_type,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode == 0:
-                return {"status": "success", "message": f"{browser_type} 浏览器安装成功"}
-            return {"status": "error", "message": f"安装失败: {stderr.decode()[:200]}"}
+            from .core.downloader import BrowserDownloader
+            downloader = BrowserDownloader(Path(self.data_dir))
+            ok, msg = await downloader.download(browser_type)
+            if ok:
+                return {"status": "success", "message": f"✅ {msg}"}
+            return {"status": "error", "message": f"安装失败: {msg}"}
         except Exception as e:
             return {"status": "error", "message": f"安装失败: {_safe_error_msg(e)}"}
 
@@ -5360,22 +6450,35 @@ except Exception as e:
     # ==================== 闪传工具 ====================
 
     async def _copy_file_to_napcat(self, file_path: str) -> str:
-        import subprocess
-        import shlex
-        import tempfile as _tmpfile
         filename = os.path.basename(file_path)
         # 清理文件名，防止路径注入
         filename = re.sub(r'[^a-zA-Z0-9._\-]', '_', filename)
         # NapCat 容器内的临时目录
         napcat_dest = f"/tmp/{filename}"
         container_name = self.docker_container_name
-        
+
         try:
-            # 使用 docker cp 将文件复制到 napcat 容器
+            # 使用 docker cp 将文件复制到 napcat 容器（异步，避免阻塞事件循环）
             cmd = ["docker", "cp", file_path, f"{container_name}:{napcat_dest}"]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode != 0:
-                logger.error(f"[create_flash_task] docker cp 失败: {result.stderr}")
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                logger.error("[create_flash_task] docker cp 超时")
+                return file_path
+            if proc.returncode != 0:
+                logger.error(
+                    f"[create_flash_task] docker cp 失败: "
+                    f"{stderr_b.decode('utf-8', errors='replace')[:200]}"
+                )
                 return file_path  # 失败时返回原路径
             logger.info(f"[create_flash_task] 文件已复制到 {container_name} 容器: {napcat_dest}")
             return napcat_dest
@@ -5441,7 +6544,7 @@ except Exception as e:
                 params["thumb_path"] = thumb_path
             
             logger.info(f"[create_flash_task] 调用参数: {params}")
-            result = await client.call_action('create_flash_task', **params)
+            result = await self._call(client, 'create_flash_task', **params)
             logger.info(f"[create_flash_task] 返回结果: {result}")
             
             if not result:
@@ -5494,7 +6597,7 @@ except Exception as e:
                     msg_error = "无法获取当前会话的群ID或用户ID"
                 
                 if flash_params.get('group_id') or flash_params.get('user_id'):
-                    send_result = await client.call_action('send_flash_msg', **flash_params)
+                    send_result = await self._call(client, 'send_flash_msg', **flash_params)
                     logger.info(f"[create_flash_task] 发送闪传消息结果: {send_result}")
                     msg_sent = True
             except Exception as msg_err:
@@ -5523,7 +6626,7 @@ except Exception as e:
         if not client:
             return {"status": "error", "message": "无法获取QQ客户端"}
         try:
-            result = await client.call_action('get_flash_file_list', fileset_id=fileset_id)
+            result = await self._call(client, 'get_flash_file_list', fileset_id=fileset_id)
             if result and isinstance(result, list):
                 if not result:
                     return {"status": "success", "message": "该闪传任务没有文件"}
@@ -5549,7 +6652,7 @@ except Exception as e:
                 params["file_name"] = file_name
             if file_index is not None:
                 params["file_index"] = file_index
-            result = await client.call_action('get_flash_file_url', **params)
+            result = await self._call(client, 'get_flash_file_url', **params)
             url = result.get('url', '') if result else ''
             if url:
                 return {"status": "success", "message": f"下载链接: {url}"}
@@ -5568,7 +6671,7 @@ except Exception as e:
                 params["user_id"] = user_id
             if group_id:
                 params["group_id"] = group_id
-            result = await client.call_action('send_flash_msg', **params)
+            result = await self._call(client, 'send_flash_msg', **params)
             msg_id = result.get('message_id', '') if result else ''
             return {"status": "success", "message": f"✅ 闪传消息已发送\n消息ID: {msg_id}"}
         except Exception as e:
@@ -5580,7 +6683,7 @@ except Exception as e:
         if not client:
             return {"status": "error", "message": "无法获取QQ客户端"}
         try:
-            result = await client.call_action('get_share_link', fileset_id=fileset_id)
+            result = await self._call(client, 'get_share_link', fileset_id=fileset_id)
             link = result if isinstance(result, str) else (result.get('data', '') if result else '')
             if link:
                 return {"status": "success", "message": f"分享链接: {link}"}
@@ -5594,7 +6697,7 @@ except Exception as e:
         if not client:
             return {"status": "error", "message": "无法获取QQ客户端"}
         try:
-            result = await client.call_action('get_fileset_info', fileset_id=fileset_id)
+            result = await self._call(client, 'get_fileset_info', fileset_id=fileset_id)
             if result:
                 files = result.get('file_list', [])
                 lines = [f"文件集ID: {result.get('fileset_id', fileset_id)}"]
@@ -5611,7 +6714,7 @@ except Exception as e:
         if not client:
             return {"status": "error", "message": "无法获取QQ客户端"}
         try:
-            result = await client.call_action('get_fileset_id', share_code=share_code)
+            result = await self._call(client, 'get_fileset_id', share_code=share_code)
             fileset_id = result.get('fileset_id', '') if result else ''
             if fileset_id:
                 return {"status": "success", "message": f"文件集ID: {fileset_id}"}
@@ -5627,20 +6730,23 @@ except Exception as e:
         try:
             # 先获取文件列表
             try:
-                files_result = await client.call_action('get_flash_file_list', fileset_id=fileset_id)
+                files_result = await self._call(client, 'get_flash_file_list', fileset_id=fileset_id)
                 if files_result and isinstance(files_result, list):
                     downloaded = []
                     for file_item in files_result:
-                        file_name = file_item.get('file_name', 'unknown')
+                        # 文件名净化，防止路径穿越写入工作区外
+                        raw_name = str(file_item.get('file_name', '') or '')
+                        file_name = os.path.basename(raw_name.replace("\\", "/"))
+                        if not file_name or file_name in (".", ".."):
+                            continue
                         # 尝试获取下载链接
                         try:
-                            url_result = await client.call_action('get_flash_file_url', fileset_id=fileset_id, file_name=file_name)
-                            if url_result and url_result.get('url'):
-                                # 下载文件到工作区
-                                import urllib.request
+                            url_result = await self._call(client, 'get_flash_file_url', fileset_id=fileset_id, file_name=raw_name)
+                            url = (url_result or {}).get('url')
+                            if url:
                                 dest_path = os.path.join(self.workspace_dir, file_name)
-                                urllib.request.urlretrieve(url_result['url'], dest_path)
-                                downloaded.append(file_name)
+                                if await self._download_to_file(url, dest_path):
+                                    downloaded.append(file_name)
                         except Exception as dl_err:
                             logger.warning(f"[download_fileset] 下载文件 {file_name} 失败: {dl_err}")
                     if downloaded:
@@ -5648,7 +6754,7 @@ except Exception as e:
             except Exception as list_err:
                 logger.warning(f"[download_fileset] 获取文件列表失败: {list_err}")
             # 如果上面失败，发送下载请求
-            await client.call_action('download_fileset', fileset_id=fileset_id)
+            await self._call(client, 'download_fileset', fileset_id=fileset_id)
             return {"status": "success", "message": f"✅ 文件集下载请求已发送"}
         except Exception as e:
             return {"status": "error", "message": f"下载文件集失败: {_safe_error_msg(e)}"}
@@ -5659,7 +6765,7 @@ except Exception as e:
         if not client:
             return {"status": "error", "message": "无法获取QQ客户端"}
         try:
-            result = await client.call_action('get_online_file_msg', user_id=user_id)
+            result = await self._call(client, 'get_online_file_msg', user_id=user_id)
             return {"status": "success", "message": f"已获取在线文件消息"}
         except Exception as e:
             return {"status": "error", "message": f"获取在线文件消息失败: {_safe_error_msg(e)}"}
@@ -5673,7 +6779,7 @@ except Exception as e:
             params = {"user_id": user_id, "file_path": file_path}
             if file_name:
                 params["file_name"] = file_name
-            result = await client.call_action('send_online_file', **params)
+            result = await self._call(client, 'send_online_file', **params)
             return {"status": "success", "message": f"✅ 文件发送请求已发送"}
         except Exception as e:
             return {"status": "error", "message": f"发送文件失败: {_safe_error_msg(e)}"}
@@ -5687,7 +6793,7 @@ except Exception as e:
             params = {"user_id": user_id, "folder_path": folder_path}
             if folder_name:
                 params["folder_name"] = folder_name
-            result = await client.call_action('send_online_folder', **params)
+            result = await self._call(client, 'send_online_folder', **params)
             return {"status": "success", "message": f"✅ 文件夹发送请求已发送"}
         except Exception as e:
             return {"status": "error", "message": f"发送文件夹失败: {_safe_error_msg(e)}"}
@@ -5699,10 +6805,10 @@ except Exception as e:
             return {"status": "error", "message": "无法获取QQ客户端"}
         try:
             # 发送接收请求
-            await client.call_action('receive_online_file', user_id=user_id, msg_id=msg_id, element_id=element_id)
+            await self._call(client, 'receive_online_file', user_id=user_id, msg_id=msg_id, element_id=element_id)
             # 尝试获取文件信息并下载到工作区
             try:
-                file_info = await client.call_action('get_file', file_id=element_id)
+                file_info = await self._call(client, 'get_file', file_id=element_id)
                 if file_info and file_info.get('file'):
                     file_path = file_info['file']
                     file_name = file_info.get('file_name', os.path.basename(file_path))
@@ -5723,7 +6829,7 @@ except Exception as e:
         if not client:
             return {"status": "error", "message": "无法获取QQ客户端"}
         try:
-            result = await client.call_action('refuse_online_file', user_id=user_id, msg_id=msg_id, element_id=element_id)
+            result = await self._call(client, 'refuse_online_file', user_id=user_id, msg_id=msg_id, element_id=element_id)
             return {"status": "success", "message": f"✅ 已拒绝接收文件"}
         except Exception as e:
             return {"status": "error", "message": f"拒绝文件失败: {_safe_error_msg(e)}"}
@@ -5734,7 +6840,7 @@ except Exception as e:
         if not client:
             return {"status": "error", "message": "无法获取QQ客户端"}
         try:
-            result = await client.call_action('cancel_online_file', user_id=user_id, msg_id=msg_id)
+            result = await self._call(client, 'cancel_online_file', user_id=user_id, msg_id=msg_id)
             return {"status": "success", "message": f"✅ 已取消文件传输"}
         except Exception as e:
             return {"status": "error", "message": f"取消传输失败: {_safe_error_msg(e)}"}
@@ -5746,7 +6852,7 @@ except Exception as e:
             return {"status": "error", "message": "无法获取QQ客户端"}
         try:
             params = {"user_id": user_id, "temp_block": temp_block, "temp_both_del": temp_both_del}
-            await client.call_action('delete_friend', **params)
+            await self._call(client, 'delete_friend', **params)
             msg = f"✅ 已删除好友 {user_id}"
             if temp_block:
                 msg += "（已加入黑名单）"
@@ -5880,10 +6986,13 @@ AI语音: get_ai_characters, send_ai_voice
          receive_online_file, refuse_online_file, cancel_online_file
 好友: delete_friend
 工作区: run_python_code, list_workspace_files, read_workspace_file, delete_workspace_file, read_image, send_file
-浏览器基础: fetch_url, open_page, click_element, type_text, screenshot_page, close_page
-浏览器高级: browser_search, browser_visit, browser_click, browser_input, browser_scroll,
-           browser_swipe, browser_zoom, browser_screenshot, browser_back, browser_forward,
-           browser_tabs, browser_close_tab, browser_close, browser_chat, browser_install
+浏览器基础: fetch_url, open_page, screenshot_page, close_page
+浏览器坐标交互: browser_click, browser_double_click, browser_right_click,
+               browser_long_press, browser_drag, browser_input_at, browser_hover,
+               browser_input, browser_scroll, browser_wait
+浏览器页面: browser_search, browser_visit, browser_zoom, browser_screenshot,
+           browser_back, browser_forward, browser_tabs, browser_close_tab,
+           browser_close, browser_chat, browser_install
 收藏夹: browser_favorite_list, browser_favorite_add, browser_favorite_delete
 
 ═══════════════════════════════════════════
@@ -6489,7 +7598,11 @@ AI语音：角色（获取可用的AI语音角色列表）、语音（发送指�
 1. 首先使用 search_wyc_tools 工具，传入简短关键词（例如"邮箱"、"禁言"、"发说说"、"记忆"、"状态"、"资料"），不要使用完整问句！
 2. 如果 search_wyc_tools 未找到，再尝试 call_wyc_tools 查看全部可用工具列表。
 3. 确定工具名称后，使用 run_wyc_tool 并传入工具名称和 JSON 格式的参数。
-禁止直接猜测工具名称，必须通过搜索获取。""")
+禁止直接猜测工具名称，必须通过搜索获取。
+[回复与发送规则（防止重复回复，最高优先级）]
+1. 调用 send_message_to_user 时，session 参数必须省略（留空即发送到当前会话）。任何自己拼写的 session 值都会被系统拒绝并导致重发。
+2. 完整回复只输出一次：要么直接输出文字作为回复，要么调用 send_message_to_user 发送（需要附图片/文件时用它）。绝不允许先输出一段完整文字、再用 send_message_to_user 把同样内容再发一遍。
+3. 使用浏览器等工具期间，如需说明进度只写一句简短提示（如"正在打开网页…"），完整结果和页面描述放在最后一次性输出，不要在中间就写出最终结论。""")
             
             status_desc = self.status_manager.get_current_status_desc()
             inject_parts.append(f"[系统状态] {status_desc}")
@@ -6532,7 +7645,7 @@ AI语音：角色（获取可用的AI语音角色列表）、语音（发送指�
                 try:
                     client = await self._get_client(event)
                     if client:
-                        await client.call_action('set_input_status', user_id=event.get_sender_id(), event_type=1)
+                        await self._call(client, 'set_input_status', user_id=event.get_sender_id(), event_type=1)
                 except Exception as e:
                     logger.debug(f"设置输入状态失败: {e}")
 
@@ -6552,14 +7665,14 @@ AI语音：角色（获取可用的AI语音角色列表）、语音（发送指�
                 client = await self._get_client(event)
                 if client:
                     user_id = event.get_sender_id()
-                    await client.call_action('set_input_status', user_id=user_id, event_type=2)
+                    await self._call(client, 'set_input_status', user_id=user_id, event_type=2)
                     await asyncio.sleep(random.uniform(0.5, 1.0))
-                    await client.call_action('set_input_status', user_id=user_id, event_type=1)
+                    await self._call(client, 'set_input_status', user_id=user_id, event_type=1)
                     await asyncio.sleep(random.uniform(0.5, 1.5))
-                    await client.call_action('set_input_status', user_id=user_id, event_type=2)
+                    await self._call(client, 'set_input_status', user_id=user_id, event_type=2)
                     await asyncio.sleep(random.uniform(0.1, 0.7))
-                    await client.call_action('set_input_status', user_id=user_id, event_type=1)
+                    await self._call(client, 'set_input_status', user_id=user_id, event_type=1)
                     await asyncio.sleep(0.2)
-                    await client.call_action('set_input_status', user_id=user_id, event_type=2)
+                    await self._call(client, 'set_input_status', user_id=user_id, event_type=2)
             except Exception as e:
                 logger.debug(f"拟人化输入状态切换失败: {e}")
