@@ -130,6 +130,24 @@ SENSITIVE_TOOLS = {
     "browser_favorite_delete", "browser_chat",
 }
 
+# ======================================================
+# 工具权限档位（4 档）
+#   global     —— 全局：所有人都可用
+#   groupadmin —— 群主/管理员（仅群聊）：群聊中群主/群管理员可用；
+#                 私聊中该档位不生效，自动回退为 admin（超管）
+#   admin      —— 超管：仅 AstrBot 全局管理员（admins_id 配置）可用
+#   disabled   —— 禁用：任何人都不可用
+# ======================================================
+PERMISSION_LEVELS = ("global", "groupadmin", "admin", "disabled")
+
+# 档位显示名（用于提示文案）
+PERMISSION_LABELS = {
+    "global": "全局",
+    "groupadmin": "群主/管理员（仅群聊）",
+    "admin": "超管",
+    "disabled": "禁用",
+}
+
 
 def _normalize_ip_literal(hostname: str) -> Optional[str]:
     """把十进制/八进制/十六进制等非标准 IP 写法归一化成标准点分十进制。
@@ -1139,7 +1157,7 @@ class Main(Star):
         return default_enabled
 
     def _get_tool_permission(self, name: str) -> str:
-        """取得工具的有效权限档位：global / admin / disabled。
+        """取得工具的有效权限档位：global / groupadmin / admin / disabled。
 
         优先级：tool_permissions 显式配置 > SENSITIVE_TOOLS 默认 admin > global
 
@@ -1151,7 +1169,7 @@ class Main(Star):
         tool_perms = self._tool_permissions if isinstance(self._tool_permissions, dict) else {}
         if name in tool_perms:
             perm = tool_perms.get(name)
-            if perm in ("global", "admin", "disabled"):
+            if perm in PERMISSION_LEVELS:
                 return perm
         if name in SENSITIVE_TOOLS:
             return "admin"
@@ -1169,14 +1187,14 @@ class Main(Star):
                 with open(path, encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict):
-                    return {k: v for k, v in data.items() if v in ("global", "admin", "disabled")}
+                    return {k: v for k, v in data.items() if v in PERMISSION_LEVELS}
                 logger.warning("[QZoneTools] tool_permissions.json 格式异常，忽略")
             except Exception as e:
                 logger.error(f"[QZoneTools] 读取 tool_permissions.json 失败: {_safe_error_msg(e)}")
         # 2) 旧版主配置迁移（保存一次后即迁移完成）
         legacy = self.config.get("tool_permissions", {})
         if isinstance(legacy, dict) and legacy:
-            cleaned = {k: v for k, v in legacy.items() if v in ("global", "admin", "disabled")}
+            cleaned = {k: v for k, v in legacy.items() if v in PERMISSION_LEVELS}
             if cleaned:
                 logger.info(f"[QZoneTools] 从主配置迁移 {len(cleaned)} 条权限设置到 tool_permissions.json")
                 self._save_tool_permissions(cleaned)
@@ -1202,7 +1220,9 @@ class Main(Star):
     def _get_available_tools(self, event: AstrMessageEvent = None) -> Dict[str, dict]:
         if not self.config.get("enabled", True):
             return {}
+        # 同步判定：超管看 admins_id，群主/群管理看入站消息自带群信息
         is_admin = bool(event is not None and self._event_is_admin(event))
+        is_group_admin = bool(event is not None and self._event_is_group_admin(event))
         available = {}
         for name, meta in self._tool_registry.items():
             if not self.tool_enabled.get(name, True):
@@ -1210,27 +1230,23 @@ class Main(Star):
             perm = self._get_tool_permission(name)
             if perm == "disabled":
                 continue
-            # admin 档：仅管理员可见（避免 LLM 看到后用不了，浪费上下文）
+            # admin 档：仅超管可见（避免 LLM 看到后用不了，浪费上下文）
             if perm == "admin" and not is_admin:
+                continue
+            # groupadmin 档：群聊中群主/群管理可见；私聊回退为 admin（仅超管）
+            if perm == "groupadmin" and not (is_group_admin or is_admin):
                 continue
             available[name] = meta
         return available
 
     def _event_is_admin(self, event: AstrMessageEvent) -> bool:
-        """判断事件发送者是否为管理员。
+        """判断事件发送者是否为「超管」—— 仅看 AstrBot 全局管理员（admins_id）。
 
-        1) AstrBot 全局管理员（admins_id）→ 直接放行
-        2) 群主 / 群管理 → 放行
+        群主/群管理不再算超管，而是独立的 groupadmin 档（见 _event_is_group_admin）。
         """
         try:
             if event.is_admin():
                 return True
-        except Exception:
-            pass
-
-        group_id = ""
-        try:
-            group_id = event.get_group_id() or ""
         except Exception:
             pass
 
@@ -1242,11 +1258,38 @@ class Main(Star):
         if not sender_id:
             return False
 
-        # 私聊：非全局管理员一律拒绝
+        # 兜底：直接比对 AstrBot 配置中的 admins_id
+        try:
+            admins = self.context.get_config().get("admins_id", []) or []
+            if sender_id in {str(a) for a in admins}:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _event_is_group_admin(self, event: AstrMessageEvent) -> bool:
+        """判断事件发送者是否为本群群主/群管理（仅群聊有意义）。
+
+        群主/群管理员判定完全依赖群信息：
+        - 优先复用入站消息自带的 message_obj.group
+        - 缓存不可用时由 _event_is_group_admin_async 实时查询
+        """
+        group_id = ""
+        try:
+            group_id = event.get_group_id() or ""
+        except Exception:
+            pass
         if not group_id:
             return False
 
-        # 复用已缓存的群信息（get_group 对入站消息返回 message_obj.group）
+        sender_id = ""
+        try:
+            sender_id = str(event.get_sender_id() or "")
+        except Exception:
+            pass
+        if not sender_id:
+            return False
+
         try:
             group = getattr(event.message_obj, "group", None)
             if group is not None:
@@ -1258,13 +1301,11 @@ class Main(Star):
                     return True
         except Exception:
             pass
-
-        # 缓存的群信息不可用时无法同步判定，交由 _event_is_admin_async 实时查询
         return False
 
-    async def _event_is_admin_async(self, event: AstrMessageEvent) -> bool:
-        """异步版管理员判定（必要时实时查询群成员角色）。"""
-        if self._event_is_admin(event):
+    async def _event_is_group_admin_async(self, event: AstrMessageEvent) -> bool:
+        """异步版群主/群管理判定（必要时实时查询群成员角色）。"""
+        if self._event_is_group_admin(event):
             return True
         try:
             group_id = event.get_group_id() or ""
@@ -1275,6 +1316,27 @@ class Main(Star):
             return False
         role = await self._get_group_member_role(group_id, sender_id)
         return role in ("群主", "管理员")
+
+    async def _check_tool_permission_async(self, event: AstrMessageEvent, perm: str) -> bool:
+        """按档位校验调用者是否有权使用该工具（权限判定的唯一入口）。
+
+        - global     → 放行
+        - groupadmin → 群聊中群主/群管理放行；**私聊自动回退为 admin**（仅超管）
+        - admin      → 仅超管放行
+        - disabled   → 拒绝
+        """
+        if perm == "global":
+            return True
+        if perm == "disabled":
+            return False
+        # groupadmin：私聊不生效，回退为 admin
+        if perm == "groupadmin" and await self._event_is_group_admin_async(event):
+            return True
+        return await self._event_is_admin_async(event)
+
+    async def _event_is_admin_async(self, event: AstrMessageEvent) -> bool:
+        """异步版超管判定。"""
+        return self._event_is_admin(event)
 
     # ==================== 视觉模型门禁 ====================
 
@@ -3263,19 +3325,19 @@ class Main(Star):
                 perm = self._get_tool_permission(tool_name)
                 if perm == "disabled":
                     return {"status": "error", "message": f"工具 {tool_name} 已被管理员禁用。"}
-                if perm == "admin" and not await self._event_is_admin_async(event):
-                    return {"status": "error", "message": f"⛔ 工具 {tool_name} 仅群主/管理员可用，当前用户无权限。"}
+                if perm in ("admin", "groupadmin") and not await self._check_tool_permission_async(event, perm):
+                    return {"status": "error", "message": f"⛔ 工具 {tool_name} 需要「{PERMISSION_LABELS.get(perm, perm)}」权限，当前用户无权限。"}
             return {"status": "error", "message": f"无效的工具名称或工具未启用: {tool_name}。请先使用 search_wyc_tools 或 call_wyc_tools 获取可用工具。"}
         # 二次权限校验（防御 _get_available_tools 的判定偏差）
         perm = self._get_tool_permission(tool_name)
         if perm == "disabled":
             return {"status": "error", "message": f"工具 {tool_name} 已被管理员禁用。"}
-        if perm == "admin" and not await self._event_is_admin_async(event):
+        if perm in ("admin", "groupadmin") and not await self._check_tool_permission_async(event, perm):
             logger.warning(
-                f"[QZoneTools] 拒绝越权调用: tool={tool_name} "
+                f"[QZoneTools] 拒绝越权调用: tool={tool_name} perm={perm} "
                 f"sender={event.get_sender_id()} group={event.get_group_id()}"
             )
-            return {"status": "error", "message": f"⛔ 工具 {tool_name} 仅群主/管理员可用，当前用户无权限。"}
+            return {"status": "error", "message": f"⛔ 工具 {tool_name} 需要「{PERMISSION_LABELS.get(perm, perm)}」权限，当前用户无权限。"}
         # 视觉模型门禁：浏览器类工具仅多模态模型可用
         if tool_name in VISION_REQUIRED_TOOLS:
             vision_err = await self._require_vision_model(event)
@@ -3386,7 +3448,7 @@ class Main(Star):
                 if isinstance(raw_perms, dict):
                     cleaned = {
                         k: v for k, v in raw_perms.items()
-                        if isinstance(k, str) and v in ("global", "admin", "disabled")
+                        if isinstance(k, str) and v in PERMISSION_LEVELS
                     }
                     if self._save_tool_permissions(cleaned):
                         self._tool_permissions = cleaned

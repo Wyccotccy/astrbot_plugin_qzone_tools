@@ -803,7 +803,7 @@
     "default": "napcat"
   },
   "tool_permissions": {
-    "description": "工具权限控制。实际数据由插件独立存储于 plugin_data/astrbot_plugin_qzone_tools/tool_permissions.json（不在本配置中编辑，请在插件的「权限控制」页面设置）",
+    "description": "工具权限控制（4 档：global=全局 / groupadmin=群主管理员仅群聊 / admin=超管 / disabled=禁用）。实际数据由插件独立存储于 plugin_data/astrbot_plugin_qzone_tools/tool_permissions.json（不在本配置中编辑，请在插件的「权限控制」页面设置）",
     "type": "string",
     "default": "",
     "hint": "请勿在此手动编辑；AstrBot 会清理 object 类型下的未知子键，故权限表改为独立文件存储"

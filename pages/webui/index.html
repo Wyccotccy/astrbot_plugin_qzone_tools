@@ -445,14 +445,15 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
         <div id="permissionPage" class="content">
             <div class="card">
                 <div class="section-title">工具权限控制</div>
-                <p style="font-size:0.85rem;color:var(--text-light);margin-bottom:16px;">为每个工具设置访问权限。<strong>全局</strong>=所有人都可用，<strong>超管</strong>=仅管理员可用，<strong>禁用</strong>=任何人都不能使用。</p>
+                <p style="font-size:0.85rem;color:var(--text-light);margin-bottom:16px;">为每个工具设置访问权限。<strong>全局</strong>=所有人都可用，<strong>群主/管理员</strong>=仅群聊中的群主和群管理员可用（私聊不生效，自动按超管处理），<strong>超管</strong>=仅 AstrBot 全局管理员可用，<strong>禁用</strong>=任何人都不能使用。</p>
                 <div style="display:flex;gap:10px;margin-bottom:16px;align-items:center;">
                     <label style="font-size:0.85rem;font-weight:500;color:var(--text-light);white-space:nowrap;">批量设置分类：</label>
                     <select id="batchPermCategory" style="width:auto;min-width:160px;"></select>
-                    <select id="batchPermLevel" style="width:auto;min-width:120px;">
-                        <option value="global">全局</option>
-                        <option value="admin">超管</option>
-                        <option value="disabled">禁用</option>
+                    <select id="batchPermLevel" style="width:auto;min-width:150px;">
+                        <option value="global">🌐 全局</option>
+                        <option value="groupadmin">👥 群主/管理员（仅群聊）</option>
+                        <option value="admin">🛡️ 超管</option>
+                        <option value="disabled">🚫 禁用</option>
                     </select>
                     <button class="btn" id="batchPermBtn">应用</button>
                 </div>
@@ -604,9 +605,12 @@ if (!window.AstrBotPluginPage) {
         }
 
         function getFormValues() {
+            // 敏感字段：留空表示"不修改"，回传掩码让后端保留原值
+            const authCodeEl = document.getElementById('email_authorization_code');
+            const authCodeVal = authCodeEl.value.trim() === '' ? '***' : authCodeEl.value;
             return {
                 email_sender: document.getElementById('email_sender').value,
-                email_authorization_code: document.getElementById('email_authorization_code').value,
+                email_authorization_code: authCodeVal,
                 email_smtp_server: document.getElementById('email_smtp_server').value,
                 email_smtp_port: parseInt(document.getElementById('email_smtp_port').value) || 465,
                 max_memories_per_user: parseInt(document.getElementById('max_memories_per_user').value) || 100,
@@ -677,6 +681,11 @@ if (!window.AstrBotPluginPage) {
                     if (!el) return;
                     if (el.type === 'checkbox') el.checked = val ?? false;
                     else if (Array.isArray(val)) el.value = val.join('\n');
+                    else if (val === '***') {
+                        // 敏感字段已脱敏：显示占位提示，留空表示"不修改"
+                        el.value = '';
+                        el.placeholder = '已保存（留空则不修改）';
+                    }
                     else el.value = val ?? '';
                 });
                 configLoading.textContent = '';
@@ -694,6 +703,8 @@ if (!window.AstrBotPluginPage) {
                 const res = await bridge.apiPost('save_config', { config: getFormValues() });
                 if (res.success) {
                     showConfigStatus('配置已保存', 'success');
+                    // 重新加载，刷新脱敏字段的占位提示
+                    await loadConfig();
                 } else {
                     showConfigStatus(res.error || '保存失败', 'error');
                 }
@@ -834,7 +845,7 @@ if (!window.AstrBotPluginPage) {
             '闪传功能': ['create_flash_task', 'get_flash_file_list', 'get_flash_file_url', 'send_flash_msg', 'get_share_link', 'get_fileset_info', 'get_fileset_id', 'download_fileset'],
             '在线文件': ['get_online_file_msg', 'send_online_file', 'send_online_folder', 'receive_online_file', 'refuse_online_file', 'cancel_online_file'],
             '好友管理': ['delete_friend'],
-            '工作区': ['run_python_code', 'list_workspace_files', 'read_workspace_file', 'delete_workspace_file', 'fetch_url', 'open_page', 'click_element', 'type_text', 'screenshot_page', 'close_page', 'browser_search', 'browser_visit', 'browser_click', 'browser_input', 'browser_scroll', 'browser_swipe', 'browser_zoom', 'browser_screenshot', 'browser_back', 'browser_forward', 'browser_tabs', 'browser_close_tab', 'browser_close', 'browser_chat', 'browser_favorite_list', 'browser_favorite_add', 'browser_favorite_delete', 'browser_install']
+            '工作区': ['run_python_code', 'list_workspace_files', 'read_workspace_file', 'delete_workspace_file', 'fetch_url', 'open_page', 'screenshot_page', 'close_page', 'browser_search', 'browser_visit', 'browser_click', 'browser_double_click', 'browser_right_click', 'browser_long_press', 'browser_drag', 'browser_input_at', 'browser_input', 'browser_hover', 'browser_scroll', 'browser_wait', 'browser_zoom', 'browser_screenshot', 'browser_back', 'browser_forward', 'browser_tabs', 'browser_close_tab', 'browser_close', 'browser_chat', 'browser_favorite_list', 'browser_favorite_add', 'browser_favorite_delete', 'browser_install']
         };
 
         const TOOL_NAMES = {
@@ -861,7 +872,7 @@ if (!window.AstrBotPluginPage) {
             'get_online_file_msg': '在线文件消息', 'send_online_file': '发送文件', 'send_online_folder': '发送文件夹',
             'receive_online_file': '接收文件', 'refuse_online_file': '拒绝文件', 'cancel_online_file': '取消传输',
             'delete_friend': '删除好友',
-            'run_python_code': '执行Python代码', 'list_workspace_files': '工作区文件列表', 'fetch_url': '获取网页内容', 'open_page': '打开网页', 'click_element': '点击元素', 'type_text': '输入文字', 'screenshot_page': '网页截图', 'close_page': '关闭浏览器', 'browser_search': '搜索网页', 'browser_visit': '访问链接', 'browser_click': '点击坐标', 'browser_input': '输入文字', 'browser_scroll': '滚动页面', 'browser_swipe': '滑动操作', 'browser_zoom': '缩放页面', 'browser_screenshot': '截图', 'browser_back': '返回上一页', 'browser_forward': '下一页', 'browser_tabs': '标签页管理', 'browser_close_tab': '关闭标签页', 'browser_close': '关闭浏览器', 'browser_chat': '发送对话', 'browser_favorite_list': '查看收藏夹', 'browser_favorite_add': '添加收藏', 'browser_favorite_delete': '删除收藏', 'browser_install': '安装浏览器',
+            'run_python_code': '执行Python代码', 'list_workspace_files': '工作区文件列表', 'fetch_url': '获取网页内容', 'open_page': '打开网页', 'screenshot_page': '网页截图', 'close_page': '关闭浏览器', 'browser_search': '搜索网页', 'browser_visit': '访问链接', 'browser_click': '点击坐标', 'browser_double_click': '双击坐标', 'browser_right_click': '右键坐标', 'browser_long_press': '长按坐标', 'browser_drag': '拖拽坐标', 'browser_input_at': '点击坐标输入', 'browser_input': '输入文字', 'browser_hover': '悬停坐标', 'browser_scroll': '滚动页面', 'browser_wait': '等待页面', 'browser_zoom': '缩放页面', 'browser_screenshot': '截图', 'browser_back': '返回上一页', 'browser_forward': '下一页', 'browser_tabs': '标签页管理', 'browser_close_tab': '关闭标签页', 'browser_close': '关闭浏览器', 'browser_chat': '发送对话', 'browser_favorite_list': '查看收藏夹', 'browser_favorite_add': '添加收藏', 'browser_favorite_delete': '删除收藏', 'browser_install': '安装浏览器',
             'read_workspace_file': '读取工作区文件', 'delete_workspace_file': '删除工作区文件'
         };
 
@@ -955,7 +966,7 @@ if (!window.AstrBotPluginPage) {
             '在线文件': ['get_online_file_msg', 'send_online_file', 'send_online_folder', 'receive_online_file', 'refuse_online_file', 'cancel_online_file'],
             '好友管理': ['delete_friend'],
             '工作区': ['run_python_code', 'list_workspace_files', 'read_workspace_file', 'delete_workspace_file'],
-            '浏览器': ['fetch_url', 'open_page', 'click_element', 'type_text', 'screenshot_page', 'close_page', 'browser_search', 'browser_visit', 'browser_click', 'browser_input', 'browser_scroll', 'browser_swipe', 'browser_zoom', 'browser_screenshot', 'browser_back', 'browser_forward', 'browser_tabs', 'browser_close_tab', 'browser_close', 'browser_chat', 'browser_favorite_list', 'browser_favorite_add', 'browser_favorite_delete', 'browser_install']
+            '浏览器': ['fetch_url', 'open_page', 'screenshot_page', 'close_page', 'browser_search', 'browser_visit', 'browser_click', 'browser_double_click', 'browser_right_click', 'browser_long_press', 'browser_drag', 'browser_input_at', 'browser_input', 'browser_hover', 'browser_scroll', 'browser_wait', 'browser_zoom', 'browser_screenshot', 'browser_back', 'browser_forward', 'browser_tabs', 'browser_close_tab', 'browser_close', 'browser_chat', 'browser_favorite_list', 'browser_favorite_add', 'browser_favorite_delete', 'browser_install']
         };
 
         let permConfig = {};
@@ -1026,6 +1037,7 @@ if (!window.AstrBotPluginPage) {
                     html += '<label style="margin:0;font-size:0.88rem;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(name) + '</label>';
                     html += '<select id="perm_' + tool + '" style="width:auto;min-width:100px;margin-left:8px;font-size:0.82rem;padding:4px 8px;">';
                     html += '<option value="global"' + (perm === 'global' ? ' selected' : '') + '>🌐 全局</option>';
+                    html += '<option value="groupadmin"' + (perm === 'groupadmin' ? ' selected' : '') + '>👥 群主/管理员</option>';
                     html += '<option value="admin"' + (perm === 'admin' ? ' selected' : '') + '>🛡️ 超管</option>';
                     html += '<option value="disabled"' + (perm === 'disabled' ? ' selected' : '') + '>🚫 禁用</option>';
                     html += '</select>';
@@ -1044,7 +1056,8 @@ if (!window.AstrBotPluginPage) {
                 const el = document.getElementById('perm_' + tool);
                 if (el) el.value = level;
             }
-            showPermStatus('已将「' + cat + '」全部设为 ' + (level === 'global' ? '全局' : level === 'admin' ? '超管' : '禁用'), 'success');
+            const levelName = { global: '🌐 全局', groupadmin: '👥 群主/管理员（仅群聊）', admin: '🛡️ 超管', disabled: '🚫 禁用' }[level] || level;
+            showPermStatus('已将「' + cat + '」全部设为 ' + levelName, 'success');
         });
 
         // 保存权限设置
