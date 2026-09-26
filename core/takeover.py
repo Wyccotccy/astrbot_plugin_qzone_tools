@@ -92,6 +92,12 @@ class TakeoverSession:
     started_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
 
+    # 来源信息：接管结束后要靠这些字段把 AI 唤醒回同一个会话
+    sender_id: str = ""               # 发起接管的用户（操作者）
+    sender_name: str = ""
+    group_id: str = ""                # 群号（私聊为空）
+    self_id: str = ""                 # 机器人自身 id
+    
     # 结束状态
     finished: asyncio.Event = field(default_factory=asyncio.Event)
     end_reason: str = ""
@@ -104,6 +110,11 @@ class TakeoverSession:
 
     # 状态变更回调（用于给前端推状态）
     state_listeners: list[Callable[[dict], Awaitable[None]]] = field(default_factory=list)
+
+    # 结束回调：非阻塞模式下，由它负责把 AI 唤醒并交回截图
+    on_finished: Callable[["TakeoverSession"], Awaitable[None]] | None = None
+    # 结束回调是否已执行（防止重复唤醒）
+    notified: bool = False
 
     # 由外部注入的浏览器操作句柄
     browser_call: Callable[..., Awaitable[Any]] | None = None
@@ -234,7 +245,10 @@ class TakeoverSession:
         elif kind == "up":
             await self.browser_call("mouse_up_raw", x=x, y=y, button=button)
         elif kind == "click":
-            await self.browser_call("click_coord", coords=[x, y])
+            # 用 click_raw 而非 click_coord：前者不持有 _op_lock、点击后不 sleep 2 秒。
+            # 真人接管场景下，click_coord 的 2 秒等待会让连点/拖动严重卡顿，
+            # 表现为「点了没反应」。
+            await self.browser_call("click_raw", x=x, y=y, button=button)
 
     async def _apply_wheel(self, data: dict) -> None:
         """滚轮。"""
@@ -303,12 +317,21 @@ class TakeoverManager:
         browser_call: Callable[..., Awaitable[Any]],
         viewport: tuple[int, int] = (1280, 720),
         max_seconds: int | None = None,
+        *,
+        sender_id: str = "",
+        sender_name: str = "",
+        group_id: str = "",
+        self_id: str = "",
+        on_finished: Callable[["TakeoverSession"], Awaitable[None]] | None = None,
     ) -> TakeoverSession:
         """
         开启一次接管会话（若已有活跃会话则先结束它）。
 
-        :param max_seconds: 覆盖配置里的总时长上限。调用方（工具层）会按框架
-                            的 tool_call_timeout 钳制后传入，避免等待时间超过框架硬超时。
+        :param max_seconds: 覆盖配置里的总时长上限。
+        :param sender_id:   发起接管的用户 id（唤醒时要还原成同一个说话人）。
+        :param group_id:    群号（私聊传空）。
+        :param self_id:     机器人自身 id。
+        :param on_finished: 会话结束时的回调，用于把 AI 唤醒并交回截图。
         """
         async with self._lock:
             if self.session and not self.session.finished.is_set():
@@ -330,6 +353,11 @@ class TakeoverManager:
                 idle_seconds=self.idle_seconds,
                 browser_call=browser_call,
                 viewport=viewport,
+                sender_id=str(sender_id or ""),
+                sender_name=str(sender_name or ""),
+                group_id=str(group_id or ""),
+                self_id=str(self_id or ""),
+                on_finished=on_finished,
             )
             self.session = sess
             logger.info(
@@ -357,6 +385,28 @@ class TakeoverManager:
             logger.info(f"[Takeover] 会话结束 {sess.session_id} 原因={reason}")
             await self._stop_screencast()
             await sess.notify_state()
+
+        # 在锁外触发「结束回调」：它要做截图 + 唤醒 AI，耗时不可预测，
+        # 持锁会把前端的状态查询/操作注入全部堵住。
+        await self._fire_finished(sess)
+
+    async def _fire_finished(self, sess: TakeoverSession) -> None:
+        """
+        触发会话的结束回调（幂等）。
+
+        非阻塞模式下，AI 早已返回、不再等待；必须靠这个回调把
+        「用户操作完了 + 最新截图」重新送进同一个会话，AI 才能接着干活。
+        """
+        if sess.notified:
+            return
+        sess.notified = True
+        cb = sess.on_finished
+        if cb is None:
+            return
+        try:
+            await cb(sess)
+        except Exception as e:
+            logger.error(f"[Takeover] 结束回调执行失败: {e}", exc_info=True)
 
     async def _stop_screencast(self) -> None:
         task = self._screencast_task

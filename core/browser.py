@@ -546,11 +546,26 @@ class BrowserCore:
 
     async def _unfreeze_page(self, page: Page):
         """
-        解冻指定 Page，使其恢复活动（恢复视频、动画、定时器等）。
+        解冻指定 Page，恢复被 _freeze_page 接管的定时器与动画帧回调。
+
+        注意：必须把 setInterval / requestAnimationFrame **真正还原**。
+        早期版本只把 window._freeze 置 false，却让被替换成空函数的
+        setInterval/rAF 一直留着，导致页面定时器永久失效——
+        表现就是「点击了但页面毫无反应」（依赖定时器/动画帧的 JS 逻辑全死了）。
         """
         try:
             await page.evaluate("""
-                (() => { window._freeze = false; })()
+                (() => {
+                    if (window._oldSetInterval) {
+                        window.setInterval = window._oldSetInterval;
+                        window._oldSetInterval = null;
+                    }
+                    if (window._oldRequestAnimationFrame) {
+                        window.requestAnimationFrame = window._oldRequestAnimationFrame;
+                        window._oldRequestAnimationFrame = null;
+                    }
+                    window._freeze = false;
+                })()
             """)
         except Exception:
             pass
@@ -907,6 +922,19 @@ class BrowserCore:
         page = await self._ensure_page()
         await page.mouse.move(x, y)
         await page.mouse.up(button=button)
+
+    async def click_raw(self, x: int, y: int, button: str = "left") -> None:
+        """
+        接管专用：纯鼠标点击。
+
+        与 click_coord 的区别：
+        - 不做弹窗监听（那是给 AI 工具用的，需要感知新标签页）
+        - 点击后**不 sleep 2 秒、不持有 _op_lock**
+        这两个特性对真人操作是致命的：一次点击会把后续所有输入卡住 2 秒以上，
+        连点、拖动都会严重延迟，表现为「点了没反应」。
+        """
+        page = await self._ensure_page()
+        await page.mouse.click(x, y, button=button)
 
     async def wheel_raw(self, x: int, y: int, dx: float = 0, dy: float = 0) -> None:
         page = await self._ensure_page()

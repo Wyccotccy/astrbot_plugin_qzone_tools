@@ -3719,46 +3719,24 @@ class Main(Star):
             logger.error(f"[run_wyc_tool] 执行工具 {tool_name} 失败: {e}", exc_info=True)
             return {"status": "error", "message": f"工具执行出错: {_safe_error_msg(e)}"}
 
-    # ==================== 浏览器接管（v5.4.0 / v5.4.1 修正） ====================
-
-    # 框架工具超时之外的自留余量（秒）：留给「结束会话 + 截图 + 编码」的收尾时间
-    _TAKEOVER_TIMEOUT_MARGIN = 12
-
-    def _framework_tool_timeout(self) -> int:
-        """
-        读取 AstrBot 全局「工具调用超时时间」。
-
-        对应配置项 agent_runner.config.misc.tool_call_timeout（默认 120 秒，
-        见 astrbot/core/agent/run_context.py）。框架对每次工具调用都用
-        asyncio.wait_for 施加硬性超时，超时即强行中断工具，
-        因此任何长等待工具都必须把等待时长控制在它以内。
-        """
-        try:
-            cfg = self.context.get_config() or {}
-            val = (
-                cfg.get("agent_runner", {})
-                .get("config", {})
-                .get("misc", {})
-                .get("tool_call_timeout", 120)
-            )
-            val = int(val)
-            return val if val > 0 else 120
-        except Exception:
-            return 120
+    # ==================== 浏览器接管（v5.5.0 非阻塞改造） ====================
 
     async def request_browser_takeover_tool(self, event: AstrMessageEvent, reason: str) -> Any:
         """
-        请求真人用户接管浏览器。
+        请求真人用户接管浏览器（非阻塞）。
 
-        必须是**普通协程**（单次 return），不能写成 async generator：
-        - 本插件的 run_wyc_tool 包装层用 `await handler(...)` 调用，async generator 会直接
-          抛 TypeError: object async_generator can't be used in 'await' expression；
-        - 即便交给框架执行，`yield None` 的语义是「工具已直接把消息发给用户」，
-          会触发 AgentState.DONE 提前结束整个 Agent 回合；
-        - 多次 yield 非空值会用同一个 tool_call_id 追加多条工具结果，部分 provider 会报错。
+        为什么不再阻塞等待：
+        - 框架对每次工具调用施加 asyncio.wait_for(tool_call_timeout) 硬超时
+          （默认 120 秒，可通过全局设置调整），超时即强杀工具，接管时长被迫受限；
+        - 即便不超时，长时间挂起也会占住这一轮 Agent，用户干等没有反馈。
 
-        因此等待策略：等待时长按框架 tool_call_timeout 钳制（保留收尾余量），
-        到点主动结束会话并按「系统超时」上报，而不是靠周期性 yield 续期。
+        现在的做法：
+        1. 工具**立即返回**，告诉 AI「已交给用户，你先待命，别再操作浏览器」；
+        2. 用户在 WebUI 上操作，`TakeoverManager` 的双计时器负责收尾；
+        3. 会话结束时由 `_wake_ai_after_takeover` 合成一个事件投回会话，
+           把「用户已完成操作 + 最新截图」重新送给 AI，AI 自然接着干活。
+
+        这样接管时长只受 WebUI 的上限配置约束，与框架工具超时彻底解耦。
         """
         if not self.browser_supervisor:
             return {"status": "error", "message": "浏览器尚未启用，无法请求接管。"}
@@ -3768,22 +3746,13 @@ class Main(Star):
             return {"status": "error", "message": "已有一个接管会话正在进行中。"}
 
         reason = (reason or "").strip() or "需要真人协助完成操作"
-
-        # ---------- 0. 计算有效等待窗口 ----------
-        # 框架超时是硬性的（超出即强杀），WebUI 配置的上限是用户意图，两者取小。
-        # 注意：等待结束后还要做「结束会话 + 关闭投屏 + 截图 + 编码」的收尾，
-        # 因此等待时长必须在框架超时之上再扣掉一段余量，否则收尾会被拦腰砍断。
         cfg_max = self.takeover_manager.max_seconds
-        fw_timeout = self._framework_tool_timeout()
-        window = max(3, fw_timeout - self._TAKEOVER_TIMEOUT_MARGIN)
-        effective = max(3, min(cfg_max, window))
-        clamped = effective < cfg_max
 
         # ---------- 1. 发系统消息通知用户 ----------
         notice = (
             "AI已将操作权限转移至WebUI，请前往Astrbot控制台打开"
             "\u201c更多LLM工具\u201d插件WEB UI进行接管操作，"
-            f"本次操作将在{effective}秒后超时"
+            f"本次操作将在{cfg_max}秒后超时"
         )
         try:
             await event.send(MessageChain().message(notice))
@@ -3797,15 +3766,27 @@ class Main(Star):
             except Exception:
                 viewport = (1280, 720)
 
+            umo = event.unified_msg_origin
+
             async def _browser_call(method: str, **kwargs):
                 return await self.browser_supervisor.call(method, **kwargs)
 
+            def _resolve_group_id() -> str:
+                try:
+                    return str(event.get_group_id() or "")
+                except Exception:
+                    return ""
+
             sess = await self.takeover_manager.open(
-                umo=event.unified_msg_origin,
+                umo=umo,
                 reason=reason,
                 browser_call=_browser_call,
                 viewport=viewport,
-                max_seconds=effective,
+                sender_id=event.get_sender_id(),
+                sender_name=event.get_sender_name(),
+                group_id=_resolve_group_id(),
+                self_id=event.get_self_id(),
+                on_finished=self._wake_ai_after_takeover,
             )
         except Exception as e:
             logger.error(f"[Takeover] 开启会话失败: {e}", exc_info=True)
@@ -3813,77 +3794,160 @@ class Main(Star):
 
         logger.info(
             f"[Takeover] AI 请求接管 {sess.session_id}，原因: {reason}，"
-            f"有效等待 {effective}s（框架上限 {fw_timeout}s{'，已钳制' if clamped else ''}）"
+            f"上限 {cfg_max}s（非阻塞模式，工具立即返回）"
         )
 
-        # ---------- 3. 等待用户完成 ----------
-        # 会话自带的监控协程会在空闲超时/上限到点时结束它，这里只需等待事件。
-        # 额外 +2 秒自留，确保 wait_for 一定先于框架硬超时触发，从而能优雅收尾。
-        try:
-            await asyncio.wait_for(sess.finished.wait(), timeout=window + 2)
-        except asyncio.TimeoutError:
-            pass
-        except asyncio.CancelledError:
-            await self.takeover_manager.end(REASON_ABORTED)
-            raise
+        return {
+            "status": "success",
+            "message": (
+                f"👤 已把浏览器操作权交给用户（原因：{reason}）。\n\n"
+                f"用户正在 AstrBot 控制台的插件 WebUI 上操作，最长 {cfg_max} 秒。\n"
+                "**请你现在就结束本轮回复，不要再调用任何浏览器工具**——"
+                "此刻浏览器由用户独占，你的浏览器操作会被拒绝。\n"
+                "用户操作完成后，系统会自动把最新截图和结束原因推送给你，"
+                "届时再根据截图继续操作即可。"
+            ),
+        }
 
-        # ---------- 4. 兜底收尾 ----------
-        if not sess.finished.is_set():
-            # 走到这里说明等待窗口已耗尽（监控协程异常等），主动结束
-            try:
-                await self.takeover_manager.end(REASON_MAX_TIMEOUT)
-            except Exception as e:
-                logger.warning(f"[Takeover] 主动结束会话失败: {e}")
+    # ==================== 接管结束后的 AI 唤醒 ====================
 
+    _TAKEOVER_WAKE_NOTE = (
+        "[浏览器接管结束] 用户在 WebUI 上完成了操作，操作权已交还给你。"
+        "下方是结束时的浏览器截图，请根据截图判断用户的完成情况并继续操作。"
+    )
+
+    async def _wake_ai_after_takeover(self, sess) -> None:
+        """
+        接管结束回调：合成一个事件投回会话，把 AI 唤醒并交回截图。
+
+        实现依据（AstrBot 4.28 官方机制）：
+        - `CronMessageEvent` 是框架自带的合成事件，其 `is_wake = True`
+          可直接通过唤醒检查阶段，无需 @ 或唤醒前缀；
+        - 事件投进 `context.get_event_queue()` 后，由 EventBus → Pipeline
+          正常跑完整流水线，等于"用户又发了条消息"，AI 会带着完整上下文继续；
+        - 截图以 `Image` 组件挂在事件上，框架的 collect_initial_request
+          会自动把它转成 image_urls 送给多模态模型，AI 能直接"看到"。
+        """
         ended_reason = sess.end_reason or REASON_ABORTED
         note = REASON_TEXT.get(ended_reason, "接管已结束。")
 
-        # 兜底：清理浏览器残留的投屏
-        try:
-            await self.browser_supervisor.call("stop_screencast")
-        except Exception:
-            pass
-
+        # ---------- 1. 收尾截图（必须在停止投屏之后取，保证是最终画面）----------
         shot = None
         try:
-            shot = await self.browser_supervisor.call("screenshot")
-            if shot:
-                shot = self._convert_image(shot)
+            if self.browser_supervisor:
+                shot = await self.browser_supervisor.call("screenshot")
+                if shot:
+                    shot = self._convert_image(shot)
         except Exception as e:
             logger.warning(f"[Takeover] 结束后截图失败: {e}")
 
+        # ---------- 2. 按结束原因生成给 AI 的文案 ----------
         if ended_reason == REASON_USER_END:
-            detail = "用户已完成操作，请根据截图内容继续操作。"
+            detail = "用户已手动点「结束操作」，本次操作是用户主动完成的。"
         elif ended_reason == REASON_MAX_TIMEOUT:
-            detail = (f"本次接管因达到时长上限（{sess.max_seconds}秒）由系统自动结束，"
-                      "并非用户手动结束。请检查用户是否已完成操作，"
-                      "若未完成可再次请求接管。")
+            detail = (
+                f"本次接管因达到时长上限（{sess.max_seconds}秒）由系统自动结束，"
+                "**并非用户手动结束**。请检查用户是否已完成操作，若未完成可再次请求接管。"
+            )
         elif ended_reason == REASON_IDLE_TIMEOUT:
-            detail = (f"用户在 {sess.idle_seconds} 秒内没有任何操作，系统已自动结束接管并交还权限。"
-                      "请检查用户是否已完成操作。")
+            detail = (
+                f"用户在 {sess.idle_seconds} 秒内没有任何操作，系统已自动结束接管并交还权限。"
+                "请检查用户是否已完成操作。"
+            )
         else:
             detail = note
 
-        msg = (
-            f"👤 用户接管已结束（原因：{note}）\n"
-            f"用户共执行 {sess.action_count} 次操作，"
-            f"持续 {sess.elapsed:.0f} 秒。\n\n"
+        body = (
+            f"{self._TAKEOVER_WAKE_NOTE}\n\n"
+            f"结束原因：{note}\n"
+            f"用户共执行 {sess.action_count} 次操作，持续 {sess.elapsed:.0f} 秒。\n"
             f"{detail}"
         )
-        if clamped:
-            msg += (
-                f"\n\n⚠️ WebUI 设定上限为 {cfg_max} 秒，但 AstrBot 全局"
-                f"「工具调用超时时间」为 {fw_timeout} 秒，故本次实际等待 {effective} 秒。"
-                "如需更长接管时间，请调高 AstrBot 全局设置中的该项。"
+        if not shot:
+            body += "\n\n（截图获取失败，可用 browser_screenshot 重新取图）"
+
+        logger.info(
+            f"[Takeover] 唤醒 AI：会话={sess.session_id} 原因={ended_reason} "
+            f"操作数={sess.action_count} 截图={'有' if shot else '无'}"
+        )
+
+        # ---------- 3. 合成事件并投回会话 ----------
+        await self._dispatch_wake_event(sess, body, shot)
+
+    async def _dispatch_wake_event(self, sess, body: str, shot: str | None) -> None:
+        """合成一个"用户发来的消息"事件，投进事件队列唤醒 AI。"""
+        try:
+            from astrbot.core.cron.events import CronMessageEvent
+            from astrbot.core.platform.message_session import MessageSession
+            from astrbot.core.message.components import Image as _Image
+            from astrbot.core.message.components import At as _At
+            from astrbot.core.platform.message_type import MessageType as _MT
+        except Exception as e:
+            logger.error(f"[Takeover] 唤醒所需模块不可用，回退为直发消息: {e}")
+            await self._fallback_notify(sess, body, shot)
+            return
+
+        try:
+            session = MessageSession.from_str(sess.umo)
+        except Exception as e:
+            logger.error(f"[Takeover] 无法解析会话 {sess.umo}: {e}")
+            await self._fallback_notify(sess, body, shot)
+            return
+
+        try:
+            ev = CronMessageEvent(
+                context=self.context,
+                session=session,
+                message=body,
+                sender_id=sess.self_id or "astrbot",
+                sender_name="接管完成",
+                message_type=session.message_type,
             )
 
-        if shot:
-            return {
-                "status": "success",
-                "message": msg + "\n\n💡 已附上接管结束时的最新截图。",
-                "screenshot": shot,
-            }
-        return {"status": "success", "message": msg + "\n\n（截图获取失败，可用 browser_screenshot 重试）"}
+            # 还原真实说话人：唤醒检查会用 sender_id 判权限，AI 也靠它认人
+            if sess.sender_id:
+                ev.message_obj.sender.user_id = sess.sender_id
+            ev.message_obj.group_id = sess.group_id or ""
+            if sess.sender_name:
+                ev.message_obj.sender.nickname = sess.sender_name
+
+            # 群聊必须补一个 @机器人：WakingCheckStage 对群消息只在
+            # 「@了机器人 / @全体 / 引用机器人」三种情况下判定为唤醒，
+            # 否则直接 stop_event 丢掉。私聊不需要。
+            if session.message_type == _MT.GROUP_MESSAGE and sess.self_id:
+                try:
+                    ev.message_obj.message.insert(0, _At(qq=sess.self_id))
+                except Exception as e:
+                    logger.warning(f"[Takeover] 补 @ 失败（群聊可能无法唤醒）: {e}")
+
+            # 截图挂到事件上：框架会自动转成 image_urls，AI 能直接看图
+            if shot and os.path.isfile(shot):
+                try:
+                    ev.message_obj.message.append(_Image.fromFileSystem(shot))
+                except Exception as e:
+                    logger.warning(f"[Takeover] 截图附加失败，仅回文案: {e}")
+
+            self.context.get_event_queue().put_nowait(ev)
+            logger.info(f"[Takeover] 唤醒事件已投递到 {sess.umo}")
+        except Exception as e:
+            logger.error(f"[Takeover] 投递唤醒事件失败: {e}", exc_info=True)
+            await self._fallback_notify(sess, body, shot)
+
+    async def _fallback_notify(self, sess, body: str, shot: str | None) -> None:
+        """唤醒失败时的兜底：至少把结果和截图直接发给用户，不让信息丢失。"""
+        try:
+            chain = MessageChain()
+            if shot and os.path.isfile(shot):
+                try:
+                    import base64 as _b64
+                    with open(shot, "rb") as f:
+                        chain = chain.image(_b64.b64encode(f.read()).decode())
+                except Exception:
+                    chain = MessageChain()
+            await self.context.send_message(sess.umo, chain.message(body))
+            logger.info("[Takeover] 已用兜底方式把接管结果发给用户")
+        except Exception as e:
+            logger.error(f"[Takeover] 兜底通知也失败: {e}", exc_info=True)
 
     def _init_action_overlay(self):
         """初始化操作图标叠加组件（图标随包分发，只读；产物写 data_dir）。"""

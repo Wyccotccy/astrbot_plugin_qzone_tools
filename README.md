@@ -3,7 +3,7 @@
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
 <p>
-  <img src="https://img.shields.io/badge/version-5.4.1-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-5.5.0-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
   <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
@@ -434,6 +434,22 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 
+### v5.5.0 — 非阻塞接管（时长自由）+ 触摸点击/画面闪烁修复
+**架构改造**：接管工具改为**立即返回**，用户操作结束后由事件回调把 AI 唤醒。
+接管时长因此**不再受框架「工具调用超时时间」约束**，可在 WebUI 里自由设置（最高 3600 秒）。
+
+- 唤醒走 AstrBot 官方的合成事件机制（`CronMessageEvent` + 事件队列），
+  等于"用户又发了条消息"，AI 带完整上下文继续；截图自动转成图片输入，AI 能直接看到
+- 群聊自动补 `@机器人`（唤醒检查对群消息有此要求，否则会被丢弃）
+- 唤醒失败时兜底直发消息，信息不丢
+
+**修复**
+- **手机端触摸点击失效**：`moveCursor()` 里一行残留占位语句抛 `ReferenceError`，
+  导致 `gestureStart` 未执行、`touchend` 直接返回。用 Playwright 真实触摸事件定位
+- **画面一闪一闪**：状态轮询每 2 秒重弹一次连接遮罩，静止页面无新帧来隐藏它
+- **点击延迟**：接管点击改走 `click_raw`（原来走的 `click_coord` 会持锁 + sleep 2 秒）
+- `_unfreeze_page` 现在真正还原 `setInterval` / `requestAnimationFrame`
+
 ### v5.4.1 — 修复接管工具调用即崩
 **核心修复**：`request_browser_takeover` 此前被实现为 async generator（用 `yield` 做"心跳保活"），
 但插件的 `run_wyc_tool` 用 `await` 调用它，导致线上报错 `object async_generator can't be used in 'await' expression`。
@@ -455,7 +471,7 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 
 **AI 侧**
 - 新增 `request_browser_takeover` 工具，**免搜索直连**（应急场景来不及搜索）
-- **等待期间保持在线**：实现为普通协程，等待时长按框架 `tool_call_timeout` 钳制（见 v5.4.1 修复说明）
+- **非阻塞**：工具立即返回，用户操作结束后由事件回调唤醒 AI（见 v5.5.0 架构说明）
 - 发起时自动发送系统消息通知用户（含超时秒数）
 - 结束时按原因区分文案：用户手动结束 / 系统超时 / 用户久未操作，并附上最新截图
 

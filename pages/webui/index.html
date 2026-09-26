@@ -396,8 +396,13 @@
             backdrop-filter: blur(2px);
             -webkit-backdrop-filter: blur(2px);
             transition: opacity .2s;
+            /* 仅作视觉提示，绝不拦截指针/触摸事件。
+               否则遮罩期间用户点画面会被浏览器判定为滚动手势，
+               触发 touchcancel 而非 touchend，导致点击丢失。 */
+            pointer-events: none;
+            touch-action: none;
         }
-        .tk-overlay.hide { opacity: 0; pointer-events: none; }
+        .tk-overlay.hide { opacity: 0; }
         .tk-overlay-txt { font-size: 13px; color: #fff; }
 
         .tk-keybar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
@@ -651,11 +656,11 @@
                         <div class="two-col">
                             <div class="field">
                                 <label>接管总时长上限（秒）</label>
-                                <input type="number" id="takeover_max_seconds" min="20" max="1800" />
+                                <input type="number" id="takeover_max_seconds" min="20" max="3600" />
                                 <div class="hint">
-                                    超时后系统自动结束并把截图返回 AI（会告知 AI 这是系统超时）。
-                                    实际生效值不会超过 AstrBot 全局「工具调用超时时间」
-                                    （默认 120 秒，在 AstrBot 设置 → 智能体 中调整）；填得更大也没用，会被自动钳制。
+                                    超时后系统自动结束、截图并唤醒 AI（会告知 AI 这是系统超时）。
+                                    接管为非阻塞模式：AI 发起后立即返回待命，因此该上限不受
+                                    AstrBot 全局「工具调用超时时间」约束，可放心调大。
                                 </div>
                             </div>
                             <div class="field">
@@ -1468,6 +1473,9 @@ if (!window.AstrBotPluginPage) {
                 const res = await bridge.apiGet('get_config');
                 if (!res.success) throw new Error(res.error || '加载失败');
                 const cfg = res.config;
+                if (!cfg || typeof cfg !== 'object') {
+                    throw new Error('服务端未返回配置内容');
+                }
                 Object.entries(cfg).forEach(([key, v]) => {
                     // viewport_size 拆分为 width/height 两个输入框
                     if (key === 'viewport_size' && v && typeof v === 'object') {
@@ -2325,9 +2333,12 @@ if (!window.AstrBotPluginPage) {
             setTkView('active');
             tkReason.textContent = res.reason ? ('AI 请求接管：' + res.reason) : 'AI 已请求用户接管';
             updateTimer(res.session);
-            showOverlay('正在连接画面…');
 
             if (switched && !tkSubId) {
+                // 只在**首次进入**时显示连接遮罩。
+                // 早期版本每次轮询都调 showOverlay，导致画面每 2 秒被深色遮罩盖一次，
+                // 表现为「一闪一闪」；且遮罩会吞掉触摸事件造成点击失效。
+                showOverlay('正在连接画面…');
                 subscribeFrames();
             }
         }
@@ -2359,7 +2370,7 @@ if (!window.AstrBotPluginPage) {
                     const evType = msg.eventType || 'message';
                     if (evType === 'frame') {
                         if (msg.raw) {
-                            tkScreen.src = 'data:image/jpeg;base64,' + msg.raw;
+                            paintFrame(msg.raw);
                             hideOverlay();
                         }
                     } else if (evType === 'state') {
@@ -2379,6 +2390,33 @@ if (!window.AstrBotPluginPage) {
             }).catch(e => {
                 showOverlay('画面订阅失败: ' + e.message);
             });
+        }
+
+        // 画面绘制：等图片解码完成后再一次性切换，避免出现「先白屏后出图」的闪烁
+        let tkPendingFrame = null;
+        let tkPainting = false;
+        function paintFrame(b64) {
+            if (tkPainting) { tkPendingFrame = b64; return; }  // 只保留最新帧
+            tkPainting = true;
+            const img = new Image();
+            img.onload = () => {
+                tkScreen.src = img.src;
+                tkPainting = false;
+                if (tkPendingFrame) {
+                    const next = tkPendingFrame;
+                    tkPendingFrame = null;
+                    paintFrame(next);
+                }
+            };
+            img.onerror = () => {
+                tkPainting = false;
+                if (tkPendingFrame) {
+                    const next = tkPendingFrame;
+                    tkPendingFrame = null;
+                    paintFrame(next);
+                }
+            };
+            img.src = 'data:image/jpeg;base64,' + b64;
         }
 
         function unsubscribeFrames() {
@@ -2421,17 +2459,19 @@ if (!window.AstrBotPluginPage) {
         }
 
         function moveCursor(ev) {
-            const rect = tkScreen.getBoundingClientRect();
             let clientX, clientY;
             if (ev.touches && ev.touches.length) {
                 clientX = ev.touches[0].clientX; clientY = ev.touches[0].clientY;
+            } else if (ev.changedTouches && ev.changedTouches.length) {
+                clientX = ev.changedTouches[0].clientX; clientY = ev.changedTouches[0].clientY;
             } else {
                 clientX = ev.clientX; clientY = ev.clientY;
             }
-            tkCursor.style.left = (clientX - tkStage.getBoundingClientRect().left) + 'px';
-            tkCursor.style.top = (clientY - tkStage.getBoundingClientRect().top) + 'px';
+            if (typeof clientX !== 'number' || typeof clientY !== 'number') return;
+            const stageRect = tkStage.getBoundingClientRect();
+            tkCursor.style.left = (clientX - stageRect.left) + 'px';
+            tkCursor.style.top = (clientY - stageRect.top) + 'px';
             tkCursor.classList.add('on');
-            _ = rect;
         }
 
         // ---- 发送操作到后端 ----
@@ -2557,6 +2597,15 @@ if (!window.AstrBotPluginPage) {
             if (!tkActiveFlag || !gesture) return;
             const pt = normPoint(ev);
             if (pt) gestureEnd(pt);
+            tkCursor.classList.remove('on');
+        }, { passive: false });
+        // 触摸被系统取消（来电、通知栏下拉、误判为滚动等）：
+        // 只清理手势状态，不补发点击，避免凭空多出一次操作。
+        tkStage.addEventListener('touchcancel', () => {
+            if (gesture && gesture.longPressTimer) {
+                clearTimeout(gesture.longPressTimer);
+            }
+            gesture = null;
             tkCursor.classList.remove('on');
         });
 
