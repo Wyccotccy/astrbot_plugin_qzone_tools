@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -3668,6 +3669,18 @@ class Main(Star):
                 param_desc.append(f"{p}({desc})")
             return {"status": "error", "message": f"缺少必填参数: {', '.join(param_desc)}。请参考工具定义传入正确参数。"}
         try:
+            # 防御：若某个 handler 误写成 async generator，直接 await 会抛
+            # TypeError: object async_generator can't be used in 'await' expression。
+            # 这里主动探测并给出可诊断的错误，而不是抛到底层。
+            if inspect.isasyncgenfunction(handler):
+                logger.error(
+                    f"[run_wyc_tool] 工具 {tool_name} 的 handler 是 async generator，"
+                    "本插件只支持普通协程；请改为普通 async def + return。"
+                )
+                return {
+                    "status": "error",
+                    "message": f"工具 {tool_name} 实现方式不受支持（async generator），请联系插件作者。",
+                }
             result = await handler(event, **args_dict)
             # 隐私模式下对返回文本脱敏（隐藏群号/QQ号）
             result = self._privacy_filter_result(result)
@@ -3706,56 +3719,83 @@ class Main(Star):
             logger.error(f"[run_wyc_tool] 执行工具 {tool_name} 失败: {e}", exc_info=True)
             return {"status": "error", "message": f"工具执行出错: {_safe_error_msg(e)}"}
 
-    # ==================== 浏览器接管（v5.4.0） ====================
+    # ==================== 浏览器接管（v5.4.0 / v5.4.1 修正） ====================
+
+    # 框架工具超时之外的自留余量（秒）：留给「结束会话 + 截图 + 编码」的收尾时间
+    _TAKEOVER_TIMEOUT_MARGIN = 12
+
+    def _framework_tool_timeout(self) -> int:
+        """
+        读取 AstrBot 全局「工具调用超时时间」。
+
+        对应配置项 agent_runner.config.misc.tool_call_timeout（默认 120 秒，
+        见 astrbot/core/agent/run_context.py）。框架对每次工具调用都用
+        asyncio.wait_for 施加硬性超时，超时即强行中断工具，
+        因此任何长等待工具都必须把等待时长控制在它以内。
+        """
+        try:
+            cfg = self.context.get_config() or {}
+            val = (
+                cfg.get("agent_runner", {})
+                .get("config", {})
+                .get("misc", {})
+                .get("tool_call_timeout", 120)
+            )
+            val = int(val)
+            return val if val > 0 else 120
+        except Exception:
+            return 120
 
     async def request_browser_takeover_tool(self, event: AstrMessageEvent, reason: str) -> Any:
         """
         请求真人用户接管浏览器。
 
-        实现为 async generator：等待期间每 2 秒 yield 一次心跳。
-        框架对每次 anext 都有 tool_call_timeout 计时（默认 120s），
-        周期性 yield 可不断重置该计时器，从而突破超时限制、长时间等待用户。
+        必须是**普通协程**（单次 return），不能写成 async generator：
+        - 本插件的 run_wyc_tool 包装层用 `await handler(...)` 调用，async generator 会直接
+          抛 TypeError: object async_generator can't be used in 'await' expression；
+        - 即便交给框架执行，`yield None` 的语义是「工具已直接把消息发给用户」，
+          会触发 AgentState.DONE 提前结束整个 Agent 回合；
+        - 多次 yield 非空值会用同一个 tool_call_id 追加多条工具结果，部分 provider 会报错。
 
-        注意：async generator 中**不能用 `return 值`**（Python 语法限制），
-        因此所有返回值都改为 `yield 值`（框架会把 yield 的内容当作工具结果）。
-
-        产出：
-        - 首个 yield：无值（仅用于把已发出的通知推出去）
-        - 出错时：yield 错误字典
-        - 结束时：yield 结束说明 + 最新截图路径（回给 AI）
+        因此等待策略：等待时长按框架 tool_call_timeout 钳制（保留收尾余量），
+        到点主动结束会话并按「系统超时」上报，而不是靠周期性 yield 续期。
         """
         if not self.browser_supervisor:
-            yield {"status": "error", "message": "浏览器尚未启用，无法请求接管。"}
-            return
+            return {"status": "error", "message": "浏览器尚未启用，无法请求接管。"}
 
-        # 已有活跃接管时直接复用，避免重复发起
+        # 已有活跃接管时直接拒绝，避免重复发起
         if self.takeover_manager.is_active():
-            yield {"status": "error", "message": "已有一个接管会话正在进行中。"}
-            return
+            return {"status": "error", "message": "已有一个接管会话正在进行中。"}
 
         reason = (reason or "").strip() or "需要真人协助完成操作"
 
+        # ---------- 0. 计算有效等待窗口 ----------
+        # 框架超时是硬性的（超出即强杀），WebUI 配置的上限是用户意图，两者取小。
+        # 注意：等待结束后还要做「结束会话 + 关闭投屏 + 截图 + 编码」的收尾，
+        # 因此等待时长必须在框架超时之上再扣掉一段余量，否则收尾会被拦腰砍断。
+        cfg_max = self.takeover_manager.max_seconds
+        fw_timeout = self._framework_tool_timeout()
+        window = max(3, fw_timeout - self._TAKEOVER_TIMEOUT_MARGIN)
+        effective = max(3, min(cfg_max, window))
+        clamped = effective < cfg_max
+
         # ---------- 1. 发系统消息通知用户 ----------
-        max_sec = self.takeover_manager.max_seconds
         notice = (
             "AI已将操作权限转移至WebUI，请前往Astrbot控制台打开"
             "\u201c更多LLM工具\u201d插件WEB UI进行接管操作，"
-            f"本次操作将在{max_sec}秒后超时"
+            f"本次操作将在{effective}秒后超时"
         )
         try:
             await event.send(MessageChain().message(notice))
         except Exception as e:
             logger.warning(f"[Takeover] 通知用户失败: {e}")
-        # 让首个 yield 立即把通知推出去
-        yield
 
         # ---------- 2. 建立接管会话 ----------
         try:
-            viewport = (1280, 720)
             try:
                 viewport = await self.browser_supervisor.call("viewport_size")
             except Exception:
-                pass
+                viewport = (1280, 720)
 
             async def _browser_call(method: str, **kwargs):
                 return await self.browser_supervisor.call(method, **kwargs)
@@ -3765,28 +3805,36 @@ class Main(Star):
                 reason=reason,
                 browser_call=_browser_call,
                 viewport=viewport,
+                max_seconds=effective,
             )
         except Exception as e:
             logger.error(f"[Takeover] 开启会话失败: {e}", exc_info=True)
-            yield {"status": "error", "message": f"开启接管失败: {_safe_error_msg(e)}"}
-            return
+            return {"status": "error", "message": f"开启接管失败: {_safe_error_msg(e)}"}
 
-        logger.info(f"[Takeover] AI 请求接管，原因: {reason}")
+        logger.info(
+            f"[Takeover] AI 请求接管 {sess.session_id}，原因: {reason}，"
+            f"有效等待 {effective}s（框架上限 {fw_timeout}s{'，已钳制' if clamped else ''}）"
+        )
 
-        # ---------- 3. 心跳保活等待 ----------
+        # ---------- 3. 等待用户完成 ----------
+        # 会话自带的监控协程会在空闲超时/上限到点时结束它，这里只需等待事件。
+        # 额外 +2 秒自留，确保 wait_for 一定先于框架硬超时触发，从而能优雅收尾。
         try:
-            while not sess.finished.is_set():
-                try:
-                    await asyncio.wait_for(sess.finished.wait(), timeout=2.0)
-                    break
-                except asyncio.TimeoutError:
-                    # 心跳：重置框架的 tool_call_timeout 计时
-                    yield
+            await asyncio.wait_for(sess.finished.wait(), timeout=window + 2)
+        except asyncio.TimeoutError:
+            pass
         except asyncio.CancelledError:
             await self.takeover_manager.end(REASON_ABORTED)
             raise
 
-        # ---------- 4. 结束：截图 + 说明回给 AI ----------
+        # ---------- 4. 兜底收尾 ----------
+        if not sess.finished.is_set():
+            # 走到这里说明等待窗口已耗尽（监控协程异常等），主动结束
+            try:
+                await self.takeover_manager.end(REASON_MAX_TIMEOUT)
+            except Exception as e:
+                logger.warning(f"[Takeover] 主动结束会话失败: {e}")
+
         ended_reason = sess.end_reason or REASON_ABORTED
         note = REASON_TEXT.get(ended_reason, "接管已结束。")
 
@@ -3804,7 +3852,6 @@ class Main(Star):
         except Exception as e:
             logger.warning(f"[Takeover] 结束后截图失败: {e}")
 
-        detail = note
         if ended_reason == REASON_USER_END:
             detail = "用户已完成操作，请根据截图内容继续操作。"
         elif ended_reason == REASON_MAX_TIMEOUT:
@@ -3814,6 +3861,8 @@ class Main(Star):
         elif ended_reason == REASON_IDLE_TIMEOUT:
             detail = (f"用户在 {sess.idle_seconds} 秒内没有任何操作，系统已自动结束接管并交还权限。"
                       "请检查用户是否已完成操作。")
+        else:
+            detail = note
 
         msg = (
             f"👤 用户接管已结束（原因：{note}）\n"
@@ -3821,15 +3870,20 @@ class Main(Star):
             f"持续 {sess.elapsed:.0f} 秒。\n\n"
             f"{detail}"
         )
+        if clamped:
+            msg += (
+                f"\n\n⚠️ WebUI 设定上限为 {cfg_max} 秒，但 AstrBot 全局"
+                f"「工具调用超时时间」为 {fw_timeout} 秒，故本次实际等待 {effective} 秒。"
+                "如需更长接管时间，请调高 AstrBot 全局设置中的该项。"
+            )
 
         if shot:
-            yield {
+            return {
                 "status": "success",
                 "message": msg + "\n\n💡 已附上接管结束时的最新截图。",
                 "screenshot": shot,
             }
-            return
-        yield {"status": "success", "message": msg + "\n\n（截图获取失败，可用 browser_screenshot 重试）"}
+        return {"status": "success", "message": msg + "\n\n（截图获取失败，可用 browser_screenshot 重试）"}
 
     def _init_action_overlay(self):
         """初始化操作图标叠加组件（图标随包分发，只读；产物写 data_dir）。"""

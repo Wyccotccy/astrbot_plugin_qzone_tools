@@ -1,3 +1,127 @@
+## [5.4.1] - 2026-09-26
+
+### 🐛 修复：`request_browser_takeover` 调用即崩（`async_generator can't be used in 'await' expression`）
+
+**报错现场**
+```
+[ERRO] [run_wyc_tool] 执行工具 request_browser_takeover 失败:
+       object async_generator can't be used in 'await' expression
+  File "main.py", line 3671, in run_wyc_tool
+    result = await handler(event, **args_dict)
+TypeError: object async_generator can't be used in 'await' expression
+```
+
+**根因**：该工具 5.4.0 时被写成 **async generator**（用 `yield` 做心跳保活），
+而插件的 `run_wyc_tool` 包装层用 `await handler(...)` 调用它 → Python 直接抛 TypeError。
+
+**更深一层：原「心跳保活」方案本身是错的**（查阅 AstrBot 4.28 框架源码确认）：
+
+| 框架事实 | 出处 | 后果 |
+|---------|------|------|
+| `yield None`（裸 yield）语义 = "工具已直接把消息发给用户" | `astr_agent_tool_exec.py:701-715` | 触发 `AgentState.DONE`，**整个 Agent 回合当场结束** |
+| 每 yield 一个非空值都会用**同一个 tool_call_id** 追加一条工具结果 | `tool_loop_agent_runner.py:1129-1137` | 多轮 yield 产生重复 tool_call_id，部分 provider 直接报错 |
+| `asyncio.wait_for` 施加在**每次** `anext` 上，`tool_call_timeout` 默认 120s | `astr_agent_tool_exec.py:689-693`、`run_context.py:19` | 计时器可被 yield 重置，但上面的两个语义问题无法绕过 |
+| `FunctionTool.is_background_task` 是官方长任务机制，但**无插件侧 API** | `agent/tool.py:61` | 无法用"后台任务 + 唤醒"实现长时间等待 |
+
+**修复方案**（改造为普通协程 + 窗口钳制）
+1. `request_browser_takeover_tool` 改回**普通协程**，单次 `return`
+2. 新增 `_framework_tool_timeout()`：读取 AstrBot 全局 `agent_runner.config.misc.tool_call_timeout`（默认 120s）
+3. 有效等待窗口 `= min(WebUI 上限, 框架超时 - 12s)`，保留收尾余量；到点**主动结束会话**并按「系统超时」上报
+4. `TakeoverManager.open()` 新增可选 `max_seconds` 参数接收钳制后的值
+5. `run_wyc_tool` 增加 `inspect.isasyncgenfunction` 防御分支：再遇到 generator 型 handler 会给出可诊断的错误而非崩溃
+6. WebUI 接管设置页明确提示「实际生效值不会超过 AstrBot 全局工具调用超时时间」
+
+**顺带修复的两处并发隐患**（接管会话切换时）
+- `TakeoverManager.end()` 新增可选 `session` 参数，避免上一轮遗留的监控协程误结束新会话
+- `_stop_screencast()` 现在会等待旧投屏任务真正退出，避免其收尾的 `stopScreencast` 掐断新会话的投屏
+
+> ⚠️ **已知限制**：接管等待时长受 AstrBot 全局「工具调用超时时间」约束（默认 120 秒，实际可用约 108 秒）。
+> 若需更长接管时间，请在 AstrBot 设置 → 智能体中调高该项。
+
+---
+
+## [5.4.0] - 2026-09-26
+
+### ✨ 新增功能：浏览器接管
+
+AI 遇到验证码、滑块、人机校验等无法自动完成的环节时，可把浏览器操作权**临时交给真人用户**，
+用户在 WebUI 上实时看到画面并直接操作，完成后把权限交还 AI。
+
+#### 1. AI 侧：`request_browser_takeover` 工具
+- **免搜索直连**：本工具在 `DIRECT_CALL_TOOLS` 白名单内，AI 可直接用 `run_wyc_tool` 执行，无需先搜索（应急场景来不及搜索）
+- **等待期间保持在线**：实现为普通协程，等待时长按框架 `tool_call_timeout` 钳制
+  （详见 [5.4.1] 的修复说明——初版的 async generator 心跳方案已被证伪并移除）
+- **发起时通知用户**：立即发送系统消息
+  > AI已将操作权限转移至WebUI，请前往Astrbot控制台打开"更多LLM工具"插件WEB UI进行接管操作，本次操作将在{max}秒后超时
+- **结束时按原因区分文案**（回给 AI）：
+  | 结束原因 | 给 AI 的说明 |
+  |---------|-------------|
+  | 用户手动结束 | 用户已完成操作，请根据截图内容继续操作。 |
+  | 达到时长上限 | 因达到时长上限（N秒）由**系统自动结束**，**并非用户手动结束**。请检查用户是否已完成操作，若未完成可再次请求接管。 |
+  | 用户空闲超时 | 用户在 N 秒内没有任何操作，系统已自动结束接管。请检查用户是否已完成操作。 |
+- 结束时自动附上**最新截图**
+
+#### 2. 权限模型（单向授权）
+- **用户无法主动夺取权限**，必须由 AI 调用工具发起
+- 接管期间**仅冻结浏览器类工具**（27 个），AI 的其他工具（发消息、记忆、定时等）不受影响
+- 双计时器：
+  | 计时器 | 起点 | 默认 | 触发说明 |
+  |--------|------|------|---------|
+  | 空闲超时 | 用户最后一次操作 | 60s | 用户未操作 |
+  | 总时长上限 | 接管开始（绝对） | 120s | 系统超时 |
+- 两项均可在 WebUI 配置
+
+#### 3. WebUI 新增「浏览器接管」选项卡
+- 进入即检查浏览器状态：**未启用时提示「浏览器尚未启用」**
+- 接管中自动出现实时画面（SSE 推流），**鼠标与手机触屏都可直接操作**
+- 操作手势自动识别并注入浏览器：
+  | 用户操作 | 判定 | 注入方式 |
+  |---------|------|---------|
+  | 点击 | 按下→抬起 < 400ms 且位移 < 8px | CDP 点击 |
+  | 长按 | 按住 ≥ 400ms 未移动 | down + 延时 + up |
+  | 拖动 | 按住移动 ≥ 8px | down + move 序列 + up |
+  | 滚轮 | wheel 事件 | mouse.wheel |
+  | 键盘 | 输入框 / Esc / Enter / Tab | keyboard |
+  | 手机触摸 | touchstart/move/end | CDP `Input.dispatchTouchEvent`（真触摸） |
+- 状态条显示：AI 请求原因、**倒计时**（取空闲/总时长中更紧迫者）、已操作次数、已持续时间
+- 「结束操作」按钮（带二次确认）、全屏按钮
+
+#### 4. 画面参数与自动检测
+- 新增配置：`takeover_jpeg_quality`（默认 70）、`takeover_max_width`（默认 1280）
+- **自动检测最佳画质**：向服务端连续请求已知大小的数据块，测出**端到端实际吞吐**（含 SSE 通道与用户本地网络），按目标 10fps 反推可持续单帧大小，取 **80%** 作为预算，映射为画质与宽度自动填入
+
+#### 5. 三重提示保障 AI 知道「接管」存在
+考虑到「失败检测」不可靠（点击可能"成功"却点错、AI 可能陷入死循环、甚至静默放弃不调工具），采用**无条件提示**而非失败时提示：
+1. **工具描述**：`request_browser_takeover` 的描述与 keywords 覆盖验证码/滑块/人机校验等词
+2. **返回消息**：所有浏览器工具的返回值固定追加提示（不依赖失败检测）
+   > 💡 若遇到验证码 / 滑块 / 人机校验等无法自动完成的步骤，可用 request_browser_takeover 请求用户接管（工具名可直接用于 run_wyc_tool，无需搜索）
+3. **上下文注入**：浏览器会话活跃期间，`on_llm_request` 持续注入
+   > [浏览器能力] 当前浏览器会话活跃。可用 request_browser_takeover 把操作权临时交给真人用户…
+
+同时**约束 AI 不得滥用**：工具描述明确"仅在确认无法自动完成时使用；普通操作失败请先自行重试，不要随意转交"。
+
+#### 6. 技术实现
+- 新增 `core/takeover.py`：会话状态机、双计时器、帧广播（每个订阅者只保留最新帧，**丢帧不丢延迟**）、操作注入、坐标归一化换算
+- `core/browser.py` 新增接管原语：`mouse_*_raw` / `wheel_raw` / `type_text_raw` / `press_key_raw` / `touch_raw` / `start_screencast` / `stop_screencast` / `viewport_size`
+- 画面走 **CDP `Page.startScreencast`**（变化驱动推帧，首帧约 0.04s），不可用时自动回退定时截图
+- 传输走 **SSE**（框架 bridge SDK 原生支持 `subscribeSSE`），断线自动重连
+
+### ✅ 验证
+- Python 语法、JSON schema、HTML 标签配对 / id 引用 全部校验通过
+- 心跳保活机制经对照实验验证：阻塞型工具 5s 被掐断；心跳型（每 2s yield）**活满 20s 不被掐断**；心跳过疏（6s > 5s 阈值）仍被掐断
+- CDP 投屏与事件注入能力经实测验证（点击 / 拖动 / 长按 / 输入 / 滚轮 / 真触摸）
+- 框架流式透传验证：`StreamingResponse` 经 `_coerce_view_result` 原样透传（`is` 相同）
+- **端到端实测 65/66 通过**：
+  - 状态机 51 项：开启/结束/幂等/双计时器（空闲 3s、上限 4s 均按预期触发）/坐标归一化换算（0.5→640, 360 精确命中）/帧广播（多订阅者、丢帧保最新、移除后停发）/SSE 编码（event+base64+JSON 可解析）/结束文案
+  - 真实浏览器 14 项：点击/拖动/长按/键盘/功能键/滚轮/触摸全序列/二次触摸序列/触摸 tap 触发页面点击/CDP 投屏收帧/SSE 流出帧与状态
+  - 唯一未过项为测试桩自身问题（Python `__` 名字修饰导致桩方法不可见），非插件缺陷
+
+### 🐛 开发中修正的真实缺陷
+- **async generator 内 `return 值` 语法错误**：Python 不允许在 async generator 中带值 return，接管工具所有返回值改为 `yield`（此错误被容器内 `py_compile` 捕获并修复）
+- **触摸序列 CDP session 复用**：CDP 要求 `touchStart→move→end` 必须复用同一 session，否则报 `Must send a TouchStart first to start a new touch`。改为序列内维持持久 session、结束后释放，并新增 `release_touch()` 兜底
+
+---
+
 ## [5.3.1] - 2026-09-26
 
 ### 🐛 修复

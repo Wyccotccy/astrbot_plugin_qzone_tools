@@ -302,18 +302,31 @@ class TakeoverManager:
         reason: str,
         browser_call: Callable[..., Awaitable[Any]],
         viewport: tuple[int, int] = (1280, 720),
+        max_seconds: int | None = None,
     ) -> TakeoverSession:
-        """开启一次接管会话（若已有活跃会话则先结束它）。"""
+        """
+        开启一次接管会话（若已有活跃会话则先结束它）。
+
+        :param max_seconds: 覆盖配置里的总时长上限。调用方（工具层）会按框架
+                            的 tool_call_timeout 钳制后传入，避免等待时间超过框架硬超时。
+        """
         async with self._lock:
             if self.session and not self.session.finished.is_set():
                 self.session.finish(REASON_ABORTED)
                 await self._stop_screencast()
 
+            try:
+                hard_max = int(max_seconds) if max_seconds else self.max_seconds
+            except (TypeError, ValueError):
+                hard_max = self.max_seconds
+            if hard_max <= 0:
+                hard_max = self.max_seconds
+
             sess = TakeoverSession(
                 session_id=uuid.uuid4().hex[:12],
                 umo=umo,
                 reason=reason,
-                max_seconds=self.max_seconds,
+                max_seconds=hard_max,
                 idle_seconds=self.idle_seconds,
                 browser_call=browser_call,
                 viewport=viewport,
@@ -327,11 +340,18 @@ class TakeoverManager:
             self._screencast_task = asyncio.create_task(self._screencast(sess))
             return sess
 
-    async def end(self, reason: str) -> None:
-        """结束当前会话。"""
+    async def end(self, reason: str, session: TakeoverSession | None = None) -> None:
+        """
+        结束当前会话。
+
+        :param session: 期望结束的会话。传入时若当前活跃会话不是它，则忽略本次请求
+                        （避免上一轮遗留的监控协程误伤新会话）。
+        """
         async with self._lock:
             sess = self.session
             if not sess or sess.finished.is_set():
+                return
+            if session is not None and sess is not session:
                 return
             sess.finish(reason)
             logger.info(f"[Takeover] 会话结束 {sess.session_id} 原因={reason}")
@@ -339,9 +359,20 @@ class TakeoverManager:
             await sess.notify_state()
 
     async def _stop_screencast(self) -> None:
-        if self._screencast_task and not self._screencast_task.done():
-            self._screencast_task.cancel()
+        task = self._screencast_task
         self._screencast_task = None
+        if task and not task.done():
+            task.cancel()
+            # 等它真正退出，避免它的收尾动作（stop_screencast）在
+            # 新会话已经开始投屏之后才执行，把新会话的投屏掐断。
+            try:
+                await task
+            except asyncio.CancelledError:
+                # 任务自身被取消属正常收尾；调用方自己被取消才需要向上传播
+                if not task.cancelled():
+                    raise
+            except Exception:
+                pass
 
     def is_active(self) -> bool:
         """是否有活跃接管（供浏览器工具判断是否冻结）。"""
@@ -362,11 +393,11 @@ class TakeoverManager:
                     break
                 # 硬上限优先
                 if sess.remaining_max <= 0:
-                    await self.end(REASON_MAX_TIMEOUT)
+                    await self.end(REASON_MAX_TIMEOUT, session=sess)
                     break
                 # 空闲超时
                 if sess.remaining_idle <= 0:
-                    await self.end(REASON_IDLE_TIMEOUT)
+                    await self.end(REASON_IDLE_TIMEOUT, session=sess)
                     break
                 # 心跳式状态同步（让前端倒计时是服务端权威值）
                 await sess.notify_state()

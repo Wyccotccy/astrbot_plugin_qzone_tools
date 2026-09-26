@@ -652,7 +652,11 @@
                             <div class="field">
                                 <label>接管总时长上限（秒）</label>
                                 <input type="number" id="takeover_max_seconds" min="20" max="1800" />
-                                <div class="hint">超时后系统自动结束并把截图返回 AI（会告知 AI 这是系统超时）</div>
+                                <div class="hint">
+                                    超时后系统自动结束并把截图返回 AI（会告知 AI 这是系统超时）。
+                                    实际生效值不会超过 AstrBot 全局「工具调用超时时间」
+                                    （默认 120 秒，在 AstrBot 设置 → 智能体 中调整）；填得更大也没用，会被自动钳制。
+                                </div>
                             </div>
                             <div class="field">
                                 <label>用户空闲超时（秒）</label>

@@ -3,7 +3,7 @@
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
 <p>
-  <img src="https://img.shields.io/badge/version-5.3.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-5.4.1-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
   <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
@@ -433,6 +433,65 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 ## 更新日志
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v5.4.1 — 修复接管工具调用即崩
+**核心修复**：`request_browser_takeover` 此前被实现为 async generator（用 `yield` 做"心跳保活"），
+但插件的 `run_wyc_tool` 用 `await` 调用它，导致线上报错 `object async_generator can't be used in 'await' expression`。
+
+**更深一层**：原"心跳保活"方案本身违反框架语义——`yield None` 在 AstrBot 中意味着"工具已直接把消息发给用户"，
+会触发 `AgentState.DONE` **提前结束整个 Agent 回合**；多次 yield 非空值还会产生重复 tool_call_id。
+
+**修复方案**：改造为**普通协程**，等待时长按框架 `tool_call_timeout` 钳制
+（`min(WebUI上限, 框架超时 - 12s)`），到点主动结束并按「系统超时」上报；新增 `inspect.isasyncgenfunction` 防御分支。
+
+> ⚠️ **注意**：接管等待时长受 AstrBot 全局「工具调用超时时间」约束（默认 120 秒）。
+> 若该值设为 60 秒，WebUI 里填 120 秒会被自动钳制为 **48 秒**（并在通知中如实告知）。
+> 需要更长接管时间，请调高 AstrBot 设置 → 智能体中的「工具调用超时时间」。
+
+同时修复两处会话切换并发隐患（监控协程误伤新会话、旧投屏掐断新投屏）。
+
+### v5.4.0 — 浏览器接管（AI 求助真人过验证码）
+**核心能力**：AI 遇到验证码 / 滑块 / 人机校验等无法自动完成的环节时，可把浏览器操作权**临时交给真人用户**，用户在 WebUI 上实时看到画面并直接操作，完成后交还 AI。
+
+**AI 侧**
+- 新增 `request_browser_takeover` 工具，**免搜索直连**（应急场景来不及搜索）
+- **等待期间保持在线**：实现为普通协程，等待时长按框架 `tool_call_timeout` 钳制（见 v5.4.1 修复说明）
+- 发起时自动发送系统消息通知用户（含超时秒数）
+- 结束时按原因区分文案：用户手动结束 / 系统超时 / 用户久未操作，并附上最新截图
+
+**权限模型**
+- **单向授权**：用户无法主动夺取权限，必须由 AI 发起
+- 接管期间**仅冻结浏览器工具**，其他工具不受影响
+- 双计时器：空闲超时（默认 60s）+ 总时长上限（默认 120s），均可配置
+
+**WebUI 新增「浏览器接管」选项卡**
+- 未启用浏览器时提示「浏览器尚未启用」
+- 接管中自动出现实时画面，**鼠标与手机触屏都可直接操作**
+- 手势自动识别：点击 / 长按 / 拖动 / 滚轮 / 键盘 / 手机真触摸
+- 倒计时（取更紧迫者）、已操作次数、全屏、结束操作按钮
+
+**画面与画质**
+- 走 CDP `Page.startScreencast`（变化驱动推帧），SSE 传输，断线自动重连
+- 提供「自动检测最佳画质」：实测端到端吞吐后取 80% 预算，自动填入画质与宽度
+
+**三重提示保障 AI 知道接管存在**（不依赖不可靠的失败检测）
+1. 工具描述与 keywords 覆盖验证码/滑块等词
+2. 所有浏览器工具返回值固定追加提示
+3. 浏览器会话活跃期间上下文持续注入
+
+同时明确约束"普通操作失败请先自行重试，不要随意转交"，避免 AI 滥用。
+
+### v5.3.1 — 修复截图超时/删除失效/输入框样式 + 图标锚点精准化
+**修复**
+- **「点击失败」实为截图超时**：Playwright 截图前会等页面所有字体加载完成，百度等站点字体请求永久挂起导致 30 秒超时（点击其实已生效）。改用 CDP `Page.captureScreenshot` 直接取图，实测 **0.1 秒**返回；不可用时自动回退，并把原生超时收紧到 15 秒
+- **WebUI 无法删除记忆**：iframe 沙箱拦截了原生 `confirm()`（静默返回 false）。新增自带确认弹窗，替换全部 5 处（删除记忆/批量删除/清理重复/删除文件/取消定时）
+- **部分输入框显示为原生黑框**：页面上 9 个 `<input>` 未写 `type`，不匹配 `input[type="text"]` 选择器而漏掉样式。补 `input:not([type])` + `-webkit-appearance: none`
+- **手机端记忆页文字溢出**：卡片加 `min-width:0` + `overflow-wrap:anywhere`；超长内容折叠 6 行并提供「展开全文」；筛选/批量栏改纵向自适应
+
+**优化**
+- **图标改为 SVG 渲染的半透明 PNG**：完整保留原设计的 50% 半透明效果
+- **每个图标独立锚点**：点击=鼠标指针尖端、长按=手指接触点、输入=I 光标中心、拖动=箭头中心，贴图时锚点对准操作坐标（此前用包围盒中心会导致偏移）
+- **拖动同时标注起点与终点**：起点蓝点 + 主线 + 方向箭头 + 两端图标，分别标注「起点」「终点」
 
 ### v5.3.0 — 浏览器操作展示 + WebUI 重绘 + 记忆管理增强
 **浏览器操作展示（纯代码实现，不依赖提示词）**
