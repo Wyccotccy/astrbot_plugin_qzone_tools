@@ -820,6 +820,24 @@
     "default": true,
     "hint": "开启后浏览器指纹接近真人Chrome，大幅降低被目标网站风控拦截的概率"
   },
+  "browser_always_show_action": {
+    "description": "始终显示AI操作（AI 每操作一次浏览器，就把当前截图强制发送给用户）",
+    "type": "bool",
+    "default": false,
+    "hint": "纯代码实现，不依赖提示词：每次浏览器操作后自动向当前会话推送一张截图，让用户实时看到 AI 在做什么。频繁操作时消息较多，建议在需要监督 AI 时开启"
+  },
+  "browser_action_overlay_enabled": {
+    "description": "浏览器操作增强显示（在截图上标出 AI 点击/长按/输入/拖动的具体位置）",
+    "type": "bool",
+    "default": false,
+    "hint": "用图标标出操作点：点击=蓝色指针，长按=橙色手指，输入=绿色光标，拖动=紫色箭头连线。开启后 AI 与用户看到的截图都会带标注"
+  },
+  "browser_action_push_text": {
+    "description": "推送操作截图时附带说明文字（如「点击」「输入 hello」）",
+    "type": "bool",
+    "default": true,
+    "hint": "仅在「始终显示AI操作」开启时生效"
+  },
   "browser_type": {
     "description": "浏览器类型（chromium/firefox/webkit）",
     "type": "string",

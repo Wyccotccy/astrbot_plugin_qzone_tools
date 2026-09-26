@@ -3,7 +3,7 @@
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
 <p>
-  <img src="https://img.shields.io/badge/version-5.2.5-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-5.3.0-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
   <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
@@ -433,6 +433,24 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 ## 更新日志
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v5.3.0 — 浏览器操作展示 + WebUI 重绘 + 记忆管理增强
+**浏览器操作展示（纯代码实现，不依赖提示词）**
+- **始终显示 AI 操作**：AI 每操作一次浏览器就强制把截图发到当前会话，不经过 LLM，AI 无法"忘记"发图
+- **浏览器操作增强显示**：在截图上用图标标出 AI 操作的精确位置 —— 点击=蓝色指针、长按=橙色手指、输入=绿色光标、拖动=紫色箭头连线；拖动还绘制起点→终点完整轨迹
+- 图标用 alpha 包围盒定位到图形视觉中心，坐标缩放自适应，越界自动贴边，异常时退化为十字准星
+
+**WebUI 全量重绘（PC / 移动端分别兼容）**
+- PC 端：左侧固定侧边栏 + 卡片式主内容区
+- 移动端（≤900px）：顶部栏 + 底部固定标签栏，适配 iOS 安全区
+- iOS 风格滑动开关、全新配色体系、页面切换动画、工具搜索框
+
+**记忆管理大幅增强**
+- 可视化统计看板（总数 / 用户数 / 标签数 / 高重要度）
+- 按用户、标签筛选 + 按时间/重要度排序
+- 批量维护：全选、批量删除、批量改重要度、批量加标签
+- 数据管理：导出 JSON 备份、导入合并（自动去重）、一键检测并清理重复记忆
+- 记忆卡片彩色标签与重要度分级展示
 
 ### v5.2.5 — 注入上下文不再破坏模型前缀缓存（市场上架合规）
 - `on_llm_request` 不再改写 `request.system_prompt`，改用官方推荐方式：`req.extra_user_content_parts` + `TextPart(...).mark_as_temp()`

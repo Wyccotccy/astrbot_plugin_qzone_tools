@@ -39,6 +39,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
 from .core.supervisor import BrowserSupervisor
 from .core.favorite import FavoriteManager
 from .core.ticks_overlay import TickOverlay
+from .core.action_overlay import ActionOverlay
 from .core.image_utils import convert_image_format, get_format_from_config, get_output_ext
 
 import mcp
@@ -91,6 +92,9 @@ CONFIG_SAVE_WHITELIST = {
     "timeout", "zoom_factor", "max_memory_percent",
     "idle_timeout", "monitor_interval",
     "browser_vision_gate_enabled", "browser_stealth_enabled",
+    # 浏览器操作展示（v5.3.0）
+    "browser_always_show_action", "browser_action_overlay_enabled",
+    "browser_action_push_text",
 }
 
 
@@ -472,6 +476,189 @@ class MemoryManager:
 
     async def get_latest_memories_for_inject(self, user_id: str, count: int = 5) -> List[dict]:
         return await self.get_memories(user_id=user_id, limit=count, sort_by="updated_at")
+
+    # ==================== 增强管理能力（v5.3.0） ====================
+
+    async def get_stats(self) -> dict:
+        """统计概览：总数、用户数、标签分布、重要度分布。"""
+        data = self._load_data()
+        memories = data.get("memories", [])
+        by_user: Dict[str, int] = {}
+        by_tag: Dict[str, int] = {}
+        by_importance: Dict[str, int] = {}
+        for m in memories:
+            uid = str(m.get("user_id", ""))
+            by_user[uid] = by_user.get(uid, 0) + 1
+            for tag in (m.get("tags") or []):
+                by_tag[tag] = by_tag.get(tag, 0) + 1
+            imp = int(m.get("importance", 5) or 5)
+            key = "高(8-10)" if imp >= 8 else ("中(4-7)" if imp >= 4 else "低(1-3)")
+            by_importance[key] = by_importance.get(key, 0) + 1
+
+        top_users = sorted(by_user.items(), key=lambda kv: kv[1], reverse=True)[:20]
+        top_tags = sorted(by_tag.items(), key=lambda kv: kv[1], reverse=True)[:20]
+        return {
+            "total": len(memories),
+            "user_count": len(by_user),
+            "tag_count": len(by_tag),
+            "top_users": [{"user_id": u, "count": c} for u, c in top_users],
+            "top_tags": [{"tag": t, "count": c} for t, c in top_tags],
+            "by_importance": by_importance,
+        }
+
+    async def list_users(self) -> List[dict]:
+        """列出所有有记忆的用户及其条数。"""
+        data = self._load_data()
+        counters: Dict[str, int] = {}
+        for m in data.get("memories", []):
+            uid = str(m.get("user_id", ""))
+            counters[uid] = counters.get(uid, 0) + 1
+        return [
+            {"user_id": u, "count": c}
+            for u, c in sorted(counters.items(), key=lambda kv: kv[1], reverse=True)
+        ]
+
+    async def list_tags(self) -> List[dict]:
+        """列出所有标签及其出现次数。"""
+        data = self._load_data()
+        counters: Dict[str, int] = {}
+        for m in data.get("memories", []):
+            for tag in (m.get("tags") or []):
+                counters[tag] = counters.get(tag, 0) + 1
+        return [
+            {"tag": t, "count": c}
+            for t, c in sorted(counters.items(), key=lambda kv: kv[1], reverse=True)
+        ]
+
+    async def batch_delete(self, memory_ids: List[str]) -> int:
+        """批量删除，返回实际删除条数。"""
+        async with self._lock:
+            data = self._load_data()
+            memories = data.get("memories", [])
+            ids = {str(i) for i in memory_ids}
+            remain = [m for m in memories if str(m.get("id")) not in ids]
+            deleted = len(memories) - len(remain)
+            if deleted:
+                self._save_data({"memories": remain})
+            return deleted
+
+    async def batch_update_importance(self, memory_ids: List[str], importance: int) -> int:
+        """批量调整重要度，返回实际改动条数。"""
+        importance = max(1, min(10, int(importance)))
+        async with self._lock:
+            data = self._load_data()
+            memories = data.get("memories", [])
+            ids = {str(i) for i in memory_ids}
+            changed = 0
+            for m in memories:
+                if str(m.get("id")) in ids:
+                    m["importance"] = importance
+                    m["updated_at"] = self._get_timestamp()
+                    changed += 1
+            if changed:
+                self._save_data({"memories": memories})
+            return changed
+
+    async def batch_add_tag(self, memory_ids: List[str], tag: str) -> int:
+        """批量追加标签，返回实际改动条数。"""
+        tag = (tag or "").strip()
+        if not tag:
+            return 0
+        async with self._lock:
+            data = self._load_data()
+            memories = data.get("memories", [])
+            ids = {str(i) for i in memory_ids}
+            changed = 0
+            for m in memories:
+                if str(m.get("id")) in ids:
+                    tags = list(m.get("tags") or [])
+                    if tag not in tags:
+                        tags.append(tag)
+                        m["tags"] = tags
+                        m["updated_at"] = self._get_timestamp()
+                        changed += 1
+            if changed:
+                self._save_data({"memories": memories})
+            return changed
+
+    async def find_duplicates(self) -> List[dict]:
+        """找出内容完全重复的记忆分组（按 user_id + 内容归一化）。"""
+        data = self._load_data()
+        groups: Dict[str, List[dict]] = {}
+        for m in data.get("memories", []):
+            key = f"{m.get('user_id')}::{(m.get('content') or '').strip().lower()}"
+            groups.setdefault(key, []).append(m)
+        result = []
+        for key, items in groups.items():
+            if len(items) > 1:
+                items.sort(key=lambda x: x.get("created_at", ""))
+                result.append({
+                    "user_id": items[0].get("user_id"),
+                    "content": items[0].get("content"),
+                    "count": len(items),
+                    "keep_id": items[0].get("id"),
+                    "remove_ids": [i.get("id") for i in items[1:]],
+                })
+        return result
+
+    async def deduplicate(self) -> int:
+        """一键去重：同用户下内容重复的记忆只保留最早一条。返回删除条数。"""
+        dup_groups = await self.find_duplicates()
+        remove_ids = [rid for g in dup_groups for rid in g["remove_ids"]]
+        if not remove_ids:
+            return 0
+        return await self.batch_delete(remove_ids)
+
+    async def export_all(self) -> dict:
+        """导出全部记忆（用于备份）。"""
+        return self._load_data()
+
+    async def import_merge(self, payload: Any) -> tuple[int, int]:
+        """
+        导入记忆并合并（按 id 去重）。
+
+        :return: (新增条数, 跳过条数)
+        """
+        if isinstance(payload, dict):
+            incoming = payload.get("memories", [])
+        elif isinstance(payload, list):
+            incoming = payload
+        else:
+            incoming = []
+        if not isinstance(incoming, list):
+            return 0, 0
+
+        async with self._lock:
+            data = self._load_data()
+            memories = data.get("memories", [])
+            existing_ids = {str(m.get("id")) for m in memories}
+            added = skipped = 0
+            for m in incoming:
+                if not isinstance(m, dict):
+                    skipped += 1
+                    continue
+                mid = str(m.get("id") or "")
+                content_val = str(m.get("content") or "").strip()
+                if not mid or not content_val:
+                    skipped += 1
+                    continue
+                if mid in existing_ids:
+                    skipped += 1
+                    continue
+                memories.append({
+                    "id": mid,
+                    "user_id": str(m.get("user_id", "")),
+                    "content": content_val,
+                    "tags": list(m.get("tags") or []),
+                    "importance": max(1, min(10, int(m.get("importance", 5) or 5))),
+                    "created_at": m.get("created_at") or self._get_timestamp(),
+                    "updated_at": m.get("updated_at") or self._get_timestamp(),
+                })
+                existing_ids.add(mid)
+                added += 1
+            if added:
+                self._save_data({"memories": memories})
+            return added, skipped
 
 
 class DatabaseManager:
@@ -1112,6 +1299,13 @@ class Main(Star):
         self.browser_supervisor = None
         self.fav_mgr = None
         self.overlay = None
+        self.action_overlay = None
+        # 浏览器操作展示（v5.3.0）
+        #  - browser_always_show_action：每次浏览器操作后强制把截图发给用户（纯代码，不依赖提示词）
+        #  - browser_action_overlay_enabled：在截图上叠加操作图标，标出 AI 点了哪里
+        self.browser_always_show_action = self.config.get("browser_always_show_action", False)
+        self.browser_action_overlay_enabled = self.config.get("browser_action_overlay_enabled", False)
+        self.browser_action_push_text = self.config.get("browser_action_push_text", True)
 
     def _load_tool_enabled_flags(self) -> Dict[str, bool]:
         default_enabled = {
@@ -3415,6 +3609,9 @@ class Main(Star):
             result = await handler(event, **args_dict)
             # 隐私模式下对返回文本脱敏（隐藏群号/QQ号）
             result = self._privacy_filter_result(result)
+            # 浏览器操作增强显示：叠加操作图标 + 按需把截图推送给用户（纯代码实现）
+            if isinstance(result, dict) and result.get("screenshot"):
+                result = await self._apply_action_overlay(event, tool_name, args_dict, result)
             # 如果结果包含截图路径，自动读取图片并返回 ImageContent
             # 这样 LLM 可以直接看到截图，无需再调 read_image
             if isinstance(result, dict) and "screenshot" in result:
@@ -3443,6 +3640,182 @@ class Main(Star):
             logger.error(f"[run_wyc_tool] 执行工具 {tool_name} 失败: {e}", exc_info=True)
             return {"status": "error", "message": f"工具执行出错: {_safe_error_msg(e)}"}
 
+    def _init_action_overlay(self):
+        """初始化操作图标叠加组件（图标随包分发，只读；产物写 data_dir）。"""
+        try:
+            # 图标位于插件安装目录（随包分发，只读），data_dir 仅存运行时产物
+            pkg_resource_dir = Path(__file__).parent / "resource"
+            if not pkg_resource_dir.exists():
+                pkg_resource_dir = Path(self.data_dir) / "resource"
+            self.action_overlay = ActionOverlay(self.data_dir, pkg_resource_dir, self.config)
+            logger.info("[Browser] 操作图标叠加已初始化")
+        except Exception as e:
+            logger.warning(f"[Browser] 操作图标叠加初始化失败（功能不可用）: {e}")
+
+    # ==================== 浏览器操作增强显示（v5.3.0） ====================
+
+    # 会触发「操作展示」的浏览器工具（截图上叠加图标 + 强制推送）
+    _BROWSER_TOOL_NAMES = {
+        "open_page", "screenshot_page", "browser_search", "browser_visit",
+        "browser_click", "browser_double_click", "browser_right_click",
+        "browser_long_press", "browser_drag", "browser_input_at",
+        "browser_input", "browser_hover", "browser_scroll", "browser_wait",
+        "browser_zoom", "browser_screenshot", "browser_back", "browser_forward",
+        "browser_tabs", "browser_chat",
+    }
+
+    # 工具名 → (动作名, 取坐标的方式)
+    #   mode：xy=单点 / xyxy=起止两点 / None=无坐标（仅推送不叠加）
+    _ACTION_TOOL_MAP = {
+        "browser_click": ("click", "xy"),
+        "browser_double_click": ("double_click", "xy"),
+        "browser_right_click": ("right_click", "xy"),
+        "browser_hover": ("hover", "xy"),
+        "browser_long_press": ("long_press", "xy"),
+        "browser_input_at": ("input_at", "xy"),
+        "browser_drag": ("drag", "xyxy"),
+        "browser_scroll": ("scroll", None),
+        "browser_input": ("input", None),
+        "browser_search": ("click", None),
+        "browser_visit": ("click", None),
+        "open_page": ("click", None),
+        "browser_back": ("click", None),
+        "browser_forward": ("click", None),
+    }
+
+    def _extract_action_points(self, tool_name: str, args: dict) -> list:
+        """从工具参数中提取操作点坐标（像素，左上原点）。"""
+        spec = self._ACTION_TOOL_MAP.get(tool_name)
+        if not spec:
+            return []
+        mode = spec[1]
+        try:
+            if mode == "xy":
+                return [(int(args.get("x")), int(args.get("y")))]
+            if mode == "xyxy":
+                return [
+                    (int(args.get("start_x")), int(args.get("start_y"))),
+                    (int(args.get("end_x")), int(args.get("end_y"))),
+                ]
+        except (TypeError, ValueError):
+            return []
+        return []
+
+    def _action_label(self, tool_name: str, args: dict) -> str:
+        """生成给用户看的一句话操作说明。"""
+        action = self._ACTION_TOOL_MAP.get(tool_name, ("", None))[0]
+        base = {
+            "click": "点击", "double_click": "双击", "right_click": "右键点击",
+            "hover": "悬停", "long_press": "长按", "input_at": "输入",
+            "input": "输入", "drag": "拖动", "scroll": "滚动",
+        }.get(action, "操作")
+        try:
+            if action in ("input", "input_at"):
+                txt = str(args.get("text", ""))[:20]
+                return f"{base}「{txt}」" if txt else base
+            if tool_name == "browser_scroll":
+                d = args.get("direction", "下")
+                return f"向{d}滚动"
+            if tool_name == "browser_search":
+                return f"搜索「{str(args.get('keyword', ''))[:20]}」"
+            if tool_name in ("browser_visit", "open_page"):
+                return f"打开 {str(args.get('url', ''))[:60]}"
+        except Exception:
+            pass
+        return base
+
+    async def _apply_action_overlay(self, event: AstrMessageEvent, tool_name: str,
+                                    args: dict, result: dict) -> dict:
+        """
+        浏览器操作增强显示的统一处理（在 run_wyc_tool 处收口，覆盖所有工具）：
+
+        1. 若开启「操作增强显示」→ 在截图上叠加操作图标，标出 AI 操作的位置；
+        2. 若开启「始终显示AI操作」→ 不管 AI 是否愿意，强制把截图推送给当前会话。
+
+        全程不依赖提示词，纯代码实现；任何异常都不影响工具正常返回。
+        """
+        shot = result.get("screenshot")
+        if not shot or not os.path.isfile(shot):
+            return result
+
+        # 仅对浏览器类工具生效（其他工具如代码生成图片不应被强行推送）
+        if tool_name not in self._BROWSER_TOOL_NAMES:
+            return result
+
+        action_tool = tool_name in self._ACTION_TOOL_MAP
+
+        # ---- 1. 叠加操作图标 ----
+        if self.browser_action_overlay_enabled and action_tool and self.action_overlay:
+            try:
+                points = self._extract_action_points(tool_name, args or {})
+                if points:
+                    viewport = None
+                    try:
+                        vs = self.config.get("viewport_size", {}) or {}
+                        vw = int(vs.get("width", 0) or 0)
+                        vh = int(vs.get("height", 0) or 0)
+                        if vw > 0 and vh > 0:
+                            viewport = (vw, vh)
+                    except Exception:
+                        viewport = None
+                    annotated = self.action_overlay.annotate(
+                        shot, self._ACTION_TOOL_MAP[tool_name][0], points,
+                        viewport=viewport,
+                    )
+                    if annotated and annotated != shot and os.path.isfile(annotated):
+                        result["screenshot"] = annotated
+                        shot = annotated
+            except Exception as e:
+                logger.warning(f"[ActionOverlay] 标注截图失败（不影响主流程）: {e}")
+
+        # ---- 2. 强制把截图推送给用户 ----
+        if self.browser_always_show_action:
+            try:
+                label = self._action_label(tool_name, args or {})
+                await self._push_browser_action(event, shot, label)
+            except Exception as e:
+                logger.warning(f"[ActionOverlay] 推送截图失败（不影响主流程）: {e}")
+
+        return result
+
+    async def _push_browser_action(self, event: AstrMessageEvent, image_path: str,
+                                   label: str = "") -> bool:
+        """把浏览器操作截图直接发送到当前会话（代码强制，不经由 LLM）。"""
+        if not image_path or not os.path.isfile(image_path):
+            return False
+        client = await self._get_client(event)
+        if not client:
+            logger.warning("[ActionOverlay] 无法获取 client，跳过推送")
+            return False
+
+        try:
+            import base64 as _b64
+            with open(image_path, "rb") as f:
+                img_b64 = _b64.b64encode(f.read()).decode("utf-8")
+        except Exception as e:
+            logger.warning(f"[ActionOverlay] 截图读取失败: {e}")
+            return False
+
+        # 组织消息：可选的说明文字 + 图片
+        text = f"🖥️ AI 操作：{label}" if (self.browser_action_push_text and label) else ""
+        message = ""
+        if text:
+            message += text + "\n"
+        message += f"[CQ:image,file=base64://{img_b64}]"
+
+        try:
+            group_id = event.get_group_id()
+            if group_id:
+                await self._call(client, 'send_group_msg', group_id=int(group_id), message=message)
+            else:
+                await self._call(client, 'send_private_msg',
+                                 user_id=int(event.get_sender_id()), message=message)
+            logger.info(f"[ActionOverlay] 已推送操作截图: {label or image_path}")
+            return True
+        except Exception as e:
+            logger.warning(f"[ActionOverlay] 发送失败: {e}")
+            return False
+
     # ==================== WebUI API ====================
     def _register_page_routes(self):
         try:
@@ -3452,6 +3825,15 @@ class Main(Star):
             self.context.register_web_api(f"/{PLUGIN_NAME}/delete_memory", self.handle_delete_memory, ["POST"], "删除记忆")
             self.context.register_web_api(f"/{PLUGIN_NAME}/add_memory", self.handle_add_memory, ["POST"], "添加记忆")
             self.context.register_web_api(f"/{PLUGIN_NAME}/update_memory", self.handle_update_memory, ["POST"], "更新记忆")
+            # 记忆增强管理（v5.3.0）
+            self.context.register_web_api(f"/{PLUGIN_NAME}/memory_stats", self.handle_memory_stats, ["GET"], "记忆统计")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/memory_users", self.handle_memory_users, ["GET"], "记忆用户列表")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/memory_tags", self.handle_memory_tags, ["GET"], "记忆标签列表")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/memory_batch", self.handle_memory_batch, ["POST"], "记忆批量操作")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/memory_duplicates", self.handle_memory_duplicates, ["GET"], "记忆重复检测")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/memory_dedupe", self.handle_memory_dedupe, ["POST"], "记忆一键去重")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/memory_export", self.handle_memory_export, ["GET"], "导出记忆")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/memory_import", self.handle_memory_import, ["POST"], "导入记忆")
             self.context.register_web_api(f"/{PLUGIN_NAME}/scheduled_messages", self.handle_get_scheduled_messages, ["GET"], "获取定时消息")
             self.context.register_web_api(f"/{PLUGIN_NAME}/add_scheduled_message", self.handle_add_scheduled_message, ["POST"], "添加定时消息")
             self.context.register_web_api(f"/{PLUGIN_NAME}/cancel_scheduled_message", self.handle_cancel_scheduled_message, ["POST"], "取消定时消息")
@@ -3529,6 +3911,13 @@ class Main(Star):
             self.docker_container_name = self.config.get("docker_container_name", "napcat")
             # 隐私模式 / 工作区开关可能变化
             self.workspace_enabled = self.config.get("workspace_enabled", True)
+            # 浏览器操作展示开关（热更新，无需重启）
+            self.browser_always_show_action = self.config.get("browser_always_show_action", False)
+            self.browser_action_overlay_enabled = self.config.get("browser_action_overlay_enabled", False)
+            self.browser_action_push_text = self.config.get("browser_action_push_text", True)
+            # 操作图标叠加组件懒初始化（插件加载时可能尚未就绪）
+            if self.browser_action_overlay_enabled and not self.action_overlay:
+                self._init_action_overlay()
             return jsonify({"success": True, "message": "配置已保存"})
         except Exception as e:
             logger.error(f"[WebUI] 保存配置失败: {_safe_error_msg(e)}", exc_info=True)
@@ -3591,6 +3980,109 @@ class Main(Star):
             return jsonify({"success": ok, "message": "已更新" if ok else "未找到记忆"})
         except Exception as e:
             logger.error(f"[WebUI] 更新记忆失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    # ---------- 记忆增强管理（v5.3.0） ----------
+
+    @staticmethod
+    def _parse_id_list(raw) -> List[str]:
+        """把前端传来的 id 列表规整成字符串列表。"""
+        if isinstance(raw, str):
+            return [x.strip() for x in raw.replace("，", ",").split(",") if x.strip()]
+        if isinstance(raw, list):
+            return [str(x).strip() for x in raw if str(x).strip()]
+        return []
+
+    async def handle_memory_stats(self):
+        try:
+            stats = await self.memory_manager.get_stats()
+            return jsonify({"success": True, "stats": stats})
+        except Exception as e:
+            logger.error(f"[WebUI] 记忆统计失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_memory_users(self):
+        try:
+            users = await self.memory_manager.list_users()
+            return jsonify({"success": True, "users": users})
+        except Exception as e:
+            logger.error(f"[WebUI] 获取记忆用户失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_memory_tags(self):
+        try:
+            tags = await self.memory_manager.list_tags()
+            return jsonify({"success": True, "tags": tags})
+        except Exception as e:
+            logger.error(f"[WebUI] 获取记忆标签失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_memory_batch(self):
+        """批量操作：delete=删除 / importance=改重要度 / tag=追加标签。"""
+        try:
+            data = await request.get_json() or {}
+            action = data.get("action", "")
+            ids = self._parse_id_list(data.get("memory_ids"))
+            if not ids:
+                return jsonify({"success": False, "error": "请先选择要操作的记忆"})
+
+            if action == "delete":
+                n = await self.memory_manager.batch_delete(ids)
+                return jsonify({"success": True, "affected": n, "message": f"已删除 {n} 条记忆"})
+            if action == "importance":
+                imp = int(data.get("importance", 5))
+                n = await self.memory_manager.batch_update_importance(ids, imp)
+                return jsonify({"success": True, "affected": n, "message": f"已调整 {n} 条记忆的重要度为 {imp}"})
+            if action == "tag":
+                tag = data.get("tag", "")
+                n = await self.memory_manager.batch_add_tag(ids, tag)
+                return jsonify({"success": True, "affected": n, "message": f"已为 {n} 条记忆添加标签「{tag}」"})
+            return jsonify({"success": False, "error": f"未知操作: {action}"})
+        except Exception as e:
+            logger.error(f"[WebUI] 记忆批量操作失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_memory_duplicates(self):
+        try:
+            dups = await self.memory_manager.find_duplicates()
+            total = sum(d["count"] - 1 for d in dups)
+            return jsonify({"success": True, "groups": dups, "removable": total})
+        except Exception as e:
+            logger.error(f"[WebUI] 重复检测失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_memory_dedupe(self):
+        try:
+            n = await self.memory_manager.deduplicate()
+            return jsonify({
+                "success": True, "removed": n,
+                "message": f"已清理 {n} 条重复记忆" if n else "没有发现重复记忆",
+            })
+        except Exception as e:
+            logger.error(f"[WebUI] 一键去重失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_memory_export(self):
+        try:
+            payload = await self.memory_manager.export_all()
+            return jsonify({"success": True, "data": payload})
+        except Exception as e:
+            logger.error(f"[WebUI] 导出记忆失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_memory_import(self):
+        try:
+            data = await request.get_json() or {}
+            payload = data.get("data")
+            if payload is None:
+                return jsonify({"success": False, "error": "缺少导入数据"})
+            added, skipped = await self.memory_manager.import_merge(payload)
+            return jsonify({
+                "success": True, "added": added, "skipped": skipped,
+                "message": f"导入完成：新增 {added} 条，跳过 {skipped} 条",
+            })
+        except Exception as e:
+            logger.error(f"[WebUI] 导入记忆失败: {e}", exc_info=True)
             return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_get_scheduled_messages(self):
@@ -3810,6 +4302,9 @@ class Main(Star):
             self.overlay = TickOverlay(self.data_dir, resource_dir, self.config)
         except Exception as e:
             logger.warning(f"[Browser] 刻度叠加初始化失败（功能不可用）: {e}")
+
+        # 操作图标叠加（包内 resource/action_icons 为只读图标，产物写入 data_dir/overlay_cache）
+        self._init_action_overlay()
 
         # 浏览器监控器（独立于上面，必须初始化成功）
         try:
