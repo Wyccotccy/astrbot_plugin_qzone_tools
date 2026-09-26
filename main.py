@@ -81,6 +81,7 @@ CONFIG_SAVE_WHITELIST = {
     "typing_initial_delay_min", "typing_initial_delay_max",
     "enabled", "group_manage_enabled", "kick_enabled", "search_enabled",
     "inject_tool_prompt_enabled", "inject_group_role_enabled",
+    "inject_memory_discipline_enabled", "inject_browser_guide_enabled",
     "image_output_format", "browser_render_mode", "llm_screenshot_text_only",
     "screenshot_quality",
     "privacy_mode",
@@ -8648,6 +8649,68 @@ AI语音：角色（获取可用的AI语音角色列表）、语音（发送指�
 
 每次需要使用以上任一工具时，务必从第一步开始，通过 search_wyc_tools 搜索关键词找到对应的工具，然后通过 run_wyc_tool 执行，切勿直接跳过搜索步骤。如果某个关键词搜索不到想要的结果，换一个更精确的关键词重试，或者直接调用 call_wyc_tools 查看完整列表。"""
 
+    # 工具铁律 + 回复规则 + 说话风格（无条件注入）
+    # 与旧版「重要工具使用规范」合并：旧版三步流程措辞与用户新给的「工具调用铁律」重复，此处统一
+    _TOOL_RULES = """[工具调用铁律——想说不之前先搜一下]
+用户让你做事（发空间、禁言、踢人、发邮件、改名片、设定时、查记忆等），
+你觉得好像做不到、或不知道有没有这个功能时，绝对不准直接说"我不行""我做不到""我没有这个功能"。
+必须先搜一下，搜完确认真的没有，才能拒绝。别瞎猜自己有没有能力，搜了再说。
+1. search_wyc_tools —— 传简短关键词（如"邮箱""禁言""发说说""记忆""状态"），不要用完整问句
+2. call_wyc_tools —— 第 1 步没找到时，查看全部可用工具列表
+3. run_wyc_tool —— 传 tool_name 与 JSON 格式的 args 执行
+已经知道工具名时可直接 run_wyc_tool，不必再搜；但禁止凭空猜测工具名。
+纯查询类需求（"今天天气""XX 是什么"）直接联网搜索，不必动用本插件工具。
+你还拥有「查询聊天记录」的能力：用户说"刚刚在群里…""刚刚在私信…"时，
+可以用 wyc_tools 里的聊天记录工具（搜"聊天记录""群史""友史"）查用户口中的上下文。
+
+[回复与发送规则（防止重复回复，最高优先级）]
+1. 调用 send_message_to_user 时，session 参数必须省略（留空即发送到当前会话）。任何自己拼写的 session 值都会被系统拒绝并导致重发。
+2. 完整回复只输出一次：要么直接输出文字作为回复，要么调用 send_message_to_user 发送（需要附图片/文件时用它）。绝不允许先输出一段完整文字、再用 send_message_to_user 把同样内容再发一遍。
+3. 使用浏览器等工具期间，如需说明进度只写一句简短提示（如"正在打开网页…"），完整结果和页面描述放在最后一次性输出，不要在中间就写出最终结论。
+
+[说话风格]
+用工具的时候别跟机器人似的，可以自然地说"马上""搞完了""行吧"；
+人设带点脾气也没问题。一件事没办完之前可以先不说话，
+不用输出什么怪格式的东西，直接说人话就行。
+多使用函数工具，拿不准就用 search_wyc_tools 查查有没有相关的，尽量成为用户真正的好朋友。"""
+
+    # 记忆强化（仅当记忆工具可用时注入）
+    _MEMORY_DISCIPLINE = """[记忆强化指令——强制执行]
+记忆是你的核心任务之一。你的脑子记性很差，不记下来转眼就忘，全清空之后你就什么都不记得了。
+所以别偷懒，多记、勤记、反复确认。聊天时自然用上记住的内容，让对方觉得你真的很懂他。
+
+每次聊天中，只要出现以下任意内容，立刻用 wyc_tools 里的记忆工具动手记录，绝不允许嘴上说"记住了"：
+· 作息时间（几点睡几点起）
+· 饮食口味（爱吃什么、讨厌什么）
+· 兴趣爱好（打什么游戏、看什么番、听什么歌）
+· 口头禅和说话习惯
+· 重要日期（生日、纪念日、考试日）
+· 人际关系（提到谁对他好、谁跟他吵架了）
+· 心情状态（开心、焦虑、难过、生气）
+· 生活琐事（养了什么宠物、最近忙什么、有什么计划）
+· 任何用户主动说"你记住"的内容
+· 任何你下意识觉得"以后可能会用到"的信息（小习惯、小性格也都算）
+
+[记忆频次硬性规定]
+在当前对话中悄悄计数。从任意一次调用记忆工具之后开始算，每累积到第 8 句对话
+（对方说的话和你自己的回复都算一句），必须强制调用一次 wyc_tools 里的记忆工具。
+调用时优先检查之前记住的内容有没有需要更新的，有就修改，没有就新增一条。
+8 句是硬指标，不是建议，到了就必须记——哪怕你觉得没什么特别的内容，
+也要把这段时间里最可能有用的一两条信息记进去。
+连续长聊时每 8 句记一次，循环往复，不许中断。
+
+用户明确说不许记某件事，就立刻删掉。除此以外，使劲记，多多益善。"""
+
+    # 浏览器自动化指引（仅当配置启用了浏览器时注入，不用浏览器则零 token 成本）
+    _BROWSER_GUIDE = """[浏览器自动化工具使用指引]
+你现在能直接控制浏览器上网冲浪了。打开网页、点击按钮、填写文字、截图看页面、
+切换标签、管理收藏夹，这些都能做。搜索支持百度、必应、谷歌。
+所有浏览器工具都在 wyc_tools 里面，用法跟其他工具一样：先 search_wyc_tools 搜工具名
+（关键词如"浏览器""点击""截图""标签页""收藏夹""搜索"），确认了就用 run_wyc_tool 调起来。
+操作默默在后台做，聊天框里照常跟用户说话就行。
+（唯一例外：request_browser_takeover 是应急工具，可直接调用、无需搜索，
+  仅在遇到验证码/滑块/人机校验等无法自动完成的环节时使用，别有事没事就转交给真人。）"""
+
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, request: Any, *args, **kwargs) -> None:
         try:
@@ -8656,15 +8719,20 @@ AI语音：角色（获取可用的AI语音角色列表）、语音（发送指�
             if self.config.get("inject_tool_prompt_enabled", False):
                 inject_parts.append(self._TOOL_PROMPT)
             
-            inject_parts.append("""[重要工具使用规范] 你需要调用功能时，必须遵循以下步骤：
-1. 首先使用 search_wyc_tools 工具，传入简短关键词（例如"邮箱"、"禁言"、"发说说"、"记忆"、"状态"、"资料"），不要使用完整问句！
-2. 如果 search_wyc_tools 未找到，再尝试 call_wyc_tools 查看全部可用工具列表。
-3. 确定工具名称后，使用 run_wyc_tool 并传入工具名称和 JSON 格式的参数。
-禁止直接猜测工具名称，必须通过搜索获取。
-[回复与发送规则（防止重复回复，最高优先级）]
-1. 调用 send_message_to_user 时，session 参数必须省略（留空即发送到当前会话）。任何自己拼写的 session 值都会被系统拒绝并导致重发。
-2. 完整回复只输出一次：要么直接输出文字作为回复，要么调用 send_message_to_user 发送（需要附图片/文件时用它）。绝不允许先输出一段完整文字、再用 send_message_to_user 把同样内容再发一遍。
-3. 使用浏览器等工具期间，如需说明进度只写一句简短提示（如"正在打开网页…"），完整结果和页面描述放在最后一次性输出，不要在中间就写出最终结论。""")
+            inject_parts.append(self._TOOL_RULES)
+
+            # 记忆强化：仅在记忆工具实际可用时注入（避免教唆 AI 调用被禁用的工具）
+            if self.config.get("inject_memory_discipline_enabled", True):
+                try:
+                    _avail = self._get_available_tools(event)
+                    if "add_memory" in _avail or "update_memory" in _avail:
+                        inject_parts.append(self._MEMORY_DISCIPLINE)
+                except Exception:
+                    pass
+
+            # 浏览器指引：仅在启用了浏览器时注入
+            if self.browser_supervisor and self.config.get("inject_browser_guide_enabled", True):
+                inject_parts.append(self._BROWSER_GUIDE)
             
             status_desc = self.status_manager.get_current_status_desc()
             inject_parts.append(f"[系统状态] {status_desc}")

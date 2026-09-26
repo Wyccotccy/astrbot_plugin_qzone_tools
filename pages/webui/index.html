@@ -638,6 +638,14 @@
                             <input type="checkbox" id="inject_group_role_enabled" />
                             <label class="switch-text" for="inject_group_role_enabled"><span class="t">注入群成员身份</span><span class="d">让 LLM 知道当前用户在群内是群主 / 管理员 / 成员</span></label>
                         </div>
+                        <div class="switch-row">
+                            <input type="checkbox" id="inject_memory_discipline_enabled" />
+                            <label class="switch-text" for="inject_memory_discipline_enabled"><span class="t">注入记忆强化指令</span><span class="d">强制 AI 主动记录用户偏好 / 作息 / 心情，每 8 句对话记忆一次（仅记忆工具可用时生效）</span></label>
+                        </div>
+                        <div class="switch-row">
+                            <input type="checkbox" id="inject_browser_guide_enabled" />
+                            <label class="switch-text" for="inject_browser_guide_enabled"><span class="t">注入浏览器使用指引</span><span class="d">告诉 AI 它可以控制浏览器上网、以及怎么找到这些工具（仅浏览器已启用时生效）</span></label>
+                        </div>
                     </div>
 
                     <div class="card">
@@ -670,7 +678,7 @@
                         </div>
                         <div class="switch-row accent">
                             <input type="checkbox" id="browser_action_overlay_enabled" />
-                            <label class="switch-text" for="browser_action_overlay_enabled"><span class="t">浏览器操作增强显示</span><span class="d">在截图上用图标标出操作位置：点击 = 蓝色指针，长按 = 橙色手指，输入 = 绿色光标，拖动 = 紫色箭头连线</span></label>
+                            <label class="switch-text" for="browser_action_overlay_enabled"><span class="t">浏览器操作增强显示</span><span class="d">在截图上用图标标出操作位置：统一为「鼠标指针 + 动作徽章」——点击 = 蓝色靶心，长按 = 橙色按下，输入 = 绿色 I 光标，拖动 = 紫色四向箭头（拖动另绘起点连线）</span></label>
                         </div>
                         <div class="switch-row">
                             <input type="checkbox" id="browser_action_push_text" />
@@ -1501,6 +1509,8 @@ if (!window.AstrBotPluginPage) {
                 search_enabled: checked('search_enabled'),
                 inject_tool_prompt_enabled: checked('inject_tool_prompt_enabled'),
                 inject_group_role_enabled: checked('inject_group_role_enabled'),
+                inject_memory_discipline_enabled: checked('inject_memory_discipline_enabled'),
+                inject_browser_guide_enabled: checked('inject_browser_guide_enabled'),
                 // 浏览器操作展示
                 browser_always_show_action: checked('browser_always_show_action'),
                 browser_action_overlay_enabled: checked('browser_action_overlay_enabled'),

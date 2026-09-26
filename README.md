@@ -2,10 +2,8 @@
 
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
-温馨提示：由于作者高中惹，学业紧张，后续优化、追加新功能都将由AI完成，开发者只对项目进行安全审计、功能测试以及少数Bug修复，如有相关Bug请及时通过Issue或QQ1449783068（备注来意）反馈~感谢理解
-
 <p>
-  <img src="https://img.shields.io/badge/version-5.6.1-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-5.6.2-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
   <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
@@ -436,23 +434,28 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
 
-### v5.6.1 — 合规修复：移除内置 logging 兜底
-市场安全审查指出 `core/action_overlay.py` 与 `core/takeover.py` 的 `try/except` 兜底分支
-使用了 Python 内置 `logging`。按日志规范，logger 必须且只能从 `astrbot.api` 导入，现已移除兜底：
+### v5.6.2 — 提示词去重融合 + 操作图标换新 + 仓库文件补齐
 
-```python
-from astrbot.api import logger
-```
+**提示词注入重构**：整合为三段职责单一的注入块，消除原有冲突，并支持按条件注入省 token。
 
-全插件复查：7 个模块的 logger 均来自 `astrbot.api`，无内置 `logging` 残留。
+- `_TOOL_RULES`（无条件）：工具调用铁律 + 回复发送规则（防重复回复）+ 说话风格
+- `_MEMORY_DISCIPLINE`（仅记忆工具可用时）：记忆强化 + 每 8 句强制记忆一次
+- `_BROWSER_GUIDE`（仅浏览器启用时）：浏览器工具使用指引，含「接管工具免搜索」例外说明
+- 新增两个 WebUI 开关，可分别关闭记忆强化 / 浏览器指引注入
 
-### v5.6.0 — 接管页键盘重构：电脑端物理键直通 + 手机端虚拟键盘
-- **电脑端**：接管中直接敲键盘就实时输入到远端；组合键（Ctrl/Cmd/Alt）与 F5/F11/F12 保留给本地；
-  焦点在本地输入框时不劫持；下方保留紧凑特殊键条（Esc/Enter/Tab/退格/Del/方向键/Home/End/PgUp/PgDn）
-- **手机端**：补齐方向键、退格、删除、Home/End/PgUp/PgDn、空格，按钮加高至 44px；
-  输入框旁新增「清空」按钮；两套布局用 CSS 媒体查询自动切换
-- **顺带修复**：`sendAction` 原来忙时会丢弃所有非 mouse 操作，连续打字丢字。
-  改为仅「鼠标移动」允许丢帧，按键/点击/滚轮排队串行发送（队列上限 60）
+**操作图标换新**：4 个图标升级为统一设计（鼠标指针 + 动作徽章），400×400 更清晰，
+锚点统一为指针尖端，落位语义与实际操作点完全一致。
+
+**仓库文件补齐**：修复 `.gitignore` 误屏蔽 `resource/` 导致图标未随仓库分发的问题（市场安装后图标会失效），
+补 `LICENSE`（MIT）与 `requirements.txt`。
+
+### v5.6.1 — 合规修复：移除内置 logging
+市场安全审查指出两处 `try/except` 兜底用了 Python 内置 `logging`，违反「logger 必须且只能从 `astrbot.api` 导入」。
+移除兜底改为直接导入，全插件 7 个模块复查无残留。
+
+### v5.6.0 — 接管页键盘重构
+电脑端物理键盘直通（组合键与 F5/F11/F12 保留本地）、手机端完整虚拟键盘（方向键/退格/删除/Home/End/PgUp/PgDn/空格），
+顺带修复快速打字丢字（改为队列串行 + 仅鼠标移动允许丢帧）。
 
 ### v5.5.0 — 非阻塞接管（时长自由）+ 触摸点击/画面闪烁修复
 **架构改造**：接管工具改为**立即返回**，用户操作结束后由事件回调把 AI 唤醒。

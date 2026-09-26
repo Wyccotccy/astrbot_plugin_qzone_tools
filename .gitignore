@@ -1,6 +1,6 @@
 __pycache__/
+*.py[cod]
 fonts/
 workspace/
-resource/
 favorite.json
 favorites.json
