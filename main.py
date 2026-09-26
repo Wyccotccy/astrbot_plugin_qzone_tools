@@ -27,6 +27,10 @@ from astrbot.api import logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
 from astrbot.api.message_components import Plain, Reply, File, Image
+try:
+    from astrbot.core.agent.message import TextPart
+except ImportError:  # 极旧版本框架无此类，退化为 system_prompt 注入
+    TextPart = None
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.star_tools import StarTools
@@ -7758,10 +7762,19 @@ AI语音：角色（获取可用的AI语音角色列表）、语音（发送指�
 
             if inject_parts:
                 inject_text = "\n".join(inject_parts)
-                if hasattr(request, 'system_prompt') and request.system_prompt:
-                    request.system_prompt += f"\n{inject_text}\n"
-                elif hasattr(request, 'system_prompt'):
-                    request.system_prompt = inject_text + "\n"
+                # 官方推荐做法：追加到用户消息末尾（extra_user_content_parts），
+                # 并用 mark_as_temp() 标记为临时内容——仅本次请求发给模型，
+                # 不写入会话历史，从而不破坏模型上下文的前缀缓存命中率。
+                parts = getattr(request, "extra_user_content_parts", None)
+                if parts is not None and TextPart is not None:
+                    parts.append(TextPart(text=inject_text).mark_as_temp())
+                elif hasattr(request, "system_prompt"):
+                    # 兼容极旧版本框架：退化为原有行为
+                    request.system_prompt = (
+                        f"{request.system_prompt}\n{inject_text}\n"
+                        if request.system_prompt
+                        else inject_text + "\n"
+                    )
         except Exception as e:
             logger.error(f"[注入] 失败: {e}")
 

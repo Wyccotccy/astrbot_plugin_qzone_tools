@@ -1,3 +1,23 @@
+## [5.2.5] - 2026-09-26
+
+### 🐛 修复（AstrBot 插件市场上架合规 · 上下文前缀缓存）
+
+#### 不再改动 system_prompt，注入内容改走用户消息临时块
+- **背景**：插件市场审核指出，`on_llm_request` 直接向 `request.system_prompt` 追加内容，其中「系统状态、用户记忆、群成员身份、AI语音配置」等片段随每次请求动态变化，会破坏模型上下文的前缀缓存命中率，导致推理成本上升、响应变慢
+- **修复**：改用官方推荐方式 —— 通过 `req.extra_user_content_parts.append(TextPart(text=...).mark_as_temp())` 把注入内容附加到**当前用户消息末尾**
+  - `mark_as_temp()` 等价于 `_no_save=True`：内容只发给模型，**不写入会话历史**，历史消息前缀保持稳定
+  - 用户原始发言始终排在内容块第一位，注入内容排在其后，语义位置合理
+- **兼容性处理**：
+  - `TextPart` 采用防御式导入（`try/except ImportError`），极旧版本框架下自动退化为原有 `system_prompt` 行为，不会导致插件加载失败
+  - 注入前用 `getattr(request, "extra_user_content_parts", None)` 探测，兼容第三方 Agent（Dify/Coze/DashScope 等）使用的 `ProviderRequest`
+- **配置说明同步**：`_conf_schema.json` 中 `memory_inject_enabled`、`inject_group_role_enabled`、`inject_tool_prompt_enabled` 三项的 description / hint 文案由「注入到系统提示词」更正为「作为临时内容附加在用户消息后，不写入会话历史」
+
+### ✅ 验证
+- 框架链路实测（容器内 Python）：注入块正确附加于用户消息之后，`_no_save` 标记在落库时被剥离，历史仅保留用户原始发言 —— 全项通过
+- 插件加载/重启实测：版本 5.2.5 正常加载，浏览器与 WebUI API 均就绪，无新增报错
+
+---
+
 ## [5.2.4] - 2026-09-26
 
 ### 🐛 修复（AstrBot 插件市场上架合规）

@@ -3,7 +3,7 @@
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
 <p>
-  <img src="https://img.shields.io/badge/version-5.2.4-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-5.2.5-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
   <img src="https://img.shields.io/badge/NapCat-%3E4.17.55-orange" alt="napcat">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="license">
@@ -433,6 +433,12 @@ docker run -v /opt/astrbot_flash:/tmp/astrbot_flash:ro ...
 ## 更新日志
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v5.2.5 — 注入上下文不再破坏模型前缀缓存（市场上架合规）
+- `on_llm_request` 不再改写 `request.system_prompt`，改用官方推荐方式：`req.extra_user_content_parts` + `TextPart(...).mark_as_temp()`
+- 注入内容（系统状态 / 用户记忆 / 群身份 / AI语音配置 / 工具说明）附加到**当前用户消息末尾**，并标记为临时内容——只发给模型、不写入会话历史，历史前缀保持稳定，前缀缓存命中率不再受影响
+- 防御式导入 `TextPart` + 探测 `extra_user_content_parts`，极旧框架或第三方 Agent 下自动退化，不影响插件加载
+- 配置项文案同步更正为「临时内容，不写入会话历史」
 
 ### v5.2.4 — 持久化数据迁出插件目录（市场上架合规）
 - 工作区 / 字体 / 收藏夹 / 刻度资源全部迁移到 `data/plugin_data/astrbot_plugin_qzone_tools/`
