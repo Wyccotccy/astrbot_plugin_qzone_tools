@@ -2,6 +2,8 @@
 
 为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 提供 **109 个 LLM 可调用工具**：QQ空间、群管理、消息收发、记忆管理，以及一套完整的**视觉浏览器自动化**。
 
+温馨提示：由于作者高中惹，学业紧张，后续优化、追加新功能都将由AI完成，开发者只对项目进行安全审计、功能测试以及少数Bug修复，如有相关Bug请及时通过Issue或QQ1449783068（备注来意）反馈~感谢理解
+
 <p>
   <img src="https://img.shields.io/badge/version-5.5.0-blue" alt="version">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-green" alt="astrbot">
