@@ -838,6 +838,36 @@
     "default": true,
     "hint": "仅在「始终显示AI操作」开启时生效"
   },
+  "takeover_max_seconds": {
+    "description": "浏览器接管：单次接管的总时长上限（秒）",
+    "type": "int",
+    "default": 120,
+    "hint": "超时后系统自动结束接管并把截图返回给 AI，同时告知 AI 这是系统超时而非用户手动结束。"
+  },
+  "takeover_idle_seconds": {
+    "description": "浏览器接管：用户空闲多久后自动交还权限（秒）",
+    "type": "int",
+    "default": 60,
+    "hint": "用户在该时长内没有任何操作（点击/输入/触摸）时，自动结束接管并交还 AI。"
+  },
+  "takeover_jpeg_quality": {
+    "description": "浏览器接管：画面 JPEG 画质（10-100）",
+    "type": "int",
+    "default": 70,
+    "hint": "数值越高越清晰但越占带宽。可用「自动检测最佳」按钮自动填入推荐值。"
+  },
+  "takeover_max_width": {
+    "description": "浏览器接管：画面最大宽度（像素）",
+    "type": "int",
+    "default": 1280,
+    "hint": "宽度越大越清晰但越占带宽。低带宽环境建议 720-960。"
+  },
+  "takeover_auto_detected": {
+    "description": "浏览器接管：画面参数是否由自动检测写入",
+    "type": "bool",
+    "default": false,
+    "hint": "由「自动检测最佳」按钮置为 true，仅用于界面提示检测状态，不影响功能。"
+  },
   "browser_type": {
     "description": "浏览器类型（chromium/firefox/webkit）",
     "type": "string",

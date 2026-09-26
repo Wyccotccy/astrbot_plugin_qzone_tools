@@ -191,6 +191,11 @@ class BrowserCore:
         # ===== 核心防护 =====
         self._op_lock = asyncio.Lock()
 
+        # ===== 接管投屏 =====
+        self._screencast_client = None
+        self._screencast_frames = 0
+        self._touch_client = None
+
     # ======================================================
     # 通用兜底工具
     # ======================================================
@@ -882,6 +887,180 @@ class BrowserCore:
                     await client.detach()
                 except Exception:
                     pass
+
+    # ======================================================
+    # 浏览器接管：原始输入事件 + 实时投屏
+    # ======================================================
+    # 这些方法不做坐标钳制、不做等待，尽量贴近"真人操作"，
+    # 供 WebUI 接管模式把用户操作原样转发进浏览器。
+
+    async def mouse_move_raw(self, x: int, y: int) -> None:
+        page = await self._ensure_page()
+        await page.mouse.move(x, y)
+
+    async def mouse_down_raw(self, x: int, y: int, button: str = "left") -> None:
+        page = await self._ensure_page()
+        await page.mouse.move(x, y)
+        await page.mouse.down(button=button)
+
+    async def mouse_up_raw(self, x: int, y: int, button: str = "left") -> None:
+        page = await self._ensure_page()
+        await page.mouse.move(x, y)
+        await page.mouse.up(button=button)
+
+    async def wheel_raw(self, x: int, y: int, dx: float = 0, dy: float = 0) -> None:
+        page = await self._ensure_page()
+        await page.mouse.move(x, y)
+        await page.mouse.wheel(dx, dy)
+
+    async def type_text_raw(self, text: str) -> None:
+        """逐字输入，模拟真人打字节奏。"""
+        page = await self._ensure_page()
+        await page.keyboard.type(str(text), delay=30)
+
+    async def press_key_raw(self, key: str) -> None:
+        page = await self._ensure_page()
+        await page.keyboard.press(str(key))
+
+    async def touch_raw(self, kind: str, x: int, y: int) -> None:
+        """
+        移动端真触摸事件（CDP Input.dispatchTouchEvent）。
+
+        kind: start / move / end
+
+        注意：CDP 要求同一触摸序列（start→move→end）必须复用**同一个 CDP session**，
+        否则 touchEnd 会报 "Must send a TouchStart first to start a new touch"。
+        因此这里为触摸序列维持一个持久 session，序列结束后才释放。
+        """
+        page = await self._ensure_page()
+        type_map = {
+            "start": "touchStart",
+            "move": "touchMove",
+            "end": "touchEnd",
+        }
+        cdp_type = type_map.get(kind)
+        if not cdp_type:
+            return
+
+        # 复用或新建触摸 session
+        client = getattr(self, "_touch_client", None)
+        if client is None or kind == "start":
+            if client is not None:
+                try:
+                    await client.detach()
+                except Exception:
+                    pass
+            client = await page.context.new_cdp_session(page)
+            self._touch_client = client
+
+        try:
+            if kind == "end":
+                await client.send("Input.dispatchTouchEvent",
+                                  {"type": cdp_type, "touchPoints": []})
+            else:
+                await client.send("Input.dispatchTouchEvent", {
+                    "type": cdp_type,
+                    "touchPoints": [{"x": x, "y": y}],
+                })
+        finally:
+            # 序列结束后释放 session
+            if kind == "end":
+                try:
+                    await client.detach()
+                except Exception:
+                    pass
+                self._touch_client = None
+
+    async def release_touch(self) -> None:
+        """兜底释放可能残留的触摸 session（例如用户中途松手回到前台）。"""
+        client = getattr(self, "_touch_client", None)
+        if client is None:
+            return
+        try:
+            await client.send("Input.dispatchTouchEvent",
+                              {"type": "touchEnd", "touchPoints": []})
+        except Exception:
+            pass
+        try:
+            await client.detach()
+        except Exception:
+            pass
+        self._touch_client = None
+
+    async def start_screencast(self, on_frame=None, quality: int = 70,
+                               max_width: int = 1280) -> str | None:
+        """
+        启动 CDP 实时投屏（变化驱动推帧）。
+
+        :param on_frame: 收到帧时的回调，签名 (jpeg_bytes, (w, h)) -> None
+        :return: 投屏会话标识；失败返回 None
+        """
+        page = await self._ensure_page()
+        client = await page.context.new_cdp_session(page)
+        self._screencast_client = client
+        self._screencast_frames = 0
+
+        def _on_frame(params):
+            try:
+                data = params.get("data", "")
+                if not data or on_frame is None:
+                    return
+                import base64 as _b64
+                raw = _b64.b64decode(data)
+                meta = params.get("metadata") or {}
+                size = (int(meta.get("deviceWidth") or 0),
+                        int(meta.get("deviceHeight") or 0))
+                on_frame(raw, size if size[0] else None)
+                self._screencast_frames += 1
+                # 必须回 ACK，否则浏览器不再推新帧
+                asyncio.ensure_future(
+                    client.send("Page.screencastFrameAck",
+                                {"sessionId": params.get("sessionId")})
+                )
+            except Exception as e:
+                logger.debug(f"[Browser] 投屏帧处理失败: {e}")
+
+        client.on("Page.screencastFrame", _on_frame)
+
+        # 画质/尺寸按配置（自动检测的结果会写回配置）
+        q = min(int(self.config.get("takeover_jpeg_quality", quality) or quality), 100)
+        mw = int(self.config.get("takeover_max_width", max_width) or max_width)
+        await client.send("Page.startScreencast", {
+            "format": "jpeg",
+            "quality": max(10, q),
+            "maxWidth": max(320, mw),
+            "maxHeight": max(240, int(mw * 0.75)),
+            "everyNthFrame": 1,
+        })
+        logger.info(f"[Browser] 实时投屏已启动 quality={q} maxWidth={mw}")
+        return f"screencast-{id(client)}"
+
+    async def stop_screencast(self) -> None:
+        client = getattr(self, "_screencast_client", None)
+        if client is None:
+            return
+        try:
+            await client.send("Page.stopScreencast")
+        except Exception:
+            pass
+        try:
+            await client.detach()
+        except Exception:
+            pass
+        self._screencast_client = None
+        logger.info("[Browser] 实时投屏已停止")
+
+    async def viewport_size(self) -> tuple[int, int]:
+        """当前视口尺寸（供接管坐标换算）。"""
+        try:
+            page = await self._ensure_page()
+            vs = page.viewport_size
+            if vs:
+                return int(vs["width"]), int(vs["height"])
+        except Exception:
+            pass
+        cfg = self.config.get("viewport_size") or {}
+        return int(cfg.get("width", 1280)), int(cfg.get("height", 720))
 
     # ======================================================
     # 页面访问

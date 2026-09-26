@@ -334,6 +334,76 @@
 
         .tabbar { display: none; }
 
+        /* ==================== 浏览器接管 ==================== */
+        .tk-status {
+            display: flex; align-items: center; gap: 9px;
+            padding: 9px 13px; margin-bottom: 12px;
+            border-radius: var(--radius-sm);
+            background: var(--primary-soft);
+            border: 1px solid var(--primary-soft-2);
+        }
+        .tk-dot {
+            width: 9px; height: 9px; border-radius: 50%;
+            background: var(--success); flex-shrink: 0;
+            animation: tk-pulse 1.6s ease-in-out infinite;
+        }
+        @keyframes tk-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+        .tk-status-txt { font-size: 13px; font-weight: 600; color: var(--primary); }
+        .tk-spacer { flex: 1; }
+        .tk-timer {
+            font-family: var(--font-mono, ui-monospace, monospace);
+            font-size: 13px; font-weight: 650; color: var(--primary);
+            white-space: nowrap;
+        }
+        .tk-timer.warn { color: var(--warn); }
+        .tk-timer.danger { color: var(--danger); }
+
+        .tk-stage {
+            position: relative;
+            width: 100%;
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+            background: #1b1f2a;
+            border: 1px solid var(--border-strong);
+            /* 锁定交互，避免浏览器默认手势干扰自定义拖拽 */
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+            cursor: crosshair;
+        }
+        .tk-stage:fullscreen { border-radius: 0; display: grid; place-items: center; }
+        .tk-stage img {
+            display: block; width: 100%; height: auto;
+            pointer-events: none;
+            -webkit-user-drag: none;
+        }
+        .tk-cursor {
+            position: absolute; width: 14px; height: 14px;
+            margin: -7px 0 0 -7px;
+            border-radius: 50%;
+            background: rgba(216, 87, 79, .85);
+            border: 2px solid #fff;
+            box-shadow: 0 0 0 2px rgba(216, 87, 79, .35);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity .12s;
+        }
+        .tk-cursor.on { opacity: 1; }
+        .tk-overlay {
+            position: absolute; inset: 0;
+            display: grid; place-items: center;
+            background: rgba(20, 26, 44, .55);
+            backdrop-filter: blur(2px);
+            -webkit-backdrop-filter: blur(2px);
+            transition: opacity .2s;
+        }
+        .tk-overlay.hide { opacity: 0; pointer-events: none; }
+        .tk-overlay-txt { font-size: 13px; color: #fff; }
+
+        .tk-keybar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+        .tk-keybar input[type="text"] { flex: 1; min-width: 150px; }
+        .tk-meta { font-size: 11.5px; color: var(--text-3); margin-left: auto; white-space: nowrap; }
+
         @media (max-width: 900px) {
             .sidebar { display: none; }
             .main { margin-left: 0; padding: 0 0 calc(72px + env(safe-area-inset-bottom)); }
@@ -467,6 +537,10 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
                     文件管理
                 </button>
+                <button class="nav-btn" data-page="takeover">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/><path d="M7 11l2.5 2.5L7 16"/></svg>
+                    浏览器接管
+                </button>
                 <button class="nav-btn" data-page="memory">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a3 3 0 0 0-3 3 3 3 0 0 0-3 3 3 3 0 0 0 0 6 3 3 0 0 0 3 3 3 3 0 0 0 3 3"/><path d="M12 3a3 3 0 0 1 3 3 3 3 0 0 1 3 3 3 3 0 0 1 0 6 3 3 0 0 1-3 3 3 3 0 0 1-3 3"/></svg>
                     记忆
@@ -566,6 +640,43 @@
                             <input type="checkbox" id="browser_action_push_text" />
                             <label class="switch-text" for="browser_action_push_text"><span class="t">推送时附带说明文字</span><span class="d">如「AI 操作：点击」</span></label>
                         </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="section-title">浏览器接管 <span class="tag">NEW</span></div>
+                        <div class="section-desc">
+                            AI 遇到验证码 / 滑块等无法自动完成的步骤时，可把操作权临时交给真人用户。
+                            用户在「浏览器接管」页面上实时操作，完成后交还 AI。
+                        </div>
+                        <div class="two-col">
+                            <div class="field">
+                                <label>接管总时长上限（秒）</label>
+                                <input type="number" id="takeover_max_seconds" min="20" max="1800" />
+                                <div class="hint">超时后系统自动结束并把截图返回 AI（会告知 AI 这是系统超时）</div>
+                            </div>
+                            <div class="field">
+                                <label>用户空闲超时（秒）</label>
+                                <input type="number" id="takeover_idle_seconds" min="10" max="600" />
+                                <div class="hint">用户在该时长内无任何操作，自动交还权限</div>
+                            </div>
+                        </div>
+                        <div class="two-col">
+                            <div class="field">
+                                <label>画面画质（JPEG，10-100）</label>
+                                <input type="number" id="takeover_jpeg_quality" min="10" max="100" />
+                                <div class="hint">越高越清晰，越占带宽</div>
+                            </div>
+                            <div class="field">
+                                <label>画面最大宽度（像素）</label>
+                                <input type="number" id="takeover_max_width" min="320" max="2560" step="80" />
+                                <div class="hint">低带宽建议 720-960</div>
+                            </div>
+                        </div>
+                        <div class="btn-row">
+                            <button class="btn btn-ghost btn-sm" id="tkProbeBtn">自动检测最佳画质</button>
+                            <span class="loading-text" id="tkProbeInfo"></span>
+                        </div>
+                        <div class="hint">检测方式：向服务端连续请求已知大小的数据，测出实际吞吐后取 80% 作为预算，自动填入上面两项。</div>
                     </div>
 
                     <div class="card">
@@ -822,6 +933,73 @@
                     </div>
                 </div>
 
+                <!-- ======== 浏览器接管 ======== -->
+                <div id="takeoverPage" class="content">
+                    <div class="page-head">
+                        <h1>浏览器接管</h1>
+                        <p>AI 请求接管时，在此实时操作浏览器（验证码 / 滑块等）</p>
+                    </div>
+
+                    <!-- 未启用提示 -->
+                    <div class="card" id="tkDisabled" style="display:none;">
+                        <div class="section-title">⚠️ 浏览器尚未启用</div>
+                        <div class="section-desc">
+                            请先在「配置 → 浏览器引擎」中启用浏览器并保存，或让 AI 先执行一次浏览器操作，然后回到本页面。
+                        </div>
+                        <div class="btn-row">
+                            <button class="btn btn-ghost" id="tkRetryBtn">重新检查</button>
+                        </div>
+                    </div>
+
+                    <!-- 待命 -->
+                    <div class="card" id="tkIdle" style="display:none;">
+                        <div class="section-title">✅ 浏览器已就绪</div>
+                        <div class="section-desc">
+                            当前没有进行中的接管请求。当 AI 遇到无法自动完成的步骤（如验证码）时，
+                            会主动请求接管，届时本页面会自动出现实时画面。
+                        </div>
+                        <div class="btn-row">
+                            <button class="btn btn-ghost" id="tkRefreshBtn">刷新状态</button>
+                        </div>
+                    </div>
+
+                    <!-- 接管进行中 -->
+                    <div class="card" id="tkActive" style="display:none;">
+                        <div class="tk-status">
+                            <span class="tk-dot"></span>
+                            <span class="tk-status-txt" id="tkReason">等待用户操作</span>
+                            <span class="tk-spacer"></span>
+                            <span class="tk-timer" id="tkTimer">--</span>
+                        </div>
+                        <div class="section-desc" id="tkHint">
+                            下面的画面是浏览器实时截图，直接在上面点击 / 拖动 / 长按 / 输入即可操作。完成后点「结束操作」把权限交还 AI。
+                        </div>
+
+                        <div class="tk-stage" id="tkStage">
+                            <img id="tkScreen" alt="浏览器实时画面" draggable="false" />
+                            <div class="tk-cursor" id="tkCursor"></div>
+                            <div class="tk-overlay" id="tkOverlay">
+                                <div class="tk-overlay-txt" id="tkOverlayTxt">正在连接画面…</div>
+                            </div>
+                        </div>
+
+                        <div class="tk-keybar">
+                            <input type="text" id="tkKeyInput" placeholder="输入文字后回车（或点发送）" autocomplete="off" />
+                            <button class="btn btn-sm" id="tkKeySend">发送</button>
+                            <button class="btn btn-ghost btn-sm" id="tkKeyEsc">Esc</button>
+                            <button class="btn btn-ghost btn-sm" id="tkKeyEnter">Enter</button>
+                            <button class="btn btn-ghost btn-sm" id="tkKeyTab">Tab</button>
+                        </div>
+
+                        <div class="btn-row" style="margin-top:14px;">
+                            <button class="btn btn-danger" id="tkEndBtn">结束操作</button>
+                            <button class="btn btn-ghost" id="tkFullBtn">全屏</button>
+                            <span class="tk-meta" id="tkMeta"></span>
+                        </div>
+                        <div class="status" id="tkStatus"></div>
+                    </div>
+                </div>
+
                 <!-- ======== 记忆 ======== -->
                 <div id="memoryPage" class="content">
                     <div class="page-head">
@@ -995,6 +1173,10 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
             文件
         </button>
+        <button class="tab" data-page="takeover">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/><path d="M7 11l2.5 2.5L7 16"/></svg>
+            接管
+        </button>
         <button class="tab" data-page="memory">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a3 3 0 0 0-3 3 3 3 0 0 0-3 3 3 3 0 0 0 0 6 3 3 0 0 0 3 3 3 3 0 0 0 3 3"/><path d="M12 3a3 3 0 0 1 3 3 3 3 0 0 1 3 3 3 3 0 0 1 0 6 3 3 0 0 1-3 3 3 3 0 0 1-3 3"/></svg>
             记忆
@@ -1165,7 +1347,8 @@ if (!window.AstrBotPluginPage) {
         // ==================== 导航 ====================
         const PAGE_TITLES = {
             config: '配置', capability: '能力控制', workspace: '文件管理',
-            memory: '记忆管理', schedule: '定时消息', permission: '权限控制'
+            takeover: '浏览器接管', memory: '记忆管理', schedule: '定时消息',
+            permission: '权限控制'
         };
 
         function switchPage(page) {
@@ -1179,6 +1362,7 @@ if (!window.AstrBotPluginPage) {
 
             if (page === 'capability') loadCapability();
             if (page === 'workspace') loadFiles();
+            if (page === 'takeover') loadTakeoverStatus();
             if (page === 'memory') { loadMemoryStats(); loadMemoryFilters(); loadMemories(); }
             if (page === 'schedule') loadSchedules();
             if (page === 'permission') loadPermission();
@@ -1236,6 +1420,11 @@ if (!window.AstrBotPluginPage) {
                 browser_always_show_action: checked('browser_always_show_action'),
                 browser_action_overlay_enabled: checked('browser_action_overlay_enabled'),
                 browser_action_push_text: checked('browser_action_push_text'),
+                // 浏览器接管
+                takeover_max_seconds: num('takeover_max_seconds', 120),
+                takeover_idle_seconds: num('takeover_idle_seconds', 60),
+                takeover_jpeg_quality: num('takeover_jpeg_quality', 70),
+                takeover_max_width: num('takeover_max_width', 1280),
                 image_output_format: val('image_output_format'),
                 browser_render_mode: val('browser_render_mode'),
                 llm_screenshot_text_only: checked('llm_screenshot_text_only'),
@@ -2069,9 +2258,434 @@ if (!window.AstrBotPluginPage) {
             }
         });
 
+        // ==================== 浏览器接管 ====================
+        const tkDisabled = document.getElementById('tkDisabled');
+        const tkIdle = document.getElementById('tkIdle');
+        const tkActive = document.getElementById('tkActive');
+        const tkScreen = document.getElementById('tkScreen');
+        const tkCursor = document.getElementById('tkCursor');
+        const tkOverlay = document.getElementById('tkOverlay');
+        const tkOverlayTxt = document.getElementById('tkOverlayTxt');
+        const tkReason = document.getElementById('tkReason');
+        const tkTimer = document.getElementById('tkTimer');
+        const tkMeta = document.getElementById('tkMeta');
+        const tkStatus = document.getElementById('tkStatus');
+        const tkStage = document.getElementById('tkStage');
+        const tkKeyInput = document.getElementById('tkKeyInput');
+
+        let tkSubId = null;          // SSE 订阅 id
+        let tkActiveFlag = false;    // 是否正处于接管中
+        let tkPollTimer = null;      // 状态轮询定时器
+        let tkState = null;          // 最近一次服务端状态
+        let tkDisplayRect = null;    // 画面显示区域（用于坐标换算）
+
+        function showTkStatus(msg, type) {
+            tkStatus.textContent = msg;
+            tkStatus.className = `status show ${type}`;
+            setTimeout(() => tkStatus.classList.remove('show'), 3000);
+        }
+
+        // ---- 视图切换 ----
+        function setTkView(view) {
+            tkDisabled.style.display = view === 'disabled' ? '' : 'none';
+            tkIdle.style.display = view === 'idle' ? '' : 'none';
+            tkActive.style.display = view === 'active' ? '' : 'none';
+        }
+
+        // ---- 状态查询 ----
+        async function loadTakeoverStatus() {
+            try {
+                const res = await bridge.apiGet('takeover_status');
+                if (!res.success) throw new Error(res.error || '查询失败');
+                tkState = res;
+
+                if (!res.browser_enabled) {
+                    setTkView('disabled');
+                    return;
+                }
+                if (res.active && res.session && !res.session.ended) {
+                    enterTakeover(res);
+                } else {
+                    if (tkActiveFlag) exitTakeover();
+                    setTkView('idle');
+                }
+            } catch (e) {
+                showTkStatus('状态查询失败: ' + e.message, 'error');
+            }
+        }
+
+        // ---- 进入接管：订阅画面 ----
+        function enterTakeover(res) {
+            const switched = !tkActiveFlag;
+            tkActiveFlag = true;
+            setTkView('active');
+            tkReason.textContent = res.reason ? ('AI 请求接管：' + res.reason) : 'AI 已请求用户接管';
+            updateTimer(res.session);
+            showOverlay('正在连接画面…');
+
+            if (switched && !tkSubId) {
+                subscribeFrames();
+            }
+        }
+
+        function showOverlay(text) {
+            tkOverlayTxt.textContent = text;
+            tkOverlay.classList.remove('hide');
+        }
+        function hideOverlay() { tkOverlay.classList.add('hide'); }
+
+        // ---- 退出接管 ----
+        function exitTakeover() {
+            tkActiveFlag = false;
+            unsubscribeFrames();
+            tkCursor.classList.remove('on');
+            setTkView('idle');
+        }
+
+        // ---- SSE 画面订阅 ----
+        function subscribeFrames() {
+            if (!bridge.subscribeSSE) {
+                showOverlay('当前 AstrBot 版本不支持画面流，请升级 AstrBot');
+                return;
+            }
+            bridge.subscribeSSE('takeover_stream', {
+                onOpen: () => { hideOverlay(); },
+                onError: () => { showOverlay('画面连接中断，正在重试…'); },
+                onMessage: (msg) => {
+                    const evType = msg.eventType || 'message';
+                    if (evType === 'frame') {
+                        if (msg.raw) {
+                            tkScreen.src = 'data:image/jpeg;base64,' + msg.raw;
+                            hideOverlay();
+                        }
+                    } else if (evType === 'state') {
+                        const st = msg.parsed;
+                        if (st && typeof st === 'object') {
+                            tkState = Object.assign(tkState || {}, { session: st });
+                            if (st.ended) {
+                                exitTakeover();
+                                return;
+                            }
+                            updateTimer(st);
+                        }
+                    }
+                }
+            }, {}).then(id => {
+                tkSubId = id;
+            }).catch(e => {
+                showOverlay('画面订阅失败: ' + e.message);
+            });
+        }
+
+        function unsubscribeFrames() {
+            if (tkSubId && bridge.unsubscribeSSE) {
+                try { bridge.unsubscribeSSE(tkSubId); } catch (e) { /* 忽略 */ }
+            }
+            tkSubId = null;
+        }
+
+        // ---- 倒计时显示 ----
+        function updateTimer(session) {
+            if (!session) return;
+            const maxLeft = session.remaining_max;
+            const idleLeft = session.remaining_idle;
+            // 取更紧迫的那个作为提示
+            const left = Math.min(maxLeft, idleLeft);
+            const which = idleLeft <= maxLeft ? '空闲' : '总时长';
+            tkTimer.textContent = `${which} ${Math.ceil(left)}s`;
+            tkTimer.className = 'tk-timer' + (left <= 10 ? ' danger' : (left <= 30 ? ' warn' : ''));
+            tkMeta.textContent = `已操作 ${session.action_count || 0} 次 · 已持续 ${Math.round(session.elapsed || 0)}s`;
+        }
+
+        // ---- 坐标归一化（关键：前端任意缩放都对应到浏览器坐标）----
+        function normPoint(ev) {
+            const img = tkScreen;
+            const rect = img.getBoundingClientRect();
+            if (!rect.width || !rect.height) return null;
+            let clientX, clientY;
+            if (ev.touches && ev.touches.length) {
+                clientX = ev.touches[0].clientX; clientY = ev.touches[0].clientY;
+            } else if (ev.changedTouches && ev.changedTouches.length) {
+                clientX = ev.changedTouches[0].clientX; clientY = ev.changedTouches[0].clientY;
+            } else {
+                clientX = ev.clientX; clientY = ev.clientY;
+            }
+            const x = (clientX - rect.left) / rect.width;
+            const y = (clientY - rect.top) / rect.height;
+            if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+            return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
+        }
+
+        function moveCursor(ev) {
+            const rect = tkScreen.getBoundingClientRect();
+            let clientX, clientY;
+            if (ev.touches && ev.touches.length) {
+                clientX = ev.touches[0].clientX; clientY = ev.touches[0].clientY;
+            } else {
+                clientX = ev.clientX; clientY = ev.clientY;
+            }
+            tkCursor.style.left = (clientX - tkStage.getBoundingClientRect().left) + 'px';
+            tkCursor.style.top = (clientY - tkStage.getBoundingClientRect().top) + 'px';
+            tkCursor.classList.add('on');
+            _ = rect;
+        }
+
+        // ---- 发送操作到后端 ----
+        let tkSendBusy = false;
+        async function sendAction(action, data) {
+            if (!tkActiveFlag) return;
+            // 拖动时允许并发（move 事件密集），其余串行避免堆积
+            if (tkSendBusy && action !== 'mouse') return;
+            tkSendBusy = true;
+            try {
+                const res = await bridge.apiPost('takeover_action', { action: action, data: data });
+                if (res && res.success === false && res.error) {
+                    if (/已结束/.test(res.error)) { exitTakeover(); }
+                }
+            } catch (e) {
+                // 网络抖动忽略，不打断用户操作
+            } finally {
+                tkSendBusy = false;
+            }
+        }
+
+        // ---- 鼠标 / 触摸：手势识别（点击 / 长按 / 拖动）----
+        const LONG_PRESS_MS = 400;
+        const MOVE_TOLERANCE = 8;   // 显示像素
+
+        let gesture = null;
+
+        function gestureStart(pt, ev) {
+            gesture = {
+                startPt: pt,
+                startedAt: Date.now(),
+                moved: false,
+                longPressed: false,
+                startClient: { x: ev.clientX || (ev.touches && ev.touches[0].clientX) || 0,
+                               y: ev.clientY || (ev.touches && ev.touches[0].clientY) || 0 },
+                longPressTimer: null,
+            };
+            sendAction('mouse', { kind: 'move', x: pt.x, y: pt.y });
+
+            // 长按判定：按住超过阈值且未移动
+            gesture.longPressTimer = setTimeout(() => {
+                if (gesture && !gesture.moved) {
+                    gesture.longPressed = true;
+                    sendAction('mouse', { kind: 'down', x: pt.x, y: pt.y });
+                }
+            }, LONG_PRESS_MS);
+        }
+
+        function gestureMove(pt, ev) {
+            if (!gesture) return;
+            const dx = (ev.clientX || (ev.touches && ev.touches[0].clientX) || 0) - gesture.startClient.x;
+            const dy = (ev.clientY || (ev.touches && ev.touches[0].clientY) || 0) - gesture.startClient.y;
+            if (Math.hypot(dx, dy) > MOVE_TOLERANCE) {
+                if (!gesture.moved) {
+                    gesture.moved = true;
+                    if (gesture.longPressTimer) { clearTimeout(gesture.longPressTimer); gesture.longPressTimer = null; }
+                }
+            }
+            if (gesture.moved) {
+                sendAction('mouse', { kind: 'move', x: pt.x, y: pt.y });
+            }
+        }
+
+        function gestureEnd(pt) {
+            if (!gesture) return;
+            if (gesture.longPressTimer) { clearTimeout(gesture.longPressTimer); gesture.longPressTimer = null; }
+
+            if (gesture.longPressed) {
+                // 长按：抬起
+                sendAction('mouse', { kind: 'up', x: pt.x, y: pt.y });
+            } else if (gesture.moved) {
+                // 拖动：从起点拖到终点
+                sendAction('mouse', { kind: 'down', x: gesture.startPt.x, y: gesture.startPt.y });
+                sendAction('mouse', { kind: 'up', x: pt.x, y: pt.y });
+            } else {
+                // 单击
+                sendAction('mouse', { kind: 'click', x: pt.x, y: pt.y });
+            }
+            gesture = null;
+        }
+
+        // 鼠标事件
+        tkStage.addEventListener('mousedown', ev => {
+            if (!tkActiveFlag) return;
+            const pt = normPoint(ev);
+            if (!pt) return;
+            ev.preventDefault();
+            if (ev.button === 2) { sendAction('mouse', { kind: 'click', x: pt.x, y: pt.y, button: 'right' }); return; }
+            gestureStart(pt, ev);
+        });
+        tkStage.addEventListener('mousemove', ev => {
+            if (!tkActiveFlag) return;
+            moveCursor(ev);
+            const pt = normPoint(ev);
+            if (!pt) return;
+            if (gesture) gestureMove(pt, ev);
+        });
+        window.addEventListener('mouseup', ev => {
+            if (!tkActiveFlag || !gesture) return;
+            const pt = normPoint(ev);
+            if (pt) gestureEnd(pt);
+        });
+        tkStage.addEventListener('contextmenu', ev => ev.preventDefault());
+
+        // 触摸事件（手机端）
+        tkStage.addEventListener('touchstart', ev => {
+            if (!tkActiveFlag) return;
+            const pt = normPoint(ev);
+            if (!pt) return;
+            ev.preventDefault();
+            moveCursor(ev);
+            gestureStart(pt, { clientX: ev.touches[0].clientX, clientY: ev.touches[0].clientY });
+        }, { passive: false });
+        tkStage.addEventListener('touchmove', ev => {
+            if (!tkActiveFlag) return;
+            const pt = normPoint(ev);
+            if (!pt) return;
+            ev.preventDefault();
+            moveCursor(ev);
+            if (gesture) gestureMove(pt, { clientX: ev.touches[0].clientX, clientY: ev.touches[0].clientY });
+        }, { passive: false });
+        tkStage.addEventListener('touchend', ev => {
+            if (!tkActiveFlag || !gesture) return;
+            const pt = normPoint(ev);
+            if (pt) gestureEnd(pt);
+            tkCursor.classList.remove('on');
+        });
+
+        // 滚轮
+        tkStage.addEventListener('wheel', ev => {
+            if (!tkActiveFlag) return;
+            ev.preventDefault();
+            const pt = normPoint(ev) || { x: 0.5, y: 0.5 };
+            sendAction('wheel', { x: pt.x, y: pt.y, dx: ev.deltaX, dy: ev.deltaY });
+        }, { passive: false });
+
+        // ---- 键盘 ----
+        function sendKey(text, key) {
+            if (!tkActiveFlag) return;
+            const payload = {};
+            if (text) payload.text = text;
+            if (key) payload.key = key;
+            sendAction('key', payload);
+        }
+        document.getElementById('tkKeySend').addEventListener('click', () => {
+            const v = tkKeyInput.value;
+            if (!v) return;
+            sendKey(v, null);
+            tkKeyInput.value = '';
+        });
+        tkKeyInput.addEventListener('keydown', ev => {
+            if (ev.key === 'Enter') {
+                ev.preventDefault();
+                const v = tkKeyInput.value;
+                if (v) { sendKey(v, null); tkKeyInput.value = ''; }
+                else { sendKey(null, 'Enter'); }
+            }
+        });
+        document.getElementById('tkKeyEsc').addEventListener('click', () => sendKey(null, 'Escape'));
+        document.getElementById('tkKeyEnter').addEventListener('click', () => sendKey(null, 'Enter'));
+        document.getElementById('tkKeyTab').addEventListener('click', () => sendKey(null, 'Tab'));
+
+        // ---- 结束 / 全屏 / 刷新 ----
+        document.getElementById('tkEndBtn').addEventListener('click', async () => {
+            if (!await askConfirm('确定结束接管，把操作权交还给 AI？', { title: '结束接管' })) return;
+            try {
+                const res = await bridge.apiPost('takeover_end', {});
+                if (res.success) {
+                    exitTakeover();
+                    showTkStatus(res.message || '已结束接管', 'success');
+                } else showTkStatus(res.error || '结束失败', 'error');
+            } catch (e) { showTkStatus(e.message, 'error'); }
+        });
+
+        document.getElementById('tkFullBtn').addEventListener('click', () => {
+            try {
+                if (document.fullscreenElement) document.exitFullscreen();
+                else tkStage.requestFullscreen();
+            } catch (e) { showTkStatus('全屏不支持: ' + e.message, 'error'); }
+        });
+
+        document.getElementById('tkRefreshBtn').addEventListener('click', loadTakeoverStatus);
+        document.getElementById('tkRetryBtn').addEventListener('click', loadTakeoverStatus);
+
+        // ---- 自动检测最佳画质 ----
+        // 思路：向服务端连续请求已知大小的数据块，测出端到端实际吞吐（含 SSE 通道
+        // 与用户本地网络），按目标帧率反推可持续的单帧大小，取 80% 作为预算，
+        // 再映射为 JPEG quality + 最大宽度。
+        document.getElementById('tkProbeBtn').addEventListener('click', async () => {
+            const info = document.getElementById('tkProbeInfo');
+            const btn = document.getElementById('tkProbeBtn');
+            btn.disabled = true;
+            info.textContent = '检测中…';
+            try {
+                const SAMPLE_KB = 120;     // 单次样本大小
+                const ROUNDS = 5;          // 采样次数
+                const TARGET_FPS = 10;     // 目标帧率（变化驱动，10fps 足够流畅）
+
+                let bestKBps = 0;
+                for (let i = 0; i < ROUNDS; i++) {
+                    const t0 = performance.now();
+                    const res = await bridge.apiPost('takeover_probe', { size_kb: SAMPLE_KB });
+                    const dt = (performance.now() - t0) / 1000;
+                    if (!res || !res.success || !res.payload) throw new Error('探测失败');
+                    const bytes = res.payload.length * 0.75;   // base64 → 原始字节
+                    const kbps = (bytes / 1024) / Math.max(dt, 0.001);
+                    if (kbps > bestKBps) bestKBps = kbps;
+                    info.textContent = `检测中… ${i + 1}/${ROUNDS}（当前 ${kbps.toFixed(0)} KB/s）`;
+                }
+
+                // 单帧预算：取 80% 吞吐，按目标帧率分摊
+                const budgetKB = (bestKBps * 0.8) / TARGET_FPS;
+                const budgetBytes = budgetKB * 1024;
+
+                // 映射到画质与宽度：经验值 —— 1280 宽下 quality 70 约 90-160KB/帧
+                let quality, width;
+                if (budgetBytes >= 160 * 1024)      { quality = 82; width = 1280; }
+                else if (budgetBytes >= 110 * 1024) { quality = 74; width = 1280; }
+                else if (budgetBytes >= 70 * 1024)  { quality = 68; width = 1024; }
+                else if (budgetBytes >= 45 * 1024)  { quality = 62; width = 960;  }
+                else if (budgetBytes >= 28 * 1024)  { quality = 55; width = 800;  }
+                else if (budgetBytes >= 16 * 1024)  { quality = 48; width = 720;  }
+                else                                { quality = 40; width = 640;  }
+
+                document.getElementById('takeover_jpeg_quality').value = quality;
+                document.getElementById('takeover_max_width').value = width;
+
+                info.textContent = '';
+                const msg = `检测完成：实测约 ${bestKBps.toFixed(0)} KB/s，` +
+                            `按 ${TARGET_FPS}fps 预留 80% 预算 → 画质 ${quality}、宽度 ${width}px。记得点「保存配置」。`;
+                if (typeof askConfirm === 'function') {
+                    await askConfirm(msg, { title: '检测结果', okText: '知道了', danger: false });
+                } else {
+                    info.textContent = msg;
+                }
+            } catch (e) {
+                info.textContent = '';
+                showConfigStatus('画质检测失败: ' + e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                if (info.textContent.startsWith('检测中')) info.textContent = '';
+            }
+        });
+
+        // ---- 轮询：无 SSE 时也能感知状态变化 ----
+        function startTkPolling() {
+            if (tkPollTimer) return;
+            tkPollTimer = setInterval(() => {
+                // 只在接管页可见时轮询
+                const page = document.getElementById('takeoverPage');
+                if (!page || !page.classList.contains('active')) return;
+                loadTakeoverStatus();
+            }, 2000);
+        }
+        startTkPolling();
+
         // ==================== 定时消息 ====================
         const scheduleStatus = document.getElementById('scheduleStatus');
-
         function showScheduleStatus(msg, type) {
             scheduleStatus.textContent = msg;
             scheduleStatus.className = `status show ${type}`;

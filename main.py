@@ -40,6 +40,11 @@ from .core.supervisor import BrowserSupervisor
 from .core.favorite import FavoriteManager
 from .core.ticks_overlay import TickOverlay
 from .core.action_overlay import ActionOverlay
+from .core.takeover import (
+    TakeoverManager,
+    REASON_USER_END, REASON_IDLE_TIMEOUT, REASON_MAX_TIMEOUT,
+    REASON_BROWSER_GONE, REASON_ABORTED, REASON_TEXT,
+)
 from .core.image_utils import convert_image_format, get_format_from_config, get_output_ext
 
 import mcp
@@ -95,6 +100,9 @@ CONFIG_SAVE_WHITELIST = {
     # 浏览器操作展示（v5.3.0）
     "browser_always_show_action", "browser_action_overlay_enabled",
     "browser_action_push_text",
+    # 浏览器接管（v5.4.0）
+    "takeover_max_seconds", "takeover_idle_seconds",
+    "takeover_jpeg_quality", "takeover_max_width", "takeover_auto_detected",
 }
 
 
@@ -1306,6 +1314,8 @@ class Main(Star):
         self.browser_always_show_action = self.config.get("browser_always_show_action", False)
         self.browser_action_overlay_enabled = self.config.get("browser_action_overlay_enabled", False)
         self.browser_action_push_text = self.config.get("browser_action_push_text", True)
+        # 浏览器接管（v5.4.0）：AI 可把操作权临时交给 WebUI 上的真人用户
+        self.takeover_manager = TakeoverManager(self.config)
 
     def _load_tool_enabled_flags(self) -> Dict[str, bool]:
         default_enabled = {
@@ -3509,7 +3519,45 @@ class Main(Star):
             "handler": self.delete_friend_tool
         }
 
+        # ---------- 浏览器接管（v5.4.0）----------
+        # 注意：本工具在 run_wyc_tool 的「免搜索白名单」内，
+        # AI 可直接执行，无需先搜索（应急场景，来不及搜索）。
+        registry["request_browser_takeover"] = {
+            "name": "request_browser_takeover",
+            "description": (
+                "【应急】请求真人用户接管浏览器操作。"
+                "仅在确认无法自动完成时使用，例如遇到验证码、滑块、拼图、"
+                "短信验证码、人脸核身等需要真人的环节；"
+                "普通操作失败（元素没点到、页面没加载完）请先重试或换思路，"
+                "不要动不动就交给用户。"
+                "调用后 AI 会暂停并等待，用户在 AstrBot 控制台的插件 WebUI 上操作，"
+                "结束后会把最新截图返回给你继续处理。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "请求接管的原因，会展示给用户，例如：遇到滑块验证码，需要真人手动通过"
+                    }
+                },
+                "required": ["reason"]
+            },
+            "keywords": [
+                "接管", "用户接管", "人工接管", "请求接管", "转交用户", "交给用户",
+                "验证码", "人机验证", "人机校验", "滑块", "拼图", "点选验证", "图形验证",
+                "短信验证", "手机验证", "人脸识别", "实名认证", "无法自动完成", "自动不了",
+                "卡住了", "卡住", "搞不定", "需要真人", "真人操作", "手动操作", "帮我操作",
+                "takeover", "captcha", "human verification", "manual operation"
+            ],
+            "handler": self.request_browser_takeover_tool
+        }
+
         return registry
+
+    # 免搜索白名单 —— 这些工具绕开三步协议，AI 可直接用 run_wyc_tool 执行
+    # 仅限应急场景（来不及搜索），务必保持极短
+    DIRECT_CALL_TOOLS = {"request_browser_takeover"}
 
     # ==================== LLM 工具 ====================
     @filter.llm_tool(name="search_wyc_tools")
@@ -3561,14 +3609,19 @@ class Main(Star):
         """
         available_tools = self._get_available_tools(event)
         if not tool_name or tool_name not in available_tools:
-            # 区分"不存在/已禁用"与"权限不足"，给出正确提示
-            if tool_name and tool_name in self._tool_registry:
-                perm = self._get_tool_permission(tool_name)
-                if perm == "disabled":
-                    return {"status": "error", "message": f"工具 {tool_name} 已被管理员禁用。"}
-                if perm in ("admin", "groupadmin") and not await self._check_tool_permission_async(event, perm):
-                    return {"status": "error", "message": f"⛔ 工具 {tool_name} 需要「{PERMISSION_LABELS.get(perm, perm)}」权限，当前用户无权限。"}
-            return {"status": "error", "message": f"无效的工具名称或工具未启用: {tool_name}。请先使用 search_wyc_tools 或 call_wyc_tools 获取可用工具。"}
+            # 免搜索白名单：应急工具允许直接执行，不必先搜索（节省一轮往返）
+            if tool_name in self.DIRECT_CALL_TOOLS and tool_name in self._tool_registry:
+                available_tools = dict(available_tools)
+                available_tools[tool_name] = self._tool_registry[tool_name]
+            else:
+                # 区分"不存在/已禁用"与"权限不足"，给出正确提示
+                if tool_name and tool_name in self._tool_registry:
+                    perm = self._get_tool_permission(tool_name)
+                    if perm == "disabled":
+                        return {"status": "error", "message": f"工具 {tool_name} 已被管理员禁用。"}
+                    if perm in ("admin", "groupadmin") and not await self._check_tool_permission_async(event, perm):
+                        return {"status": "error", "message": f"⛔ 工具 {tool_name} 需要「{PERMISSION_LABELS.get(perm, perm)}」权限，当前用户无权限。"}
+                return {"status": "error", "message": f"无效的工具名称或工具未启用: {tool_name}。请先使用 search_wyc_tools 或 call_wyc_tools 获取可用工具。"}
         # 二次权限校验（防御 _get_available_tools 的判定偏差）
         perm = self._get_tool_permission(tool_name)
         if perm == "disabled":
@@ -3584,6 +3637,15 @@ class Main(Star):
             vision_err = await self._require_vision_model(event)
             if vision_err:
                 return {"status": "error", "message": vision_err}
+        # 接管冻结：用户操作浏览器期间，AI 的浏览器工具一律拒绝
+        # （仅冻结浏览器类工具，发消息/记忆等其他工具不受影响）
+        if tool_name in self._BROWSER_TOOL_NAMES and self.takeover_manager.is_active():
+            if tool_name != "request_browser_takeover":
+                return {
+                    "status": "error",
+                    "message": "⏸️ 浏览器当前正由用户接管操作中，AI 暂时无法操作浏览器。"
+                              "请等待用户完成操作（工具会自动把最新截图返回给你）。",
+                }
         try:
             if isinstance(tool_args, dict):
                 args_dict = tool_args
@@ -3612,6 +3674,10 @@ class Main(Star):
             # 浏览器操作增强显示：叠加操作图标 + 按需把截图推送给用户（纯代码实现）
             if isinstance(result, dict) and result.get("screenshot"):
                 result = await self._apply_action_overlay(event, tool_name, args_dict, result)
+            # 浏览器工具：无条件追加「接管提示」（不依赖失败检测，避免漏判）
+            if isinstance(result, dict) and tool_name in self._BROWSER_TOOL_NAMES:
+                if isinstance(result.get("message"), str):
+                    result["message"] = self._with_takeover_hint(result["message"])
             # 如果结果包含截图路径，自动读取图片并返回 ImageContent
             # 这样 LLM 可以直接看到截图，无需再调 read_image
             if isinstance(result, dict) and "screenshot" in result:
@@ -3640,6 +3706,131 @@ class Main(Star):
             logger.error(f"[run_wyc_tool] 执行工具 {tool_name} 失败: {e}", exc_info=True)
             return {"status": "error", "message": f"工具执行出错: {_safe_error_msg(e)}"}
 
+    # ==================== 浏览器接管（v5.4.0） ====================
+
+    async def request_browser_takeover_tool(self, event: AstrMessageEvent, reason: str) -> Any:
+        """
+        请求真人用户接管浏览器。
+
+        实现为 async generator：等待期间每 2 秒 yield 一次心跳。
+        框架对每次 anext 都有 tool_call_timeout 计时（默认 120s），
+        周期性 yield 可不断重置该计时器，从而突破超时限制、长时间等待用户。
+
+        注意：async generator 中**不能用 `return 值`**（Python 语法限制），
+        因此所有返回值都改为 `yield 值`（框架会把 yield 的内容当作工具结果）。
+
+        产出：
+        - 首个 yield：无值（仅用于把已发出的通知推出去）
+        - 出错时：yield 错误字典
+        - 结束时：yield 结束说明 + 最新截图路径（回给 AI）
+        """
+        if not self.browser_supervisor:
+            yield {"status": "error", "message": "浏览器尚未启用，无法请求接管。"}
+            return
+
+        # 已有活跃接管时直接复用，避免重复发起
+        if self.takeover_manager.is_active():
+            yield {"status": "error", "message": "已有一个接管会话正在进行中。"}
+            return
+
+        reason = (reason or "").strip() or "需要真人协助完成操作"
+
+        # ---------- 1. 发系统消息通知用户 ----------
+        max_sec = self.takeover_manager.max_seconds
+        notice = (
+            "AI已将操作权限转移至WebUI，请前往Astrbot控制台打开"
+            "\u201c更多LLM工具\u201d插件WEB UI进行接管操作，"
+            f"本次操作将在{max_sec}秒后超时"
+        )
+        try:
+            await event.send(MessageChain().message(notice))
+        except Exception as e:
+            logger.warning(f"[Takeover] 通知用户失败: {e}")
+        # 让首个 yield 立即把通知推出去
+        yield
+
+        # ---------- 2. 建立接管会话 ----------
+        try:
+            viewport = (1280, 720)
+            try:
+                viewport = await self.browser_supervisor.call("viewport_size")
+            except Exception:
+                pass
+
+            async def _browser_call(method: str, **kwargs):
+                return await self.browser_supervisor.call(method, **kwargs)
+
+            sess = await self.takeover_manager.open(
+                umo=event.unified_msg_origin,
+                reason=reason,
+                browser_call=_browser_call,
+                viewport=viewport,
+            )
+        except Exception as e:
+            logger.error(f"[Takeover] 开启会话失败: {e}", exc_info=True)
+            yield {"status": "error", "message": f"开启接管失败: {_safe_error_msg(e)}"}
+            return
+
+        logger.info(f"[Takeover] AI 请求接管，原因: {reason}")
+
+        # ---------- 3. 心跳保活等待 ----------
+        try:
+            while not sess.finished.is_set():
+                try:
+                    await asyncio.wait_for(sess.finished.wait(), timeout=2.0)
+                    break
+                except asyncio.TimeoutError:
+                    # 心跳：重置框架的 tool_call_timeout 计时
+                    yield
+        except asyncio.CancelledError:
+            await self.takeover_manager.end(REASON_ABORTED)
+            raise
+
+        # ---------- 4. 结束：截图 + 说明回给 AI ----------
+        ended_reason = sess.end_reason or REASON_ABORTED
+        note = REASON_TEXT.get(ended_reason, "接管已结束。")
+
+        # 兜底：清理浏览器残留的投屏
+        try:
+            await self.browser_supervisor.call("stop_screencast")
+        except Exception:
+            pass
+
+        shot = None
+        try:
+            shot = await self.browser_supervisor.call("screenshot")
+            if shot:
+                shot = self._convert_image(shot)
+        except Exception as e:
+            logger.warning(f"[Takeover] 结束后截图失败: {e}")
+
+        detail = note
+        if ended_reason == REASON_USER_END:
+            detail = "用户已完成操作，请根据截图内容继续操作。"
+        elif ended_reason == REASON_MAX_TIMEOUT:
+            detail = (f"本次接管因达到时长上限（{sess.max_seconds}秒）由系统自动结束，"
+                      "并非用户手动结束。请检查用户是否已完成操作，"
+                      "若未完成可再次请求接管。")
+        elif ended_reason == REASON_IDLE_TIMEOUT:
+            detail = (f"用户在 {sess.idle_seconds} 秒内没有任何操作，系统已自动结束接管并交还权限。"
+                      "请检查用户是否已完成操作。")
+
+        msg = (
+            f"👤 用户接管已结束（原因：{note}）\n"
+            f"用户共执行 {sess.action_count} 次操作，"
+            f"持续 {sess.elapsed:.0f} 秒。\n\n"
+            f"{detail}"
+        )
+
+        if shot:
+            yield {
+                "status": "success",
+                "message": msg + "\n\n💡 已附上接管结束时的最新截图。",
+                "screenshot": shot,
+            }
+            return
+        yield {"status": "success", "message": msg + "\n\n（截图获取失败，可用 browser_screenshot 重试）"}
+
     def _init_action_overlay(self):
         """初始化操作图标叠加组件（图标随包分发，只读；产物写 data_dir）。"""
         try:
@@ -3653,6 +3844,32 @@ class Main(Star):
             logger.warning(f"[Browser] 操作图标叠加初始化失败（功能不可用）: {e}")
 
     # ==================== 浏览器操作增强显示（v5.3.0） ====================
+
+    # 每次浏览器操作后固定携带的提示（无条件，不依赖失败检测）
+    # 目的：让 AI 在任何时刻都知道「接管」这根救命绳存在
+    _TAKEOVER_HINT = (
+        "\n\n💡 若遇到验证码 / 滑块 / 人机校验等无法自动完成的步骤，"
+        "可用 request_browser_takeover 请求用户接管"
+        "（工具名可直接用于 run_wyc_tool，无需搜索）"
+    )
+
+    # 动作速查（补全 browser_wait / browser_scroll —— 这两个最容易漏）
+    _BROWSER_ACTION_HINT = (
+        "📌 动作速查：点击 browser_click(x,y) · 输入 browser_input_at(x,y,text) · "
+        "静候加载 browser_wait(seconds) · 翻页 browser_scroll(方向) · "
+        "拖拽 browser_drag(...) · 长按 browser_long_press(x,y)"
+    )
+
+    def _with_takeover_hint(self, message: str) -> str:
+        """给浏览器工具的返回消息追加接管提示与动作速查。"""
+        try:
+            if not isinstance(message, str) or not message:
+                return message
+            if "request_browser_takeover" in message:
+                return message
+            return message + self._TAKEOVER_HINT
+        except Exception:
+            return message
 
     # 会触发「操作展示」的浏览器工具（截图上叠加图标 + 强制推送）
     _BROWSER_TOOL_NAMES = {
@@ -3834,6 +4051,12 @@ class Main(Star):
             self.context.register_web_api(f"/{PLUGIN_NAME}/memory_dedupe", self.handle_memory_dedupe, ["POST"], "记忆一键去重")
             self.context.register_web_api(f"/{PLUGIN_NAME}/memory_export", self.handle_memory_export, ["GET"], "导出记忆")
             self.context.register_web_api(f"/{PLUGIN_NAME}/memory_import", self.handle_memory_import, ["POST"], "导入记忆")
+            # 浏览器接管（v5.4.0）
+            self.context.register_web_api(f"/{PLUGIN_NAME}/takeover_status", self.handle_takeover_status, ["GET"], "接管状态")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/takeover_stream", self.handle_takeover_stream, ["GET"], "接管画面流(SSE)")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/takeover_action", self.handle_takeover_action, ["POST"], "接管操作注入")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/takeover_end", self.handle_takeover_end, ["POST"], "结束接管")
+            self.context.register_web_api(f"/{PLUGIN_NAME}/takeover_probe", self.handle_takeover_probe, ["POST"], "接管画面带宽探测")
             self.context.register_web_api(f"/{PLUGIN_NAME}/scheduled_messages", self.handle_get_scheduled_messages, ["GET"], "获取定时消息")
             self.context.register_web_api(f"/{PLUGIN_NAME}/add_scheduled_message", self.handle_add_scheduled_message, ["POST"], "添加定时消息")
             self.context.register_web_api(f"/{PLUGIN_NAME}/cancel_scheduled_message", self.handle_cancel_scheduled_message, ["POST"], "取消定时消息")
@@ -4083,6 +4306,121 @@ class Main(Star):
             })
         except Exception as e:
             logger.error(f"[WebUI] 导入记忆失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    # ---------- 浏览器接管（v5.4.0） ----------
+
+    async def handle_takeover_status(self):
+        """查询接管状态与浏览器可用性。"""
+        try:
+            browser_ready = bool(self.browser_supervisor)
+            if browser_ready:
+                # 进一步确认浏览器实际已启动（懒加载，未用过时为 None）
+                try:
+                    browser_ready = bool(getattr(self.browser_supervisor, "browser", None))
+                except Exception:
+                    browser_ready = self.browser_supervisor is not None
+
+            mgr = self.takeover_manager
+            sess = mgr.session
+            payload = {
+                "success": True,
+                "browser_enabled": bool(self.browser_supervisor) and self.config.get("enabled", True),
+                "browser_running": browser_ready,
+                "active": mgr.is_active(),
+                "session": sess.status_payload() if sess else None,
+                "max_seconds": mgr.max_seconds,
+                "idle_seconds": mgr.idle_seconds,
+            }
+            if sess and not sess.finished.is_set():
+                payload["reason"] = sess.reason
+                payload["viewport"] = list(sess.viewport)
+                payload["frame_size"] = list(sess.frame_size)
+            return jsonify(payload)
+        except Exception as e:
+            logger.error(f"[Takeover] 查询状态失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_takeover_stream(self):
+        """SSE 画面流：持续推送帧 + 状态。"""
+        from starlette.responses import StreamingResponse
+
+        mgr = self.takeover_manager
+        if not mgr.session:
+            return jsonify({"success": False, "error": "当前没有进行中的接管会话"})
+
+        viewer_id = uuid.uuid4().hex[:10]
+        return StreamingResponse(
+            mgr.stream_for(viewer_id),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
+    async def handle_takeover_action(self):
+        """接收前端操作并注入浏览器。"""
+        try:
+            data = await request.get_json() or {}
+            sess = self.takeover_manager.session
+            if not sess or sess.finished.is_set():
+                return jsonify({"success": False, "error": "接管已结束"})
+
+            action = data.get("action", "")
+            payload = data.get("data") or {}
+            result = await sess.apply_action(action, payload)
+            return jsonify({
+                "success": result.get("ok", False),
+                "error": result.get("error"),
+                "action_count": sess.action_count,
+                "remaining_idle": round(sess.remaining_idle, 1),
+            })
+        except Exception as e:
+            logger.error(f"[Takeover] 操作注入失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_takeover_end(self):
+        """用户点击「结束操作」。"""
+        try:
+            mgr = self.takeover_manager
+            if not mgr.session or mgr.session.finished.is_set():
+                return jsonify({"success": False, "error": "当前没有进行中的接管会话"})
+            count = mgr.session.action_count
+            await mgr.end(REASON_USER_END)
+            return jsonify({
+                "success": True,
+                "message": "已结束接管，操作权交还 AI",
+                "action_count": count,
+            })
+        except Exception as e:
+            logger.error(f"[Takeover] 结束接管失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": _safe_error_msg(e)})
+
+    async def handle_takeover_probe(self):
+        """
+        带宽探测：返回指定大小的随机数据，供前端测实际吞吐。
+
+        前端据此推算可持续的单帧大小，再取 80% 作为实际预算，
+        映射为 JPEG quality + 最大宽度，实现「自动检测最佳画质」。
+        """
+        try:
+            data = await request.get_json() or {}
+            try:
+                size_kb = int(data.get("size_kb", 100))
+            except (TypeError, ValueError):
+                size_kb = 100
+            size_kb = max(1, min(size_kb, 2048))
+            blob = os.urandom(size_kb * 1024)
+            import base64 as _b64
+            return jsonify({
+                "success": True,
+                "size_kb": size_kb,
+                "payload": _b64.b64encode(blob).decode("ascii"),
+            })
+        except Exception as e:
+            logger.error(f"[Takeover] 带宽探测失败: {e}", exc_info=True)
             return jsonify({"success": False, "error": _safe_error_msg(e)})
 
     async def handle_get_scheduled_messages(self):
@@ -8238,6 +8576,27 @@ AI语音：角色（获取可用的AI语音角色列表）、语音（发送指�
                 inject_parts.append(f"[AI语音配置] 默认角色ID为 '{self.ai_default_character}'。调用 send_ai_voice 时若未指定角色，将自动使用此默认值。")
             else:
                 inject_parts.append("[AI语音配置] 未设置默认角色。调用 send_ai_voice 时若未指定角色，将自动选择第一个可用角色。")
+
+            # [浏览器能力] 仅在浏览器会话活跃时注入（不用浏览器则零 token 成本）
+            # 目的：让 AI 在做浏览器任务期间持续知道「接管」这根救命绳存在，
+            #       覆盖"AI 静默放弃、一个工具都不调"这类无法被检测的场景。
+            try:
+                if self.browser_supervisor and getattr(self.browser_supervisor, "browser", None):
+                    if self.takeover_manager.is_active():
+                        sess = self.takeover_manager.session
+                        inject_parts.append(
+                            f"[浏览器能力] 浏览器当前正由真人用户接管操作中"
+                            f"（剩余 {sess.remaining_max:.0f} 秒）。"
+                            f"请等待用户完成，结束后系统会自动把最新截图返回给你。"
+                        )
+                    else:
+                        inject_parts.append(
+                            "[浏览器能力] 当前浏览器会话活跃。可用 request_browser_takeover "
+                            "把操作权临时交给真人用户（适用于验证码/滑块/人机校验等"
+                            "无法自动完成的环节）；普通操作失败请先自行重试，不要随意转交。"
+                        )
+            except Exception:
+                pass
 
             if self.enable_human_typing and event.is_private_chat():
                 user_key = event.unified_msg_origin
