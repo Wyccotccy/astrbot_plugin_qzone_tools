@@ -131,24 +131,38 @@
         .field:last-child { margin-bottom: 0; }
         .field > label { display: block; font-size: 12.5px; font-weight: 600; color: var(--text-2); margin-bottom: 6px; }
 
-        input[type="text"], input[type="number"], input[type="password"], textarea, select {
+        /* 文本类控件统一样式。
+           注意：必须显式包含 input:not([type])——未写 type 属性的 <input> 虽然
+           实际是 text 类型，但 input[type="text"] 选择器并不匹配它，会漏掉样式
+           而显示成浏览器原生黑框。 */
+        input[type="text"], input[type="number"], input[type="password"],
+        input[type="search"], input[type="email"], input:not([type]),
+        textarea, select {
             width: 100%; padding: 9px 12px;
             border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
             background: var(--surface-2);
             font-family: inherit; font-size: 13.5px; color: var(--text);
+            -webkit-appearance: none; appearance: none;
             transition: border-color .16s var(--ease), box-shadow .16s var(--ease), background .16s var(--ease);
         }
-        input:focus, textarea:focus, select:focus {
+        input[type="text"]:focus, input[type="number"]:focus, input[type="password"]:focus,
+        input[type="search"]:focus, input[type="email"]:focus, input:not([type]):focus,
+        textarea:focus, select:focus {
             outline: none; background: var(--surface);
             border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft);
         }
+        input::placeholder, textarea::placeholder { color: var(--text-3); opacity: 1; }
         textarea { resize: vertical; min-height: 68px; font-size: 13px; line-height: 1.55; }
         select {
-            cursor: pointer; appearance: none;
+            cursor: pointer;
             background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b93a8' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
             background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px;
         }
         input[type="range"] { width: 100%; accent-color: var(--primary); cursor: pointer; }
+        /* 复选框统一外观（避免各平台原生样式差异） */
+        input[type="checkbox"]:not(.switch-row input) {
+            accent-color: var(--primary);
+        }
 
         .switch-row {
             display: flex; align-items: flex-start; gap: 11px;
@@ -278,22 +292,44 @@
             padding: 13px 14px 11px 38px;
             border-radius: var(--radius-sm);
             background: var(--surface-2); border: 1px solid var(--border);
+            min-width: 0;               /* 关键：允许网格子项收缩，防止长文本撑破布局 */
+            overflow: hidden;           /* 兜底裁切 */
             transition: border-color .16s var(--ease), background .16s var(--ease);
         }
         .mem-card:hover { border-color: var(--border-strong); }
         .mem-card.sel { background: var(--primary-soft); border-color: var(--primary); }
         .mem-card .pick { position: absolute; left: 12px; top: 14px; width: 16px; height: 16px; accent-color: var(--primary); cursor: pointer; }
-        .mem-card .body { font-size: 13px; line-height: 1.6; word-break: break-word; }
+        .mem-card .body {
+            font-size: 13px; line-height: 1.6;
+            min-width: 0;
+            overflow-wrap: anywhere;    /* 长英文/URL/无空格串强制断行 */
+            word-break: break-word;
+            /* 折叠过长的记忆内容，避免卡片高矮悬殊、手机端刷不完 */
+            display: -webkit-box;
+            -webkit-line-clamp: 6;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        .mem-card .body.expanded { -webkit-line-clamp: unset; display: block; }
         .mem-card .tags { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 8px; }
-        .mem-card .chip { font-size: 10.5px; padding: 1.5px 8px; border-radius: 20px; background: var(--primary-soft); color: var(--primary); font-weight: 550; }
+        .mem-card .chip {
+            font-size: 10.5px; padding: 1.5px 8px; border-radius: 20px;
+            background: var(--primary-soft); color: var(--primary); font-weight: 550;
+            max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
         .mem-card .chip.imp-h { background: var(--danger-soft); color: #a83b34; }
         .mem-card .chip.imp-m { background: var(--warn-soft); color: #a5670c; }
         .mem-card .chip.imp-l { background: rgba(120,128,155,.12); color: var(--text-2); }
         .mem-card .foot {
             display: flex; justify-content: space-between; align-items: center; gap: 8px;
             margin-top: 10px; padding-top: 9px; border-top: 1px dashed var(--border);
+            min-width: 0;
         }
-        .mem-card .uid { font-size: 11px; color: var(--text-3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .mem-card .uid {
+            font-size: 11px; color: var(--text-3);
+            flex: 1; min-width: 0;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
         .mem-card .ops { display: flex; gap: 5px; flex-shrink: 0; }
 
         .tabbar { display: none; }
@@ -320,7 +356,23 @@
             .two-col, .three-col { grid-template-columns: 1fr; }
             .stat-grid { grid-template-columns: repeat(2, 1fr); }
             .mem-grid, .tool-grid { grid-template-columns: 1fr; }
-            .bulk-bar input[type="number"], .bulk-bar input[type="text"] { width: 96px; }
+
+            /* 手机端：筛选/批量栏改为纵向堆叠，避免元素被压扁成一团 */
+            .filter-bar { gap: 8px; }
+            .filter-bar input[type="text"] { flex: 1 1 100%; min-width: 0; }
+            .filter-bar select { flex: 1 1 calc(50% - 4px); min-width: 0; }
+            .filter-bar .btn { flex: 1 1 100%; }
+            .bulk-bar { gap: 8px; }
+            .bulk-bar .spacer { display: none; }
+            .bulk-bar input[type="number"], .bulk-bar input[type="text"] {
+                width: auto; flex: 1 1 calc(50% - 4px); min-width: 0;
+            }
+            .bulk-bar .btn { flex: 1 1 calc(50% - 4px); }
+            /* 记忆卡片：内容区留够宽度，长文本不撑破 */
+            .mem-card { padding: 13px 13px 11px 36px; }
+            .mem-card .pick { left: 11px; }
+            /* 拖动参数的坐标输入在手机端两两成行 */
+            .tool-item select { min-width: 124px; }
 
             .tabbar {
                 display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 100;
@@ -357,6 +409,34 @@
             white-space: pre-wrap; font-size: 11.5px; line-height: 1.6; color: var(--text-2); overflow-x: auto;
         }
         .sig { text-align: center; font-size: 11px; color: var(--text-3); opacity: .55; padding: 18px 0 6px; }
+
+        /* ==================== 自定义确认弹窗 ====================
+           iframe 沙箱里浏览器原生 confirm() 会被拦截（返回 undefined 且不弹窗），
+           导致"点删除没反应"，必须自带弹窗。 */
+        .modal-mask {
+            position: fixed; inset: 0; z-index: 9998;
+            background: rgba(20, 26, 44, 0.42);
+            backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+            display: flex; align-items: center; justify-content: center;
+            padding: 20px;
+            opacity: 0; pointer-events: none;
+            transition: opacity .18s var(--ease);
+        }
+        .modal-mask.show { opacity: 1; pointer-events: auto; }
+        .modal {
+            width: 100%; max-width: 380px;
+            background: var(--surface);
+            border-radius: 15px;
+            box-shadow: 0 20px 60px rgba(15, 20, 38, 0.28);
+            padding: 22px 22px 18px;
+            transform: translateY(10px) scale(.97);
+            transition: transform .18s var(--ease);
+        }
+        .modal-mask.show .modal { transform: translateY(0) scale(1); }
+        .modal-title { font-size: 15.5px; font-weight: 650; margin-bottom: 8px; }
+        .modal-body { font-size: 13px; color: var(--text-2); line-height: 1.65; word-break: break-word; }
+        .modal-body .hl { color: var(--danger); font-weight: 650; }
+        .modal-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 18px; }
     </style>
 </head>
 <body>
@@ -793,7 +873,7 @@
                                 <span>全选</span>
                             </label>
                             <span>已选 <span class="count" id="memSelCount">0</span> 条</span>
-                            <span style="flex:1"></span>
+                            <span class="spacer" style="flex:1"></span>
                             <input type="number" id="bulkImportance" min="1" max="10" value="8" placeholder="重要度" />
                             <button class="btn btn-ghost btn-xs" id="bulkImportanceBtn">改重要度</button>
                             <input type="text" id="bulkTag" placeholder="新标签" />
@@ -929,6 +1009,18 @@
         </button>
     </nav>
 
+    <!-- ============ 自定义确认弹窗（替代被沙箱拦截的原生 confirm） ============ -->
+    <div class="modal-mask" id="confirmMask">
+        <div class="modal">
+            <div class="modal-title" id="confirmTitle">确认操作</div>
+            <div class="modal-body" id="confirmBody"></div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="confirmCancel">取消</button>
+                <button class="btn btn-danger" id="confirmOk">确定</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Inlined bridge SDK -->
     <script>
 if (!window.AstrBotPluginPage) {
@@ -1037,6 +1129,38 @@ if (!window.AstrBotPluginPage) {
         const val = id => { const el = document.getElementById(id); return el ? el.value : ''; };
         const checked = id => { const el = document.getElementById(id); return el ? el.checked : false; };
         const num = (id, fb) => { const n = parseInt(val(id), 10); return isNaN(n) ? fb : n; };
+
+        // ==================== 确认弹窗 ====================
+        // 插件页面运行在 iframe 中，原生 confirm() 会被沙箱拦截（静默返回 false），
+        // 造成"点删除没反应"。这里用自带弹窗替代，返回 Promise<boolean>。
+        const confirmMask = document.getElementById('confirmMask');
+        const confirmTitle = document.getElementById('confirmTitle');
+        const confirmBody = document.getElementById('confirmBody');
+        const confirmOkBtn = document.getElementById('confirmOk');
+        const confirmCancelBtn = document.getElementById('confirmCancel');
+        let _confirmResolve = null;
+
+        function askConfirm(message, opts) {
+            const o = opts || {};
+            confirmTitle.textContent = o.title || '确认操作';
+            confirmBody.innerHTML = message;   // 调用方自行保证内容安全
+            confirmOkBtn.textContent = o.okText || '确定';
+            confirmOkBtn.className = 'btn ' + (o.danger === false ? '' : 'btn-danger');
+            confirmMask.classList.add('show');
+            return new Promise(resolve => { _confirmResolve = resolve; });
+        }
+
+        function closeConfirm(result) {
+            confirmMask.classList.remove('show');
+            if (_confirmResolve) { _confirmResolve(result); _confirmResolve = null; }
+        }
+
+        confirmOkBtn.addEventListener('click', () => closeConfirm(true));
+        confirmCancelBtn.addEventListener('click', () => closeConfirm(false));
+        confirmMask.addEventListener('click', e => { if (e.target === confirmMask) closeConfirm(false); });
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape' && confirmMask.classList.contains('show')) closeConfirm(false);
+        });
 
         // ==================== 导航 ====================
         const PAGE_TITLES = {
@@ -1261,7 +1385,7 @@ if (!window.AstrBotPluginPage) {
         }
 
         async function deleteFile(filename) {
-            if (!confirm('确定删除文件 ' + filename + '？')) return;
+            if (!await askConfirm('确定删除文件 <span class="hl">' + escapeHtml(filename) + '</span>？', { title: '删除文件' })) return;
             try {
                 const res = await bridge.apiPost('workspace_delete_file', { filename: filename });
                 if (res.success) { showWsStatus('已删除 ' + filename, 'success'); loadFiles(); }
@@ -1715,9 +1839,13 @@ if (!window.AstrBotPluginPage) {
                 const tags = (m.tags || []).map(t => '<span class="chip">' + escapeHtml(t) + '</span>').join('');
                 const imp = parseInt(m.importance, 10) || 5;
                 const sel = selectedMemoryIds.has(mid);
+                const raw = String(m.content || '');
+                const isLong = raw.length > 160;
                 return '<div class="mem-card' + (sel ? ' sel' : '') + '" data-id="' + escapeHtml(mid) + '">' +
                     '<input type="checkbox" class="pick" ' + (sel ? 'checked' : '') + ' data-pick="' + escapeHtml(mid) + '" />' +
-                    '<div class="body">' + escapeHtml(m.content) + '</div>' +
+                    '<div class="body" data-body="' + escapeHtml(mid) + '">' + escapeHtml(raw) + '</div>' +
+                    (isLong ? '<button class="btn btn-ghost btn-xs" data-more="' + escapeHtml(mid) + '" ' +
+                              'style="margin-top:6px;padding:2px 9px;font-size:11px;">展开全文</button>' : '') +
                     '<div class="tags">' + tags +
                         '<span class="chip ' + importanceClass(imp) + '">重要 ' + imp + '</span>' +
                     '</div>' +
@@ -1738,6 +1866,14 @@ if (!window.AstrBotPluginPage) {
                     if (cb.checked) { selectedMemoryIds.add(mid); card.classList.add('sel'); }
                     else { selectedMemoryIds.delete(mid); card.classList.remove('sel'); }
                     updateSelCount();
+                });
+            });
+            container.querySelectorAll('[data-more]').forEach(b => {
+                b.addEventListener('click', () => {
+                    const body = container.querySelector('[data-body="' + b.dataset.more + '"]');
+                    if (!body) return;
+                    const expanded = body.classList.toggle('expanded');
+                    b.textContent = expanded ? '收起' : '展开全文';
                 });
             });
             container.querySelectorAll('[data-edit]').forEach(b => {
@@ -1787,7 +1923,7 @@ if (!window.AstrBotPluginPage) {
         }
 
         async function deleteMemory(id) {
-            if (!confirm('确定删除该记忆？')) return;
+            if (!await askConfirm('确定删除这条记忆？此操作不可撤销。', { title: '删除记忆' })) return;
             try {
                 const res = await bridge.apiPost('delete_memory', { memory_id: id });
                 if (res.success) {
@@ -1854,9 +1990,11 @@ if (!window.AstrBotPluginPage) {
             } catch (e) { showMemoryStatus(e.message, 'error'); }
         }
 
-        document.getElementById('bulkDeleteBtn').addEventListener('click', () => {
+        document.getElementById('bulkDeleteBtn').addEventListener('click', async () => {
             if (!selectedMemoryIds.size) { showMemoryStatus('请先勾选要删除的记忆', 'error'); return; }
-            if (!confirm('确定删除选中的 ' + selectedMemoryIds.size + ' 条记忆？此操作不可撤销。')) return;
+            const n = selectedMemoryIds.size;
+            if (!await askConfirm('确定删除选中的 <span class="hl">' + n + '</span> 条记忆？此操作不可撤销。',
+                                  { title: '批量删除记忆' })) return;
             memoryBatch({ action: 'delete' }, '已删除');
         });
         document.getElementById('bulkImportanceBtn').addEventListener('click', () => {
@@ -1912,7 +2050,10 @@ if (!window.AstrBotPluginPage) {
                 if (!chk.success) throw new Error(chk.error || '检测失败');
                 const removable = chk.removable || 0;
                 if (!removable) { hint.textContent = '未发现重复'; showMemoryStatus('没有发现重复记忆', 'success'); return; }
-                if (!confirm('发现 ' + removable + ' 条重复记忆（' + chk.groups.length + ' 组），确定清理？\n每组只保留最早的一条。')) {
+                if (!await askConfirm(
+                        '发现 <span class="hl">' + removable + '</span> 条重复记忆（' + chk.groups.length + ' 组），确定清理？<br>' +
+                        '<span style="font-size:12px;color:var(--text-3)">每组只保留最早的一条。</span>',
+                        { title: '清理重复记忆', okText: '清理' })) {
                     hint.textContent = '发现 ' + removable + ' 条重复（未清理）';
                     return;
                 }
@@ -1965,7 +2106,7 @@ if (!window.AstrBotPluginPage) {
         }
 
         async function cancelSchedule(id) {
-            if (!confirm('确定取消该定时消息？')) return;
+            if (!await askConfirm('确定取消该定时消息？', { title: '取消定时消息' })) return;
             try {
                 const res = await bridge.apiPost('cancel_scheduled_message', { task_id: id });
                 if (res.success) {

@@ -784,16 +784,30 @@ class BrowserCore:
             fmt = get_format_from_config(self.config)  # webp / png / jpg (实时读取)
             # Playwright 只支持 png / jpeg，webp 必须先存 PNG 再转换
             pw_format = "png" if fmt == "webp" else IMG_FORMAT_MAP.get(fmt, "jpeg").lower()
-            shot_kwargs: dict[str, Any] = {"full_page": full_page}
-            if pw_format != "png":
-                shot_kwargs["quality"] = min(self.config.get("screenshot_quality", 80), 100)
+            quality = min(self.config.get("screenshot_quality", 80), 100)
 
-            async def _shot():
+            async def _shot() -> bytes | None:
                 if zoom_factor:
                     await page.evaluate(f"document.body.style.zoom = {zoom_factor};")
                     await page.evaluate("window.scrollTo(0, 0);")
 
-                return await page.screenshot(type=pw_format, **shot_kwargs)
+                # 优先用 CDP 直接截图：Playwright 的 page.screenshot() 在截图前会等待
+                # document.fonts.ready（所有字体加载完成），遇到字体请求卡住不返回的
+                # 站点（如百度首页）会一直等到超时，导致「点击成功但截图失败」。
+                # CDP 的 Page.captureScreenshot 不做这一等待，实测 0.1 秒返回。
+                raw = await self._cdp_screenshot(page, pw_format, quality, full_page)
+                if raw is not None:
+                    return raw
+
+                # 回退：CDP 不可用时用原生方式（并加超时保护，避免拖死整个流程）
+                shot_kwargs: dict[str, Any] = {"full_page": full_page}
+                if pw_format != "png":
+                    shot_kwargs["quality"] = quality
+                try:
+                    return await page.screenshot(type=pw_format, timeout=15000, **shot_kwargs)
+                except Exception as e:
+                    logger.warning(f"[Browser] 原生截图也失败: {str(e)[:160]}")
+                    return None
 
             raw: bytes = await _shot()
 
@@ -820,6 +834,54 @@ class BrowserCore:
                     return str(tmp_path)
             else:
                 return str(tmp_path)
+
+    async def _cdp_screenshot(self, page, pw_format: str, quality: int,
+                              full_page: bool) -> bytes | None:
+        """
+        用 CDP 直接截图，绕过 Playwright 的「等待字体加载完成」环节。
+
+        某些站点存在长期挂起的字体请求，Playwright 原生截图会一直等到超时；
+        CDP 的 Page.captureScreenshot 不做该等待，可稳定秒级返回。
+        失败时返回 None，由调用方回退到原生截图。
+        """
+        client = None
+        try:
+            client = await page.context.new_cdp_session(page)
+            params: dict[str, Any] = {
+                "format": pw_format,
+                "fromSurface": True,
+                "captureBeyondViewport": bool(full_page),
+            }
+            if pw_format != "png":
+                params["quality"] = quality
+            if full_page:
+                metrics = await client.send("Page.getLayoutMetrics")
+                css = metrics.get("cssContentSize") or metrics.get("contentSize")
+                if css:
+                    params["clip"] = {
+                        "x": 0,
+                        "y": 0,
+                        "width": css.get("width", 0),
+                        "height": css.get("height", 0),
+                        "scale": 1,
+                    }
+            resp = await asyncio.wait_for(
+                client.send("Page.captureScreenshot", params), timeout=20
+            )
+            data = resp.get("data") if isinstance(resp, dict) else None
+            if not data:
+                return None
+            import base64 as _b64
+            return _b64.b64decode(data)
+        except Exception as e:
+            logger.debug(f"[Browser] CDP 截图不可用，将回退原生方式: {str(e)[:160]}")
+            return None
+        finally:
+            if client is not None:
+                try:
+                    await client.detach()
+                except Exception:
+                    pass
 
     # ======================================================
     # 页面访问
