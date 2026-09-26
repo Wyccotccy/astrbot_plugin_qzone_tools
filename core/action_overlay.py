@@ -24,11 +24,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-try:
-    from astrbot.api import logger
-except Exception:  # pragma: no cover - 极端环境兜底
-    import logging
-    logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 # 图标文件名（与 resource/action_icons 下保持一致）
 ICON_CLICK = "01-点击-click.png"

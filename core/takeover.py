@@ -15,8 +15,6 @@
 - **仅冻结浏览器**：接管期间 AI 的其他工具（发消息、记忆等）不受影响
 - **画面广播**：CDP Page.startScreencast 变化驱动推帧，广播给所有 SSE 订阅者
 - **丢帧不丢延迟**：每个订阅者只保留最新一帧，避免慢客户端拖垮整体
-
-本模块不直接依赖 AstrBot，便于单独测试。
 """
 
 from __future__ import annotations
@@ -29,12 +27,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-try:
-    from astrbot.api import logger
-except Exception:  # pragma: no cover - 极端环境兜底
-    import logging
-
-    logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 
 # ==================== 结束原因 ====================

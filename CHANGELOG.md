@@ -1,3 +1,33 @@
+## [5.6.1] - 2026-09-26
+
+### 🔧 合规修复：移除内置 logging 兜底
+
+市场安全审查指出 `core/action_overlay.py` 与 `core/takeover.py` 的 `try/except` 兜底分支
+使用了 Python 内置 `logging` 模块。按日志规范，logger 必须且只能从 `astrbot.api` 导入。
+
+```python
+# 修改前
+try:
+    from astrbot.api import logger
+except Exception:  # pragma: no cover - 极端环境兜底
+    import logging
+    logger = logging.getLogger(__name__)
+
+# 修改后
+from astrbot.api import logger
+```
+
+全插件复查：7 个模块（main / browser / supervisor / favorite / downloader /
+action_overlay / takeover）的 logger 现均来自 `astrbot.api`，无内置 `logging` 残留。
+
+**验证**
+- `py_compile` 语法通过（action_overlay / takeover / main）
+- 全插件 `grep` 扫描：`import logging`、`from logging`、`logging.getLogger` 均为零命中
+- 真实导入自检：两个模块的 logger 类型均为 `_PluginContextLogger`（来自 `astrbot.api`）
+- 功能回归：前端 12 项、键盘 29 项、后端键盘注入 17 项、唤醒链路 14 项 —— **全部通过**
+
+---
+
 ## [5.6.0] - 2026-09-26
 
 ### ⌨️ 接管页键盘重构：电脑端物理键直通 + 手机端虚拟键盘
