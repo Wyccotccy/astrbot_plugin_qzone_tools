@@ -405,9 +405,40 @@
         .tk-overlay.hide { opacity: 0; }
         .tk-overlay-txt { font-size: 13px; color: #fff; }
 
-        .tk-keybar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+        .tk-keybar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
         .tk-keybar input[type="text"] { flex: 1; min-width: 150px; }
+        .tk-kbd-hint { font-size: 11.5px; color: var(--text-3); }
         .tk-meta { font-size: 11.5px; color: var(--text-3); margin-left: auto; white-space: nowrap; }
+
+        /* ---- 虚拟键盘 ---- */
+        .tk-keys { margin-top: 10px; }
+        .tk-krow { display: flex; gap: 6px; margin-bottom: 6px; }
+        .tk-key {
+            flex: 1 1 0;
+            min-width: 0;
+            padding: 9px 4px;
+            font-size: 12.5px;
+            font-weight: 550;
+            font-family: inherit;
+            color: var(--text-1);
+            background: var(--bg-soft, #f1f3f7);
+            border: 1px solid var(--border-strong);
+            border-radius: 8px;
+            cursor: pointer;
+            user-select: none;
+            -webkit-user-select: none;
+            transition: background .12s, transform .06s;
+        }
+        .tk-key:active { background: var(--primary-soft); transform: scale(.96); }
+        .tk-key-wide { flex: 1.35 1 0; }
+        .tk-keys-mobile .tk-key { padding: 12px 4px; font-size: 14px; min-height: 44px; }
+
+        /* 设备分流：默认（宽屏/电脑）显示桌面键盘，窄屏显示手机键盘 */
+        .tk-keys-mobile { display: none; }
+        @media (max-width: 900px) {
+            .tk-keys-desktop { display: none; }
+            .tk-keys-mobile { display: block; }
+        }
 
         @media (max-width: 900px) {
             .sidebar { display: none; }
@@ -992,12 +1023,57 @@
                             </div>
                         </div>
 
+                        <!-- 键盘：电脑端自动捕获物理按键，手机端用下方虚拟键盘 -->
                         <div class="tk-keybar">
                             <input type="text" id="tkKeyInput" placeholder="输入文字后回车（或点发送）" autocomplete="off" />
                             <button class="btn btn-sm" id="tkKeySend">发送</button>
-                            <button class="btn btn-ghost btn-sm" id="tkKeyEsc">Esc</button>
-                            <button class="btn btn-ghost btn-sm" id="tkKeyEnter">Enter</button>
-                            <button class="btn btn-ghost btn-sm" id="tkKeyTab">Tab</button>
+                            <button class="btn btn-ghost btn-sm" id="tkKeyClear" title="清空输入框">清空</button>
+                            <span class="tk-kbd-hint" id="tkKbdHint"></span>
+                        </div>
+
+                        <!-- 电脑端：物理键盘已直通，这里只放几个特殊键 -->
+                        <div class="tk-keys tk-keys-desktop" id="tkKeysDesktop">
+                            <button class="tk-key tk-key-wide" data-key="Escape">Esc</button>
+                            <button class="tk-key tk-key-wide" data-key="Enter">Enter</button>
+                            <button class="tk-key tk-key-wide" data-key="Tab">Tab</button>
+                            <button class="tk-key tk-key-wide" data-key="Backspace">退格</button>
+                            <button class="tk-key tk-key-wide" data-key="Delete">Del</button>
+                            <button class="tk-key" data-key="ArrowUp" title="上">↑</button>
+                            <button class="tk-key" data-key="ArrowDown" title="下">↓</button>
+                            <button class="tk-key" data-key="ArrowLeft" title="左">←</button>
+                            <button class="tk-key" data-key="ArrowRight" title="右">→</button>
+                            <button class="tk-key tk-key-wide" data-key="Home">Home</button>
+                            <button class="tk-key tk-key-wide" data-key="End">End</button>
+                            <button class="tk-key tk-key-wide" data-key="PageUp">PgUp</button>
+                            <button class="tk-key tk-key-wide" data-key="PageDown">PgDn</button>
+                        </div>
+
+                        <!-- 手机端：完整虚拟键盘（含方向键与删除键） -->
+                        <div class="tk-keys tk-keys-mobile" id="tkKeysMobile">
+                            <div class="tk-krow">
+                                <button class="tk-key" data-key="Escape">Esc</button>
+                                <button class="tk-key" data-key="Tab">Tab</button>
+                                <button class="tk-key" data-key="Enter">Enter</button>
+                            </div>
+                            <div class="tk-krow">
+                                <button class="tk-key" data-key="ArrowUp">↑</button>
+                            </div>
+                            <div class="tk-krow">
+                                <button class="tk-key" data-key="ArrowLeft">←</button>
+                                <button class="tk-key" data-key="ArrowDown">↓</button>
+                                <button class="tk-key" data-key="ArrowRight">→</button>
+                            </div>
+                            <div class="tk-krow">
+                                <button class="tk-key" data-key="Backspace">退格</button>
+                                <button class="tk-key" data-key="Delete">删除</button>
+                                <button class="tk-key" data-key="Home">Home</button>
+                                <button class="tk-key" data-key="End">End</button>
+                            </div>
+                            <div class="tk-krow">
+                                <button class="tk-key" data-key="PageUp">PgUp</button>
+                                <button class="tk-key" data-key="PageDown">PgDn</button>
+                                <button class="tk-key" data-key="Space">空格</button>
+                            </div>
                         </div>
 
                         <div class="btn-row" style="margin-top:14px;">
@@ -2475,19 +2551,42 @@ if (!window.AstrBotPluginPage) {
         }
 
         // ---- 发送操作到后端 ----
+        // 只有「鼠标移动」允许丢帧（位置类事件，最新值即最优）；
+        // 按键、点击、滚轮等必须排队串行发送，否则快速打字会丢字。
         let tkSendBusy = false;
+        const tkSendQueue = [];
+        const TK_QUEUE_MAX = 60;   // 防止极端情况无限堆积
+
+        function isDroppable(action, data) {
+            return action === 'mouse' && (data || {}).kind === 'move';
+        }
+
         async function sendAction(action, data) {
             if (!tkActiveFlag) return;
-            // 拖动时允许并发（move 事件密集），其余串行避免堆积
-            if (tkSendBusy && action !== 'mouse') return;
+
+            if (isDroppable(action, data) && tkSendBusy) {
+                return;            // 移动类事件：忙时直接丢弃，避免队列堆积导致画面滞后
+            }
+            tkSendQueue.push({ action, data });
+            if (tkSendQueue.length > TK_QUEUE_MAX) {
+                tkSendQueue.splice(0, tkSendQueue.length - TK_QUEUE_MAX);
+            }
+            if (tkSendBusy) return;   // 已有发送循环在跑，由它继续消费
+
             tkSendBusy = true;
             try {
-                const res = await bridge.apiPost('takeover_action', { action: action, data: data });
-                if (res && res.success === false && res.error) {
-                    if (/已结束/.test(res.error)) { exitTakeover(); }
+                while (tkSendQueue.length) {
+                    const item = tkSendQueue.shift();
+                    try {
+                        const res = await bridge.apiPost('takeover_action',
+                                                         { action: item.action, data: item.data });
+                        if (res && res.success === false && res.error) {
+                            if (/已结束/.test(res.error)) { exitTakeover(); break; }
+                        }
+                    } catch (e) {
+                        // 网络抖动忽略，不打断用户操作
+                    }
                 }
-            } catch (e) {
-                // 网络抖动忽略，不打断用户操作
             } finally {
                 tkSendBusy = false;
             }
@@ -2618,19 +2717,69 @@ if (!window.AstrBotPluginPage) {
         }, { passive: false });
 
         // ---- 键盘 ----
+        // 电脑端：直接捕获物理键盘并透传给远端浏览器（打字即所见，体验接近原生）
+        // 手机端：用下方虚拟键盘按钮发送单个按键
+        const TK_KEY_MAP = {
+            ' ': 'Space',
+            'Spacebar': 'Space',
+            'Esc': 'Escape',
+            'Del': 'Delete',
+            'Up': 'ArrowUp',
+            'Down': 'ArrowDown',
+            'Left': 'ArrowLeft',
+            'Right': 'ArrowRight',
+            'Cr': 'Enter',
+        };
+        // 这些键在远端的默认行为会滚动/翻页，需要拦掉本地默认行为
+        const TK_PREVENT_DEFAULT = new Set([
+            'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+            'Space', 'PageUp', 'PageDown', 'Home', 'End',
+            'Backspace', 'Delete', 'Tab', 'Enter',
+        ]);
+        // 这些键不拦截（避免影响用户操作本地界面，如刷新、开发者工具、复制）
+        const TK_PASSTHROUGH_SKIP = new Set([
+            'F5', 'F11', 'F12', 'ContextMenu',
+        ]);
+
         function sendKey(text, key) {
             if (!tkActiveFlag) return;
             const payload = {};
             if (text) payload.text = text;
             if (key) payload.key = key;
+            if (!payload.text && !payload.key) return;
             sendAction('key', payload);
         }
-        document.getElementById('tkKeySend').addEventListener('click', () => {
-            const v = tkKeyInput.value;
-            if (!v) return;
-            sendKey(v, null);
-            tkKeyInput.value = '';
-        });
+
+        // 电脑端：物理键盘直通（需同时满足：接管中 + 停留在接管页 + 焦点不在本地输入框）
+        function isTakeoverPageVisible() {
+            const page = document.getElementById('takeoverPage');
+            return !!(page && page.classList.contains('active'));
+        }
+
+        document.addEventListener('keydown', ev => {
+            if (!tkActiveFlag || !isTakeoverPageVisible()) return;
+            // 焦点在本地输入框（打字框/搜索框等）时不劫持
+            const target = ev.target;
+            if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
+                           || target.isContentEditable)) return;
+            if (TK_PASSTHROUGH_SKIP.has(ev.key)) return;
+
+            // 组合键（Ctrl/Cmd/Alt）交给本地，避免抢掉刷新、复制等操作
+            if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+
+            const key = TK_KEY_MAP[ev.key] || ev.key;
+
+            // 单字符键 → 走“文本输入”，让远端按键入处理（兼容中文与输入法）
+            if (key.length === 1) {
+                sendKey(key, null);
+            } else {
+                sendKey(null, key);
+            }
+
+            if (TK_PREVENT_DEFAULT.has(key)) ev.preventDefault();
+        }, true);
+
+        // 手机端物理键盘一般不存在；若外接键盘则同样直通
         tkKeyInput.addEventListener('keydown', ev => {
             if (ev.key === 'Enter') {
                 ev.preventDefault();
@@ -2639,9 +2788,37 @@ if (!window.AstrBotPluginPage) {
                 else { sendKey(null, 'Enter'); }
             }
         });
-        document.getElementById('tkKeyEsc').addEventListener('click', () => sendKey(null, 'Escape'));
-        document.getElementById('tkKeyEnter').addEventListener('click', () => sendKey(null, 'Enter'));
-        document.getElementById('tkKeyTab').addEventListener('click', () => sendKey(null, 'Tab'));
+        document.getElementById('tkKeySend').addEventListener('click', () => {
+            const v = tkKeyInput.value;
+            if (!v) return;
+            sendKey(v, null);
+            tkKeyInput.value = '';
+        });
+        document.getElementById('tkKeyClear').addEventListener('click', () => {
+            tkKeyInput.value = '';
+            tkKeyInput.focus();
+        });
+
+        // 虚拟键盘按钮（两套布局共用同一套事件）
+        document.querySelectorAll('.tk-key').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const k = btn.dataset.key;
+                if (!k) return;
+                sendKey(null, k);
+                // 点虚拟键后把焦点还给输入框，方便继续打字
+                if (document.activeElement === btn) btn.blur();
+            });
+        });
+
+        // 键盘提示：告诉用户当前设备下怎么输入
+        (function initKbdHint() {
+            const hint = document.getElementById('tkKbdHint');
+            if (!hint) return;
+            const isMobile = window.matchMedia('(max-width: 900px)').matches;
+            hint.textContent = isMobile
+                ? '点上方输入框打字，或用下方按键'
+                : '直接敲键盘即可（特殊键见下方按钮）';
+        })();
 
         // ---- 结束 / 全屏 / 刷新 ----
         document.getElementById('tkEndBtn').addEventListener('click', async () => {
